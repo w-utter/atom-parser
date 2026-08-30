@@ -1,0 +1,817 @@
+#![feature(array_try_map)]
+#![feature(step_trait)]
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AtomSize {
+    #[cfg(not(feature = "extended_sized_atoms"))]
+    size: u32,
+    #[cfg(feature = "extended_sized_atoms")]
+    size: u64,
+}
+
+impl AtomSize {
+    pub fn until_eof(&self) -> bool {
+        self.size == 0
+    }
+
+    const MIN_ATOM_SIZE_32: u32 = 8;
+    #[cfg(feature = "extended_sized_atoms")]
+    const MIN_ATOM_SIZE_64: u64 = 16;
+
+    fn parse<T: Reader>(size: u32, reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        #[cfg(feature = "extended_sized_atoms")]
+        {
+            if !matches!(size, 0 | 1) && size < Self::MIN_ATOM_SIZE_32 {
+                return Err(ParseError::AtomSizeTooSmall)
+            }
+
+            let size = if size == 1 {
+                let extended_size = u64::parse(reader, options)?;
+                if extended_size < Self::MIN_ATOM_SIZE_64 {
+                    return Err(ParseError::AtomSizeTooSmall)
+                }
+                extended_size - Self::MIN_ATOM_SIZE_64
+            } else {
+                (size - Self::MIN_ATOM_SIZE_32) as u64
+            };
+
+            Ok(Self {
+                size
+            })
+        }
+        #[cfg(not(feature = "extended_sized_atoms"))]
+        {
+            if size == 1 {
+                return Err(ParseError::AtomSizeUnsupported);
+            }
+
+            if size != 0 && size < Self::MIN_ATOM_SIZE_32 {
+                return Err(ParseError::AtomSizeTooSmall)
+            }
+
+            Ok(Self {
+                size: size - Self::MIN_ATOM_SIZE_32
+            })
+        }
+    }
+
+    async fn parse_async<T: AsyncReader>(size: u32, reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        #[cfg(feature = "extended_sized_atoms")]
+        {
+            if !matches!(size, 0 | 1) && size < Self::MIN_ATOM_SIZE_32 {
+                return Err(ParseError::AtomSizeTooSmall)
+            }
+
+            let size = if size == 1 {
+                let extended_size = u64::parse_async(reader, options).await?;
+                if extended_size < Self::MIN_ATOM_SIZE_64 {
+                    return Err(ParseError::AtomSizeTooSmall)
+                }
+                extended_size - Self::MIN_ATOM_SIZE_64
+            } else {
+                (size - Self::MIN_ATOM_SIZE_32) as u64
+            };
+
+            Ok(Self {
+                size
+            })
+        }
+        #[cfg(not(feature = "extended_sized_atoms"))]
+        {
+            if size == 1 {
+                return Err(ParseError::AtomSizeUnsupported);
+            }
+
+            if size != 0 && size < Self::MIN_ATOM_SIZE_32 {
+                return Err(ParseError::AtomSizeTooSmall)
+            }
+
+            Ok(Self {
+                size: size - Self::MIN_ATOM_SIZE_32
+            })
+        }
+    }
+}
+
+type IoError = std::io::Error;
+
+#[derive(thiserror::Error, Debug)]
+pub enum ParseError {
+    #[error("Atom Size is too small")]
+    AtomSizeTooSmall,
+    #[cfg(not(feature = "extended_sized_atoms"))]
+    #[error("extended atom sizes (64 bytes) is not supported")]
+    AtomSizeUnsupported,
+    #[error("io error")]
+    Io(#[from] IoError)
+}
+
+macro_rules! parse_integers {
+    ($($i:ty),*,) => {
+        $(
+            impl Parse for $i {
+                fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+                    let mut buf = [0; core::mem::size_of::<$i>()];
+                    reader.read(&mut buf)?;
+
+                    Ok(if matches!(options.endianess, Endianess::Big) {
+                        // likely path
+                        <$i>::from_be_bytes(buf)
+                    } else {
+                        <$i>::from_le_bytes(buf)
+                    })
+                }
+
+                async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+                    let mut buf = [0; core::mem::size_of::<$i>()];
+                    reader.async_read(&mut buf).await?;
+
+                    Ok(if matches!(options.endianess, Endianess::Big) {
+                        // likely path
+                        <$i>::from_be_bytes(buf)
+                    } else {
+                        <$i>::from_le_bytes(buf)
+                    })
+                }
+            }
+        )*
+    }
+}
+
+parse_integers!{
+    u8, u16, u32, u64,
+    i8, i16, i32, i64,
+}
+
+pub trait Parse: Sized {
+    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError>;
+    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError>;
+}
+
+impl <const N: usize, I: Parse> Parse for [I; N] {
+    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let default: [(); N] = [(); N];
+        default.try_map(|_| I::parse(reader, options))
+    }
+
+    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        // TODO: above doesnt work for async
+        todo!()
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+struct FourCC([u8; 4]);
+
+/*
+impl FourCC {
+    const fn new(fcc: [u8; 4]) -> Self {
+        Self(fcc)
+    }
+
+    const fn try_from_str(str: &str) -> Result<Self, >
+}
+*/
+
+impl core::fmt::Debug for FourCC {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", String::from_utf8_lossy(&self.0))
+    }
+}
+
+impl Parse for FourCC {
+    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let inner = u32::parse(reader, options)?;
+        Ok(Self(inner.to_be_bytes()))
+    }
+
+    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let inner = u32::parse_async(reader, options).await?;
+        Ok(Self(inner.to_be_bytes()))
+    }
+}
+
+#[derive(Debug)]
+pub struct AtomHeader {
+    pub size: AtomSize,
+    pub fcc: FourCC,
+}
+
+impl AtomHeader {
+    pub fn skip_atom<T: Reader>(&self, reader: &mut T) -> Result<(), IoError> {
+        reader.seek(self.size.size as _)
+    }
+
+    pub async fn skip_atom_async<T: AsyncReader>(&self, reader: &mut T) -> Result<(), IoError> {
+        reader.async_seek(self.size.size as _).await
+    }
+}
+
+impl Parse for AtomHeader {
+    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let size = u32::parse(reader, options)?;
+        let fcc = FourCC::parse(reader, options)?;
+        let size = AtomSize::parse(size, reader, options)?;
+        Ok(Self {
+            size,
+            fcc,
+        })
+    }
+
+    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let size = u32::parse_async(reader, options).await?;
+        let fcc = FourCC::parse_async(reader, options).await?;
+        let size = AtomSize::parse_async(size, reader, options).await?;
+        Ok(Self {
+            size,
+            fcc,
+        })
+    }
+}
+
+trait Atom: Sized {
+    const FCC: FourCC;
+    // Ok(exact) if known staticly, Err((lower, upper)) if known size range
+    // this is the size *not* including the atoms header (e.g 4 + 4 u32, 4 + 4 + 8 u64)
+    /*
+    const BODY_SIZE: Result<usize, (usize, usize)>;
+    fn parse_body() -> Result<Self, ParseError>;
+    */
+}
+
+pub trait Reader {
+    fn remaining_size(&self) -> usize;
+    fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError>;
+    fn seek(&mut self, amt: usize) -> Result<(), IoError>;
+
+    fn seek_remaining(&mut self) -> Result<(), IoError> {
+        self.seek(self.remaining_size())
+    }
+}
+
+impl <'a, R: Reader> Reader for &'a mut R {
+    fn remaining_size(&self) -> usize {
+        R::remaining_size(self)
+    }
+
+    fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError> {
+        R::read(self, bytes)
+    }
+
+    fn seek(&mut self, amt: usize) -> Result<(), IoError> {
+        R::seek(self, amt)
+    }
+}
+
+pub trait AsyncReader {
+    async fn async_read(&mut self, bytes: &mut [u8]) -> Result<(), IoError>;
+    async fn async_seek(&mut self, amt: usize) -> Result<(), IoError>;
+}
+
+#[derive(Debug, PartialEq, Eq, Default)]
+enum Endianess {
+    #[default]
+    Big,
+    Little,
+}
+
+#[derive(Default)]
+pub struct ParseOptions {
+    endianess: Endianess,
+}
+
+pub struct InMemoryReader {
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+impl InMemoryReader {
+    pub fn from_path<P: AsRef<std::path::Path>>(p: P) -> Result<Self, IoError> {
+        let bytes = std::fs::read(p)?;
+        Ok(Self {
+            bytes,
+            offset: 0,
+        })
+    }
+}
+
+impl Reader for InMemoryReader {
+    fn remaining_size(&self) -> usize {
+        self.bytes.len().checked_sub(self.offset).unwrap_or_default()
+    }
+
+    fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError> {
+        if self.remaining_size() < bytes.len() {
+            return Err(std::io::Error::other("not enough spc"));
+        }
+        bytes.copy_from_slice(&self.bytes[self.offset..self.offset+bytes.len()]);
+        self.offset += bytes.len();
+        Ok(())
+    }
+
+    fn seek(&mut self, amt: usize) -> Result<(), IoError> {
+        if amt > self.remaining_size() {
+            return Err(std::io::Error::other("not enough spc"));
+        }
+        self.offset += amt;
+        Ok(())
+    }
+}
+
+struct Unevaluated<T> {
+    header: AtomHeader,
+    _pd: core::marker::PhantomData<T>,
+}
+
+impl <U: Parse> Unevaluated<U> {
+    fn evaluate<T: Reader>() -> Result<U, ParseError> {
+        todo!()
+    }
+
+    async fn evaluate_async<T: AsyncReader>() -> Result<U, ParseError> {
+        todo!()
+    }
+}
+
+trait Container {
+    type Child;
+    fn children(&self) -> impl Iterator<Item = Result<Self::Child, ParseError>>;
+    // TODO: this needs to be an async iterator
+    fn children_async(&self) -> impl Iterator<Item = Result<Self::Child, ParseError>>;
+}
+
+trait Leaf {
+    // TODO: api to get data
+}
+
+struct TrailingReader<R> {
+    reader: R,
+    remaining_size: usize,
+}
+
+impl <R> TrailingReader<R> {
+    fn new(reader: R, remaining_size: usize) -> Self {
+        Self {
+            reader,
+            remaining_size,
+        }
+    }
+}
+
+impl <R: Reader> Reader for TrailingReader<R> {
+    fn remaining_size(&self) -> usize {
+        self.remaining_size
+    }
+    fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError> {
+        if bytes.len() > self.remaining_size {
+            return Err(std::io::Error::other("not enough spc"));
+        }
+        self.reader.read(bytes)?;
+        self.remaining_size -= bytes.len();
+        Ok(())
+    }
+    fn seek(&mut self, amt: usize) -> Result<(), IoError> {
+        if amt > self.remaining_size {
+            return Err(std::io::Error::other("not enough spc"));
+        }
+        self.reader.seek(amt)?;
+        self.remaining_size -= amt;
+        Ok(())
+    }
+}
+
+struct TrailingIterator<'a, R, T> {
+    reader: &'a mut R,
+    opts: &'a ParseOptions,
+    _pd: core::marker::PhantomData<T>,
+}
+
+impl <'a, T: Parse, R: Reader> Iterator for TrailingIterator<'a, R, T> {
+    type Item = Result<T, ParseError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.reader.remaining_size() == 0 {
+            return None;
+        }
+
+        let item = T::parse(self.reader, self.opts);
+        Some(item)
+    }
+}
+
+#[derive(Debug)]
+struct DynamicArray<S, I, const ZERO_RELATIVE: bool> {
+    size: S,
+    // FIXME: some offset to keep track of to go back to iterate over this if desired
+    _pd: core::marker::PhantomData<I>,
+}
+
+struct DynamicArrayIter<'a, R, S, I, const ZERO_RELATIVE: bool> {
+    arr: &'a DynamicArray<S, I, ZERO_RELATIVE>,
+    reader: &'a mut R,
+    opts: &'a ParseOptions,
+}
+
+impl <'a, R: Reader, S: ArraySize, I: Parse, const ZERO_RELATIVE: bool> Iterator for DynamicArrayIter<'a, R, S, I, ZERO_RELATIVE> {
+    type Item = Result<I, ParseError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!("impl iterator")
+    }
+}
+
+trait ArraySize: core::iter::Step + Clone + Copy {
+    const ZERO: Self;
+}
+
+macro_rules! impl_array_size {
+    ($($i:ty),*,) => {
+        $(
+            impl ArraySize for $i {
+                const ZERO: Self = 0;
+            }
+        )*
+    }
+}
+
+impl_array_size!{
+    u16, u32,
+}
+
+impl <I: Parse, S: Parse + ArraySize, const ZERO_RELATIVE: bool> Parse for DynamicArray<S, I, ZERO_RELATIVE> {
+    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let size = S::parse(reader, options)?;
+        if ZERO_RELATIVE {
+            for _ in S::ZERO..=size {
+                I::parse(reader, options)?;
+            }
+        } else {
+            for _ in S::ZERO..size {
+                I::parse(reader, options)?;
+            }
+        }
+
+        Ok(Self {
+            size,
+            _pd: core::marker::PhantomData,
+        })
+    }
+
+    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        todo!()
+    }
+}
+
+mod atoms {
+    use super::*;
+    use atom_parser_derive::make_atom;
+    make_atom! {
+        #[atom("ftyp")]
+        struct FileType {
+            major_brand: FourCC,
+            minor_version: u32,
+            // FIXME: this should have a better syntax
+            // like `Item = FourCC` or something
+            #[trailing_iterator]
+            compatible_brands: FourCC,
+        }
+    }
+
+    make_atom! {
+        #[atom("wide")]
+        struct Wide {}
+    }
+    // FIXME: better syntax for payload
+    // maybe just like `..Payload` or smth
+    make_atom! {
+        #[atom("skip")]
+        struct Skip {
+            #[trailing_payload]
+            free_space: Vec<u8>,
+        }
+    }
+    make_atom! {
+        #[atom("free")]
+        struct Free {
+            #[trailing_payload]
+            free_space: Vec<u8>,
+        }
+    }
+
+    make_atom! {
+        #[atom("moov")]
+        struct Movie {
+
+        }
+    }
+
+    make_atom! {
+        #[atom("mvhd")]
+        struct MovieHeader {
+            version: u8,
+            flags: [u8; 3],
+            creation_time: u32,
+            modification_time: u32,
+            time_scale: u32,
+            duration: u32,
+            preferred_rate: u32,
+            preferred_volume: u16,
+            #[reserved]
+            reserved: [u8; 10],
+            display_matrix: [[u32; 3]; 3],
+            preview_time: u32,
+            preview_duration: u32,
+            poster_time: u32,
+            selection_time: u32,
+            selection_duration: u32,
+            current_time: u32,
+            next_track_id: u32,
+        }
+    }
+
+    // FIXME: change macro name,
+    // as since it modifies the struct (reserved, fields, etc)
+    // it can be used for both general atoms and other structs
+    //
+    // also, if multiple structs could be made at the same time instead of having to make a def
+    // for each, that would be preferred
+    make_atom! {
+        struct Color {
+            #[reserved]
+            reserved: u16,
+            red: u16,
+            green: u16,
+            blue: u16,
+        }
+    }
+
+    make_atom! {
+        #[atom("ctab")]
+        struct ColorTable {
+            seed: u32,
+            flags: u16,
+            #[dynamic_array(size_type = u16, zero_relative = true)]
+            color_table: Color,
+        }
+    }
+
+    // TODO
+    make_atom! {
+        #[atom("udta")]
+        struct Userdata {
+
+        }
+    }
+
+    make_atom! {
+        #[atom("trak")]
+        struct Track {
+
+        }
+    }
+
+    // FIXME: the 1 byte version + 3 bytes flags is pretty common,
+    // may want to make something for that
+    make_atom! {
+        #[atom("tkhd")]
+        struct TrackHeader {
+            version: u8,
+            flags: [u8; 3],
+            creation_time: u32,
+            modification_time: u32,
+            track_id: u32,
+            #[reserved]
+            reserved: [u8; 4],
+            duration: u32,
+            #[reserved]
+            reserved: [u8; 8],
+            layer: u16,
+            alternate_group: u16,
+            volume: u16,
+            #[reserved]
+            reserved: [u8; 2],
+            matrix: [[u32; 3]; 3],
+            track_width: u32,
+            track_height: u32,
+        }
+    }
+
+    make_atom! {
+        #[atom("clip")]
+        struct Clipping {
+
+        }
+    }
+
+    make_atom! {
+        #[atom("crgn")]
+        struct ClippingRegion {
+            // ??? there is no info on this
+            // page 44
+        }
+    }
+
+    make_atom! {
+        #[atom("matt")]
+        struct TrackMatte {
+            
+        }
+    }
+
+    make_atom! {
+        #[atom("kmat")]
+        struct CompressedMatte {
+            version: u8,
+            flags: [u8; 3],
+        }
+    }
+
+    make_atom! {
+        #[atom("edts")]
+        struct Edit {
+
+        }
+    }
+
+    make_atom! {
+        #[atom("elst")]
+        struct EditList {
+            version: u8,
+            flags: [u8; 3],
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            table_entries: EditListEntry,
+        }
+    }
+
+    make_atom! {
+        struct EditListEntry {
+            duration: u32,
+            media_time: u32,
+            media_rate: u32,
+        }
+    }
+
+    make_atom! {
+        #[atom("tref")]
+        struct TrackReference {
+
+        }
+    }
+
+    make_atom! {
+        #[atom("tmcd")]
+        struct TimeCode {
+            #[trailing_iterator]
+            related_track_ids: u32
+        }
+    }
+
+    make_atom! {
+        #[atom("chap")]
+        struct ChapterList {
+            #[trailing_iterator]
+            related_track_ids: u32
+        }
+    }
+
+    make_atom! {
+        #[atom("sync")]
+        struct Synchonization {
+            #[trailing_iterator]
+            related_track_ids: u32
+        }
+    }
+
+    make_atom! {
+        #[atom("scpt")]
+        struct Transcript {
+            #[trailing_iterator]
+            related_track_ids: u32
+        }
+    }
+
+    make_atom! {
+        #[atom("ssrc")]
+        struct NonprimarySource {
+            #[trailing_iterator]
+            related_track_ids: u32
+        }
+    }
+
+    make_atom! {
+        #[atom("hint")]
+        struct Hint {
+            #[trailing_iterator]
+            related_track_ids: u32
+        }
+    }
+
+    make_atom! {
+        #[atom("load")]
+        struct TrackLoadingSettings {
+            preload_start_time: u32,
+            preload_duration: u32,
+            preload_flags: u32,
+            default_hints: u32,
+        }
+    }
+
+    make_atom! {
+        #[atom("imap")]
+        struct TrackInputMap {
+
+        }
+    }
+
+    make_atom! {
+        #[atom(b"\0\0in")]
+        struct TrackInput {
+            id: u32,
+            #[reserved]
+            reserved: [u8; 2],
+            child_count: u16,
+            #[reserved]
+            reserved: [u8; 4],
+        }
+    }
+
+    make_atom! {
+        #[atom(b"\0\0ty")]
+        struct InputType {
+            ty: u32,
+        }
+    }
+
+    make_atom! {
+        #[atom("obid")]
+        struct ObjectId {
+            object_id: u32,
+        }
+    }
+
+    make_atom! {
+        #[atom("mdia")]
+        struct Media {
+            
+        }
+    }
+    // TODO: media atoms
+    // - pg 54 of https://developer.apple.com/standards/qtff-2001.pdf 
+
+    #[test]
+    fn ftyp() {
+        let mut r = InMemoryReader::from_path("../vidTest_qtDL.mov").unwrap();
+        let opts = Default::default();
+
+        use Parse;
+
+        while r.remaining_size() > 0 {
+            let atom = AtomHeader::parse(&mut r, &opts).unwrap();
+
+            let mut r = TrailingReader::new(&mut r, atom.size.size as _);
+
+            match atom.fcc {
+                FileType::FCC => {
+                    let ft = FileType::parse(&mut r, &opts).unwrap();
+                    println!("ftyp: {ft:?}");
+
+                    for fcc in ft.compatible_brands(&mut r, &opts) {
+                        println!("compatible brand: {:?}", fcc.unwrap());
+                    }
+                }
+                Wide::FCC => (),
+                Skip::FCC | Free::FCC => {
+                    println!("{} bytes of free space", r.remaining_size());
+                }
+                Movie::FCC => {
+                    while r.remaining_size() > 0 {
+                        let atom = AtomHeader::parse(&mut r, &opts).unwrap();
+                        println!("movie atom: {atom:?}");
+                        let mut r = TrailingReader::new(&mut r, atom.size.size as _);
+
+                        match atom.fcc {
+                            MovieHeader::FCC => {
+                                let mvhd = MovieHeader::parse(&mut r, &opts).unwrap();
+                                println!("mvhd: {mvhd:?}");
+                            }
+                            ColorTable::FCC => {
+                                todo!()
+                            }
+                            _ => {
+                                println!("skipping movie {atom:?}");
+                                atom.skip_atom(&mut r).unwrap();
+                            }
+                        }
+
+                        r.seek_remaining().unwrap();
+                    }
+                }
+                _ => {
+                    println!("skipping {atom:?}");
+                    atom.skip_atom(&mut r).unwrap();
+                }
+            }
+            r.seek_remaining().unwrap();
+        }
+        panic!()
+    }
+}

@@ -1,0 +1,11 @@
+[package]
+name = "atom-parser"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+extended_sized_atoms = []
+
+[dependencies]
+thiserror = "2.0"
+atom-parser-derive = {path = "../atom-parser-derive"}
