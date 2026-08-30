@@ -160,7 +160,7 @@ impl <const N: usize, I: Parse> Parse for [I; N] {
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 #[repr(transparent)]
 struct FourCC([u8; 4]);
 
@@ -341,6 +341,23 @@ trait Container {
     fn children_async(&self) -> impl Iterator<Item = Result<Self::Child, ParseError>>;
 }
 
+struct ChildrenIter<'a, R, C> {
+    _pd: core::marker::PhantomData<C>,
+    reader: &'a mut R,
+    opts: &'a ParseOptions,
+}
+
+impl <'a, R: Reader, C: Parse> Iterator for ChildrenIter<'a, R, C> {
+    type Item = Result<C, ParseError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.reader.remaining_size() > 0 {
+            Some(C::parse(self.reader, self.opts))
+        } else {
+            None
+        }
+    }
+}
+
 trait Leaf {
     // TODO: api to get data
 }
@@ -500,7 +517,17 @@ mod atoms {
     make_atom! {
         #[atom("moov")]
         struct Movie {
+            #[children]
+            children: (),
+        }
+    }
 
+    // FIXME: preferrably above & below would be grouped 
+    make_atom! {
+        #[atom(moov)]
+        enum Children {
+            MovieHeader,
+            ColorTable,
         }
     }
 
@@ -757,6 +784,13 @@ mod atoms {
     // TODO: media atoms
     // - pg 54 of https://developer.apple.com/standards/qtff-2001.pdf 
 
+    make_atom! {
+        #[atom(test)]
+        enum Children {
+            Skip,
+        }
+    }
+
     #[test]
     fn ftyp() {
         let mut r = InMemoryReader::from_path("../vidTest_qtDL.mov").unwrap();
@@ -783,26 +817,19 @@ mod atoms {
                     println!("{} bytes of free space", r.remaining_size());
                 }
                 Movie::FCC => {
-                    while r.remaining_size() > 0 {
-                        let atom = AtomHeader::parse(&mut r, &opts).unwrap();
-                        println!("movie atom: {atom:?}");
-                        let mut r = TrailingReader::new(&mut r, atom.size.size as _);
-
-                        match atom.fcc {
-                            MovieHeader::FCC => {
-                                let mvhd = MovieHeader::parse(&mut r, &opts).unwrap();
-                                println!("mvhd: {mvhd:?}");
+                    let movie = Movie::parse(&mut r, &opts).unwrap();
+                    for child in movie.children(&mut r, &opts) {
+                        match child.unwrap() {
+                            moov::Child::MovieHeader(hd) => {
+                                println!("header: {hd:?}");
                             }
-                            ColorTable::FCC => {
-                                todo!()
+                            moov::Child::ColorTable(ctb) => {
+                                println!("color table: {ctb:?}");
                             }
-                            _ => {
-                                println!("skipping movie {atom:?}");
-                                atom.skip_atom(&mut r).unwrap();
+                            moov::Child::Unsupported(missed) => {
+                                println!("skipped: {missed:?}");
                             }
                         }
-
-                        r.seek_remaining().unwrap();
                     }
                 }
                 _ => {

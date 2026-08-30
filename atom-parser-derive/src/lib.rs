@@ -23,6 +23,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
                     let mut trailing_iterator = None;
                     let mut trailing_payload = None;
+                    let mut children = None;
 
                     let fields = n.named.iter().filter_map(|field| {
                         for attr in &field.attrs {
@@ -67,13 +68,21 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                                 return Some((new_field, FieldKind::DynamicArray(ty.clone())));
                             } else if attr.path().is_ident("reserved") {
                                 return Some((field.clone(), FieldKind::Reserved));
+                            } else if attr.path().is_ident("children") {
+                                if children.is_some() {
+                                    todo!("duplicate children")
+                                }
+                                children = Some(field);
+                                return None;
                             }
                         }
                         Some((field.clone(), FieldKind::Normal))
                     }).collect::<Vec<_>>();
 
-                    if trailing_payload.is_some() && trailing_iterator.is_some() {
-                        panic!("cannot have multiple trailing fields")
+
+                    let trailing_count = u32::from(trailing_payload.is_some()) + u32::from(trailing_iterator.is_some()) + u32::from(children.is_some());
+                    if trailing_count > 1 {
+                        panic!("cannot have multiple trailing fields");
                     }
 
                     let sync_impl = {
@@ -130,7 +139,9 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
                     let struct_name = &data.ident;
 
-                    let atom_impl = data.attrs.iter().find(|attr| attr.path().is_ident("atom")).map(|attr| {
+                    let atom = data.attrs.iter().find(|attr| attr.path().is_ident("atom"));
+
+                    let atom_impl = atom.cloned().map(|attr| {
                         if let Ok(bstr) = attr.parse_args::<syn::LitByteStr>() {
                             let fcc = bstr.value();
 
@@ -206,6 +217,21 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         }
                     });
 
+                    let child_fn = children.map(|_| {
+                        let atom_fcc = atom.expect("need atom impl (fcc) to have children").parse_args::<syn::LitStr>().expect("could not parse str of fcc").value();
+                        let atom = syn::Ident::new(&atom_fcc, proc_macro2::Span::call_site());
+
+                        quote! {
+                            pub fn children<'a, R: Reader>(&self, reader: &'a mut R, opts: &'a ParseOptions) -> impl Iterator<Item = Result<#atom::Child, ParseError>> + 'a {
+                                ChildrenIter {
+                                    _pd: core::marker::PhantomData,
+                                    reader,
+                                    opts,
+                                }
+                            }
+                        }
+                    });
+
                     TokenStream::from(quote!{
                         #[derive(Debug)]
                         struct #struct_name {
@@ -223,6 +249,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         impl #struct_name {
                             #trailing_iter_fn
                             #(#dynamic_array_fns)*
+                            #child_fn
                         }
 
                         #atom_impl
@@ -237,10 +264,76 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                 )
             }
         }
+        Item::Enum(e) => {
+            if e.ident == "Children" {
+                let mut atom_fcc = None;
+                for attr in &e.attrs {
+                    if attr.path().is_ident("atom") {
+                        atom_fcc = Some(attr.parse_args::<syn::Ident>().unwrap());
+                    }
+                }
+                let atom_fcc = atom_fcc.expect("no fcc for what these children belong to");
+
+                let sync_impl = {
+                    let parse = e.variants.iter().map(|v| {
+                        let name = &v.ident;
+                        quote!{
+                            <#name as Atom>::FCC => {
+                                let atom = <#name as Parse>::parse(&mut r, options)?;
+                                Child::#name(atom)
+                            }
+                        }
+                    });
+
+                    quote! {
+                        fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+
+                            loop {
+                                let atom = AtomHeader::parse(reader, options)?;
+                                let mut r = TrailingReader::new(&mut*reader, atom.size.size as _);
+
+                                return Ok(match atom.fcc {
+                                    #(#parse)*
+                                    missed => {
+                                        // FIXME: other behaviours for missed atoms ?
+                                        r.seek_remaining()?;
+                                        Child::Unsupported(missed)
+                                    }
+                                })
+                            }
+                        }
+                    }
+                };
+
+                let variants = e.variants.iter();
+
+                TokenStream::from(quote! {
+                    // FIXME: have the mod name be based on the atoms fcc
+                    pub mod #atom_fcc {
+                        use super::*;
+                        pub enum Child {
+                            #(
+                                #variants(#variants),
+                            )*
+                            Unsupported(FourCC),
+                        }
+
+                        impl Parse for Child {
+                            #sync_impl
+                            async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+                                todo!()
+                            }
+                        }
+                    }
+                })
+            } else {
+                todo!("non children enum")
+            }
+        }
         _ => TokenStream::from(
             syn::Error::new(
                 input.span(),
-                "Only structs with named fields can be derived",
+                "Only structs with named field sor enums  can be derived",
             )
             .to_compile_error(),
         )
