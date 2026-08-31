@@ -10,7 +10,11 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
     enum FieldKind {
         Normal,
-        DynamicArray(syn::Type),
+        DynamicArray{
+            arr_ty: syn::Type,
+            size_ty: syn::Type,
+            zero_relative: syn::LitBool,
+        },
         Reserved,
     }
 
@@ -65,7 +69,11 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                                     #name: DynamicArray<#size_ty, #ty, #zero_relative>
                                 };
 
-                                return Some((new_field, FieldKind::DynamicArray(ty.clone())));
+                                return Some((new_field, FieldKind::DynamicArray{
+                                    arr_ty: ty.clone(),
+                                    size_ty,
+                                    zero_relative,
+                                }));
                             } else if attr.path().is_ident("reserved") {
                                 return Some((field.clone(), FieldKind::Reserved));
                             } else if attr.path().is_ident("children") {
@@ -84,6 +92,37 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                     if trailing_count > 1 {
                         panic!("cannot have multiple trailing fields");
                     }
+
+                    let (trailing_offset, trailing_collect) = match (&trailing_iterator, &children) {
+                        (None, None) => (None, None),
+                        (itr, children) => {
+                            (
+                                Some(quote!{
+                                    let offset = reader.offset();
+                                }),
+                                Some(match (itr, children) {
+                                    (Some(itr), None) => {
+                                        let field_name = &itr.ident;
+                                        quote!{ 
+                                            #field_name: Trailing {
+                                                _pd: core::marker::PhantomData,
+                                                offset,
+                                            }
+                                        }
+                                    }
+                                    (None, Some(_)) => {
+                                        quote!{
+                                            children: Children {
+                                                _pd: core::marker::PhantomData,
+                                                offset,
+                                            }
+                                        }
+                                    }
+                                    _ => unreachable!(),
+                                })
+                            )
+                        }
+                    };
 
                     let sync_impl = {
                         let parsing = fields.iter().map(|(field, kind)| {
@@ -117,11 +156,35 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         quote!{
                             fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
                                 #(#parsing)*
+                                #trailing_offset
                                 Ok(Self {
                                     #(#collection)*
+                                    #trailing_collect
                                 })
                             }
                         }
+                    };
+
+                    let struct_name = &data.ident;
+                    let atom = data.attrs.iter().find(|attr| attr.path().is_ident("atom"));
+
+                    let trailing_field = match (&trailing_iterator, &children) {
+                        (None, None) => None,
+                        (Some(itr), None) => {
+                            let field_name = &itr.ident;
+                            let field_ty = &itr.ty;
+                            Some(quote! {
+                                #field_name: Trailing<#field_ty>,
+                            })
+                        }
+                        (None, Some(children)) => {
+                            let atom_fcc = atom.expect("need atom impl (fcc) to have children").parse_args::<syn::LitStr>().expect("could not parse str of fcc").value();
+                            let atom = syn::Ident::new(&atom_fcc, proc_macro2::Span::call_site());
+                            Some(quote!{
+                                children: Children<#atom::Child>,
+                            })
+                        }
+                        _ => unreachable!(),
                     };
 
                     let struct_fields = fields.iter().filter_map(|(field, kind)| {
@@ -136,10 +199,6 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                             })
                         }
                     });
-
-                    let struct_name = &data.ident;
-
-                    let atom = data.attrs.iter().find(|attr| attr.path().is_ident("atom"));
 
                     let atom_impl = atom.cloned().map(|attr| {
                         if let Ok(bstr) = attr.parse_args::<syn::LitByteStr>() {
@@ -184,18 +243,22 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
                     // FIXNE: lifetimes for all of this can probably be cleaned up
                     let dynamic_array_fns = fields.iter().filter_map(|(field, kind)| {
-                        if let FieldKind::DynamicArray(ty) = kind {
-                            Some((field, ty))
+                        if let FieldKind::DynamicArray{
+                            arr_ty,
+                            size_ty,
+                            zero_relative,
+                        } = kind {
+                            Some((field, (arr_ty, size_ty, zero_relative)))
                         } else {
                             None
                         }
-                    }).map(|(dynamic_arr, arr_ty)| {
+                    }).map(|(dynamic_arr, (arr_ty, size_ty, zero_relative))| {
                         let arr_name = &dynamic_arr.ident;
                         quote! {
-                            pub fn #arr_name<'a, R: Reader>(&'a self, reader: &'a mut R, opts: &'a ParseOptions) -> impl Iterator<Item = Result<#arr_ty, ParseError>> + 'a {
+                            pub fn #arr_name<'a, R: Reader>(&'a self, reader: &'a mut R, opts: &'a ParseOptions) -> DynamicArrayIter<'a, R, #size_ty, #arr_ty, #zero_relative> {
                                 DynamicArrayIter {
                                     arr: &self.#arr_name,
-                                    reader,
+                                    reader: BacktrackReader::new(reader, self.#arr_name.offset),
                                     opts,
                                 }
                             }
@@ -209,7 +272,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         quote! {
                             pub fn #fn_name<'a, R: Reader>(&self, reader: &'a mut R, opts: &'a ParseOptions) -> impl Iterator<Item = Result<#iterator_ty, ParseError>> + 'a {
                                 TrailingIterator {
-                                    reader,
+                                    reader: BacktrackReader::new(reader, self.#fn_name.offset),
                                     opts,
                                     _pd: core::marker::PhantomData,
                                 }
@@ -222,10 +285,10 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         let atom = syn::Ident::new(&atom_fcc, proc_macro2::Span::call_site());
 
                         quote! {
-                            pub fn children<'a, R: Reader>(&self, reader: &'a mut R, opts: &'a ParseOptions) -> impl Iterator<Item = Result<#atom::Child, ParseError>> + 'a {
+                            pub fn children<'a, R: Reader>(&self, reader: &'a mut R, opts: &'a ParseOptions) -> ChildrenIter<'a, R, #atom::Child> {
                                 ChildrenIter {
                                     _pd: core::marker::PhantomData,
-                                    reader,
+                                    reader: BacktrackReader::new(reader, self.children.offset),
                                     opts,
                                 }
                             }
@@ -236,6 +299,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         #[derive(Debug)]
                         struct #struct_name {
                             #(#struct_fields,)*
+                            #trailing_field
                         }
 
                         impl Parse for #struct_name {
@@ -280,6 +344,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         quote!{
                             <#name as Atom>::FCC => {
                                 let atom = <#name as Parse>::parse(&mut r, options)?;
+                                r.seek_remaining()?;
                                 Child::#name(atom)
                             }
                         }
@@ -311,6 +376,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                     // FIXME: have the mod name be based on the atoms fcc
                     pub mod #atom_fcc {
                         use super::*;
+                        #[derive(Debug)]
                         pub enum Child {
                             #(
                                 #variants(#variants),

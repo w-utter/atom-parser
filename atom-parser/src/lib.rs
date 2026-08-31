@@ -240,8 +240,13 @@ trait Atom: Sized {
     */
 }
 
-pub trait Reader {
+trait SwapOffsets {
+    fn swap_offsets(&mut self, offset: &mut usize);
+}
+
+pub trait Reader: SwapOffsets {
     fn remaining_size(&self) -> usize;
+    fn offset(&self) -> usize;
     fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError>;
     fn seek(&mut self, amt: usize) -> Result<(), IoError>;
 
@@ -250,9 +255,19 @@ pub trait Reader {
     }
 }
 
+impl <'a, S: SwapOffsets> SwapOffsets for &'a mut S {
+    fn swap_offsets(&mut self, offset: &mut usize) {
+        S::swap_offsets(self, offset)
+    }
+}
+
 impl <'a, R: Reader> Reader for &'a mut R {
     fn remaining_size(&self) -> usize {
         R::remaining_size(self)
+    }
+
+    fn offset(&self) -> usize {
+        R::offset(self)
     }
 
     fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError> {
@@ -296,9 +311,19 @@ impl InMemoryReader {
     }
 }
 
+impl SwapOffsets for InMemoryReader {
+    fn swap_offsets(&mut self, offset: &mut usize) {
+        core::mem::swap(&mut self.offset, offset)
+    }
+}
+
 impl Reader for InMemoryReader {
     fn remaining_size(&self) -> usize {
         self.bytes.len().checked_sub(self.offset).unwrap_or_default()
+    }
+
+    fn offset(&self) -> usize {
+        core::cmp::min(self.offset, self.bytes.len())
     }
 
     fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError> {
@@ -341,9 +366,10 @@ trait Container {
     fn children_async(&self) -> impl Iterator<Item = Result<Self::Child, ParseError>>;
 }
 
-struct ChildrenIter<'a, R, C> {
+// TODO: async equivalent
+struct ChildrenIter<'a, R: Reader, C> {
     _pd: core::marker::PhantomData<C>,
-    reader: &'a mut R,
+    pub reader: BacktrackReader<&'a mut R>,
     opts: &'a ParseOptions,
 }
 
@@ -351,7 +377,7 @@ impl <'a, R: Reader, C: Parse> Iterator for ChildrenIter<'a, R, C> {
     type Item = Result<C, ParseError>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.reader.remaining_size() > 0 {
-            Some(C::parse(self.reader, self.opts))
+            Some(C::parse(&mut self.reader, self.opts))
         } else {
             None
         }
@@ -362,6 +388,58 @@ trait Leaf {
     // TODO: api to get data
 }
 
+#[derive(Debug)]
+struct Children<T> {
+    _pd: core::marker::PhantomData<T>,
+    offset: usize,
+}
+
+struct BacktrackReader<R: SwapOffsets> {
+    reader: R,
+    stored_offset: usize,
+}
+
+impl <R: SwapOffsets> BacktrackReader<R> {
+    fn new(mut reader: R, mut backtrack_to: usize) -> Self {
+        reader.swap_offsets(&mut backtrack_to);
+        Self {
+            reader,
+            stored_offset: backtrack_to,
+        }
+    }
+}
+
+impl <R: SwapOffsets> Drop for BacktrackReader<R> {
+    fn drop(&mut self) {
+        self.reader.swap_offsets(&mut self.stored_offset)
+    }
+}
+
+impl <S: SwapOffsets> SwapOffsets for BacktrackReader<S> {
+    fn swap_offsets(&mut self, offset: &mut usize) {
+        self.reader.swap_offsets(offset)
+    }
+}
+
+impl <R: Reader> Reader for BacktrackReader<R> {
+    fn remaining_size(&self) -> usize {
+        self.reader.remaining_size()
+    }
+    fn offset(&self) -> usize {
+        self.reader.offset()
+    }
+
+    fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError> {
+        self.reader.read(bytes)
+    }
+
+    fn seek(&mut self, amt: usize) -> Result<(), IoError> {
+        self.reader.seek(amt)
+    }
+}
+
+// TODO: this should prob be like `max_offset` instead of remaining_size
+// so that it doesnt overflow if we backtrack
 struct TrailingReader<R> {
     reader: R,
     remaining_size: usize,
@@ -376,10 +454,21 @@ impl <R> TrailingReader<R> {
     }
 }
 
+impl <S: SwapOffsets> SwapOffsets for TrailingReader<S> {
+    fn swap_offsets(&mut self, offset: &mut usize) {
+        self.reader.swap_offsets(offset)
+    }
+}
+
 impl <R: Reader> Reader for TrailingReader<R> {
     fn remaining_size(&self) -> usize {
         self.remaining_size
     }
+
+    fn offset(&self) -> usize {
+        self.reader.offset()
+    }
+
     fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError> {
         if bytes.len() > self.remaining_size {
             return Err(std::io::Error::other("not enough spc"));
@@ -398,8 +487,14 @@ impl <R: Reader> Reader for TrailingReader<R> {
     }
 }
 
-struct TrailingIterator<'a, R, T> {
-    reader: &'a mut R,
+#[derive(Debug)]
+struct Trailing<T> {
+    _pd: core::marker::PhantomData<T>,
+    offset: usize,
+}
+
+struct TrailingIterator<'a, R: SwapOffsets, T> {
+    reader: BacktrackReader<&'a mut R>,
     opts: &'a ParseOptions,
     _pd: core::marker::PhantomData<T>,
 }
@@ -411,7 +506,7 @@ impl <'a, T: Parse, R: Reader> Iterator for TrailingIterator<'a, R, T> {
             return None;
         }
 
-        let item = T::parse(self.reader, self.opts);
+        let item = T::parse(&mut self.reader, self.opts);
         Some(item)
     }
 }
@@ -419,13 +514,13 @@ impl <'a, T: Parse, R: Reader> Iterator for TrailingIterator<'a, R, T> {
 #[derive(Debug)]
 struct DynamicArray<S, I, const ZERO_RELATIVE: bool> {
     size: S,
-    // FIXME: some offset to keep track of to go back to iterate over this if desired
+    offset: usize,
     _pd: core::marker::PhantomData<I>,
 }
 
-struct DynamicArrayIter<'a, R, S, I, const ZERO_RELATIVE: bool> {
+struct DynamicArrayIter<'a, R: SwapOffsets, S, I, const ZERO_RELATIVE: bool> {
     arr: &'a DynamicArray<S, I, ZERO_RELATIVE>,
-    reader: &'a mut R,
+    pub reader: BacktrackReader<&'a mut R>,
     opts: &'a ParseOptions,
 }
 
@@ -457,6 +552,7 @@ impl_array_size!{
 impl <I: Parse, S: Parse + ArraySize, const ZERO_RELATIVE: bool> Parse for DynamicArray<S, I, ZERO_RELATIVE> {
     fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
         let size = S::parse(reader, options)?;
+        let offset = reader.offset();
         if ZERO_RELATIVE {
             for _ in S::ZERO..=size {
                 I::parse(reader, options)?;
@@ -469,6 +565,7 @@ impl <I: Parse, S: Parse + ArraySize, const ZERO_RELATIVE: bool> Parse for Dynam
 
         Ok(Self {
             size,
+            offset,
             _pd: core::marker::PhantomData,
         })
     }
@@ -527,6 +624,9 @@ mod atoms {
         #[atom(moov)]
         enum Children {
             MovieHeader,
+            Clipping,
+            Track,
+            Userdata,
             ColorTable,
         }
     }
@@ -592,9 +692,25 @@ mod atoms {
     make_atom! {
         #[atom("trak")]
         struct Track {
-
+            #[children]
+            children: ()
         }
     }
+
+    make_atom! {
+        #[atom(trak)]
+        enum Children {
+            Clipping,
+            TrackMatte,
+            Edit,
+            TrackReference,
+            TrackLoadingSettings,
+            TrackInputMap,
+            Media,
+            Userdata,
+        }
+    }
+
 
     // FIXME: the 1 byte version + 3 bytes flags is pretty common,
     // may want to make something for that
@@ -818,10 +934,27 @@ mod atoms {
                 }
                 Movie::FCC => {
                     let movie = Movie::parse(&mut r, &opts).unwrap();
-                    for child in movie.children(&mut r, &opts) {
+                    let mut child_iter = movie.children(&mut r, &opts);
+
+                    while let Some(child) = child_iter.next() {
+                        let r = &mut child_iter.reader;
                         match child.unwrap() {
                             moov::Child::MovieHeader(hd) => {
                                 println!("header: {hd:?}");
+                            }
+                            moov::Child::Clipping(clip) => {
+                                println!("clip: {clip:?}");
+                            }
+                            moov::Child::Track(track) => {
+                                println!("track: {track:?}");
+                                let mut child_iter = track.children(r, &opts);
+                                while let Some(child) = child_iter.next() {
+                                    let r = &mut child_iter.reader;
+                                    println!("trak child: {child:?}");
+                                }
+                            }
+                            moov::Child::Userdata(udta) => {
+                                println!("udata: {udta:?}");
                             }
                             moov::Child::ColorTable(ctb) => {
                                 println!("color table: {ctb:?}");
@@ -830,6 +963,7 @@ mod atoms {
                                 println!("skipped: {missed:?}");
                             }
                         }
+                        //r.seek_remaining().unwrap();
                     }
                 }
                 _ => {
