@@ -99,6 +99,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                             (
                                 Some(quote!{
                                     let offset = reader.offset();
+                                    let size = reader.remaining_size();
                                 }),
                                 Some(match (itr, children) {
                                     (Some(itr), None) => {
@@ -107,6 +108,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                                             #field_name: Trailing {
                                                 _pd: core::marker::PhantomData,
                                                 offset,
+                                                size,
                                             }
                                         }
                                     }
@@ -115,6 +117,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                                             children: Children {
                                                 _pd: core::marker::PhantomData,
                                                 offset,
+                                                size,
                                             }
                                         }
                                     }
@@ -270,9 +273,12 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         let iterator_ty = &trailing.ty;
                         // TODO: async equivalent
                         quote! {
-                            pub fn #fn_name<'a, R: Reader>(&self, reader: &'a mut R, opts: &'a ParseOptions) -> impl Iterator<Item = Result<#iterator_ty, ParseError>> + 'a {
+                            pub fn #fn_name<'a, R: Reader>(&self, reader: &'a mut R, opts: &'a ParseOptions) -> TrailingIterator<'a, R, #iterator_ty> {
+                                let trailing = &self.#fn_name;
+                                let max_offset = trailing.offset + trailing.size;
+
                                 TrailingIterator {
-                                    reader: BacktrackReader::new(reader, self.#fn_name.offset),
+                                    reader: BacktrackReader::new(TrailingReader::new(reader, max_offset), trailing.offset),
                                     opts,
                                     _pd: core::marker::PhantomData,
                                 }
@@ -286,9 +292,11 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
                         quote! {
                             pub fn children<'a, R: Reader>(&self, reader: &'a mut R, opts: &'a ParseOptions) -> ChildrenIter<'a, R, #atom::Child> {
+                                let children = &self.children;
+                                let max_offset = children.offset + children.size;
                                 ChildrenIter {
                                     _pd: core::marker::PhantomData,
-                                    reader: BacktrackReader::new(reader, self.children.offset),
+                                    reader: BacktrackReader::new(TrailingReader::new(reader, max_offset), children.offset),
                                     opts,
                                 }
                             }
@@ -355,7 +363,10 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
                             loop {
                                 let atom = AtomHeader::parse(reader, options)?;
-                                let mut r = TrailingReader::new(&mut*reader, atom.size.size as _);
+
+                                let max_offset = reader.offset() + atom.size.size as usize;
+
+                                let mut r = TrailingReader::new(&mut*reader, max_offset);
 
                                 return Ok(match atom.fcc {
                                     #(#parse)*

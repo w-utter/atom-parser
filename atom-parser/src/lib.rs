@@ -369,7 +369,7 @@ trait Container {
 // TODO: async equivalent
 struct ChildrenIter<'a, R: Reader, C> {
     _pd: core::marker::PhantomData<C>,
-    pub reader: BacktrackReader<&'a mut R>,
+    pub reader: BacktrackReader<TrailingReader<&'a mut R>>,
     opts: &'a ParseOptions,
 }
 
@@ -392,6 +392,7 @@ trait Leaf {
 struct Children<T> {
     _pd: core::marker::PhantomData<T>,
     offset: usize,
+    size: usize,
 }
 
 struct BacktrackReader<R: SwapOffsets> {
@@ -442,14 +443,14 @@ impl <R: Reader> Reader for BacktrackReader<R> {
 // so that it doesnt overflow if we backtrack
 struct TrailingReader<R> {
     reader: R,
-    remaining_size: usize,
+    max_offset: usize,
 }
 
-impl <R> TrailingReader<R> {
-    fn new(reader: R, remaining_size: usize) -> Self {
+impl <R: Reader> TrailingReader<R> {
+    fn new(reader: R, max_offset: usize) -> Self {
         Self {
             reader,
-            remaining_size,
+            max_offset,
         }
     }
 }
@@ -462,7 +463,7 @@ impl <S: SwapOffsets> SwapOffsets for TrailingReader<S> {
 
 impl <R: Reader> Reader for TrailingReader<R> {
     fn remaining_size(&self) -> usize {
-        self.remaining_size
+        self.max_offset.checked_sub(self.reader.offset()).unwrap_or_default()
     }
 
     fn offset(&self) -> usize {
@@ -470,19 +471,17 @@ impl <R: Reader> Reader for TrailingReader<R> {
     }
 
     fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError> {
-        if bytes.len() > self.remaining_size {
+        if bytes.len() > self.remaining_size() {
             return Err(std::io::Error::other("not enough spc"));
         }
         self.reader.read(bytes)?;
-        self.remaining_size -= bytes.len();
         Ok(())
     }
     fn seek(&mut self, amt: usize) -> Result<(), IoError> {
-        if amt > self.remaining_size {
+        if amt > self.remaining_size() {
             return Err(std::io::Error::other("not enough spc"));
         }
         self.reader.seek(amt)?;
-        self.remaining_size -= amt;
         Ok(())
     }
 }
@@ -491,10 +490,11 @@ impl <R: Reader> Reader for TrailingReader<R> {
 struct Trailing<T> {
     _pd: core::marker::PhantomData<T>,
     offset: usize,
+    size: usize,
 }
 
 struct TrailingIterator<'a, R: SwapOffsets, T> {
-    reader: BacktrackReader<&'a mut R>,
+    reader: BacktrackReader<TrailingReader<&'a mut R>>,
     opts: &'a ParseOptions,
     _pd: core::marker::PhantomData<T>,
 }
@@ -700,6 +700,7 @@ mod atoms {
     make_atom! {
         #[atom(trak)]
         enum Children {
+            TrackHeader,
             Clipping,
             TrackMatte,
             Edit,
@@ -771,7 +772,15 @@ mod atoms {
     make_atom! {
         #[atom("edts")]
         struct Edit {
+            #[children]
+            children: (),
+        }
+    }
 
+    make_atom! {
+        #[atom(edts)]
+        enum Children {
+            EditList,
         }
     }
 
@@ -796,7 +805,20 @@ mod atoms {
     make_atom! {
         #[atom("tref")]
         struct TrackReference {
+            #[children]
+            children: ()
+        }
+    }
 
+    make_atom! {
+        #[atom(tref)]
+        enum Children {
+            TimeCode,
+            ChapterList,
+            Synchonization,
+            Transcript,
+            NonprimarySource,
+            Hint,
         }
     }
 
@@ -894,16 +916,237 @@ mod atoms {
     make_atom! {
         #[atom("mdia")]
         struct Media {
-            
+            #[children]
+            children: (),
         }
     }
-    // TODO: media atoms
-    // - pg 54 of https://developer.apple.com/standards/qtff-2001.pdf 
 
     make_atom! {
-        #[atom(test)]
+        #[atom(mdia)]
         enum Children {
-            Skip,
+            MediaHeader,
+            HandlerReference,
+            MediaInformation,
+            Userdata,
+        }
+    }
+
+    make_atom! {
+        #[atom("mdhd")]
+        struct MediaHeader {
+            version: u8,
+            flags: [u8; 3],
+            creation_time: u32,
+            modification_time: u32,
+            time_scale: u32,
+            duration: u32,
+            language: u16,
+            quality: u16,
+        }
+    }
+
+    make_atom! {
+        #[atom("hdlr")]
+        struct HandlerReference {
+            version: u8,
+            flags: [u8; 3],
+            component_type: u32,
+            component_subtype: u32,
+            #[reserved]
+            component_manufacturer: u32,
+            #[reserved]
+            component_flags: u32,
+            #[reserved]
+            component_flags_mask: u32,
+            // TODO: trailing string for component_name
+        }
+    }
+
+    make_atom! {
+        #[atom("minf")]
+        struct MediaInformation {
+            #[children]
+            children: (),
+        }
+    }
+
+    make_atom! {
+        #[atom(minf)]
+        enum Children {
+            VideoMediaInformationHeader,
+            SoundMediaInformationHeader,
+            BaseMediaInformationHeader,
+            BaseMediaInformation,
+            HandlerReference,
+            DataInformation,
+            SampleTable,
+        }
+    }
+
+    make_atom! {
+        #[atom("vmhd")]
+        struct VideoMediaInformationHeader {
+            version: u8,
+            flags: [u8; 3],
+            graphics_mode: u16,
+            opcolor: [u16; 3],
+        }
+    }
+
+    make_atom! {
+        #[atom("smhd")]
+        struct SoundMediaInformationHeader {
+            version: u8,
+            flags: [u8; 3],
+            balance: u16,
+            #[reserved]
+            resered: [u8; 2]
+        }
+    }
+
+    make_atom! {
+        #[atom("gmhd")]
+        struct BaseMediaInformationHeader {
+            // actually just empty...
+        }
+    }
+
+    make_atom! {
+        #[atom("gmin")]
+        struct BaseMediaInformation {
+            version: u8,
+            flags: [u8; 3],
+            graphics_mode: u16,
+            opcolor: [u16; 3],
+            balance: u16,
+            #[reserved]
+            reserved: [u8; 2]
+        }
+    }
+
+    make_atom! {
+        #[atom("dinf")]
+        struct DataInformation {
+            #[children]
+            children: (),
+        }
+    }
+
+    make_atom! {
+        #[atom(dinf)]
+        enum Children {
+            DataReference,
+        }
+    }
+
+    make_atom! {
+        #[atom("dref")]
+        struct DataReference {
+            verion: u8,
+            flags: [u8; 3],
+            // TODO: support for numbered children
+            // e.g, this has DynamicChildren<u32, dref::Child>,
+        }
+    }
+
+    make_atom! {
+        #[atom("stbl")]
+        struct SampleTable {
+            #[children]
+            children: (),
+        }
+    }
+
+    make_atom! {
+        #[atom(stbl)]
+        enum Children {
+            SampleDescription,
+            TimeToSample,
+            SyncSample,
+            SampleToChunk,
+            SampleSize,
+            ChunkOffset,
+            // ShadowSync, reserved
+        }
+    }
+
+    make_atom! {
+        #[atom("stsd")]
+        struct SampleDescription {
+            version: u8,
+            flags: [u8; 3],
+            // TODO: sample description table
+            // see page 70 https://developer.apple.com/standards/qtff-2001.pdf
+        }
+    }
+
+    make_atom! {
+        struct TimeToSampleTableEntry {
+            sample_count: u32,
+            sample_duration: u32,
+        }
+    }
+
+    make_atom! {
+        #[atom("stts")]
+        struct TimeToSample {
+            version: u8,
+            flags: [u8; 3],
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            time_to_sample_table: TimeToSampleTableEntry,
+        }
+    }
+
+    make_atom! {
+        #[atom("stss")]
+        struct SyncSample {
+            version: u8,
+            flags: [u8; 3],
+            // TODO: what is the size of the number
+        }
+    }
+
+    make_atom! {
+        struct SampleToChunkTableEntry {
+            first_chunk: u32,
+            samples_per_chunk: u32,
+            sample_description_id: u32,
+        }
+    }
+
+    make_atom! {
+        #[atom("stsc")]
+        struct SampleToChunk {
+            version: u8,
+            flags: [u8; 3],
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            sample_to_chunk_table: SampleToChunkTableEntry,
+        }
+    }
+
+    make_atom! {
+        #[atom("stsz")]
+        struct SampleSize {
+            version: u8,
+            flags: [u8; 3],
+            sample_size: u32,
+            /* TODO: ???
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            sample_to_chunk_table: SampleToChunkTableEntry,
+            */
+        }
+    }
+
+    make_atom! {
+        #[atom("stco")]
+        struct ChunkOffset {
+            version: u8,
+            flags: [u8; 3],
+            sample_size: u32,
+            /* TODO: ???
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            sample_to_chunk_table: SampleToChunkTableEntry,
+            */
         }
     }
 
@@ -917,7 +1160,8 @@ mod atoms {
         while r.remaining_size() > 0 {
             let atom = AtomHeader::parse(&mut r, &opts).unwrap();
 
-            let mut r = TrailingReader::new(&mut r, atom.size.size as _);
+            let max_offset = r.offset() + atom.size.size as usize;
+            let mut r = TrailingReader::new(&mut r, max_offset);
 
             match atom.fcc {
                 FileType::FCC => {
@@ -934,6 +1178,7 @@ mod atoms {
                 }
                 Movie::FCC => {
                     let movie = Movie::parse(&mut r, &opts).unwrap();
+                    println!("moov: {movie:?}");
                     let mut child_iter = movie.children(&mut r, &opts);
 
                     while let Some(child) = child_iter.next() {
@@ -950,7 +1195,75 @@ mod atoms {
                                 let mut child_iter = track.children(r, &opts);
                                 while let Some(child) = child_iter.next() {
                                     let r = &mut child_iter.reader;
-                                    println!("trak child: {child:?}");
+                                    match child.unwrap() {
+                                        trak::Child::TrackHeader(hdr) => println!("track header: {hdr:?}"),
+                                        trak::Child::Clipping(c) => println!("clipping: {c:?}"),
+                                        trak::Child::TrackMatte(tm) => println!("track matte: {tm:?}"),
+                                        trak::Child::Edit(e) => {
+                                            println!("edit: {e:?}");
+                                            let mut child_iter = e.children(r, &opts);
+                                            while let Some(child) = child_iter.next() {
+                                                let r = &mut child_iter.reader;
+                                                match child.unwrap() {
+                                                    edts::Child::EditList(el) => {
+                                                        println!("edit list: {el:?}");
+                                                        /*
+                                                        for entry in el.table_entries(r, &opts) {
+
+                                                        }
+                                                        */
+                                                    }
+                                                    _ => (),
+                                                }
+                                            }
+                                        }
+                                        trak::Child::TrackReference(tref) => println!("track ref: {tref:?}"),
+                                        trak::Child::TrackLoadingSettings(tls) => println!("track loading: {tls:?}"),
+                                        trak::Child::TrackInputMap(tim) => println!("track input map: {tim:?}"),
+                                        trak::Child::Media(m) => {
+                                            let mut child_iter = m.children(r, &opts);
+                                            while let Some(child) = child_iter.next() {
+                                                let r = &mut child_iter.reader;
+                                                match child.unwrap() {
+                                                    mdia::Child::MediaHeader(h) => println!("media heaader: {h:?}"),
+                                                    mdia::Child::HandlerReference(r) => println!("href: {r:?}"),
+                                                    mdia::Child::MediaInformation(info) => {
+                                                        println!("info: {info:?}");
+                                                        let mut child_iter = info.children(r, &opts);
+                                                        while let Some(child) = child_iter.next() {
+                                                            let r = &mut child_iter.reader;
+                                                            match child.unwrap() {
+                                                                minf::Child::VideoMediaInformationHeader(vid) => println!("vid: {vid:?}"),
+                                                                minf::Child::SoundMediaInformationHeader(snd) => println!("snd: {snd:?}"),
+                                                                minf::Child::BaseMediaInformationHeader(base) => println!("base: {base:?}"),
+                                                                minf::Child::BaseMediaInformation(base) => println!("base info: {base:?}"),
+                                                                minf::Child::HandlerReference(href) => println!("href: {href:?}"),
+                                                                minf::Child::DataInformation(dinfo) => {
+                                                                    println!("dinfo: {dinfo:?}");
+                                                                    let mut child_iter = dinfo.children(r, &opts);
+                                                                    while let Some(child) = child_iter.next() {
+                                                                        println!("data info: {child:?}");
+                                                                    }
+                                                                }
+                                                                minf::Child::SampleTable(stable) => {
+                                                                    println!("stable: {stable:?}");
+                                                                    let mut child_iter = stable.children(r, &opts);
+                                                                    while let Some(child) = child_iter.next() {
+                                                                        println!("stable c: {child:?}");
+                                                                    }
+                                                                }
+                                                                minf::Child::Unsupported(_) => (),
+                                                            }
+                                                        }
+                                                    }
+                                                    mdia::Child::Userdata(u) => println!("udata: {u:?}"),
+                                                    mdia::Child::Unsupported(_) => (),
+                                                }
+                                            }
+                                        }
+                                        trak::Child::Userdata(udata) => println!("udata: {udata:?}"),
+                                        trak::Child::Unsupported(fcc) => println!("unsupported in trak: {fcc:?}"),
+                                    }
                                 }
                             }
                             moov::Child::Userdata(udta) => {
