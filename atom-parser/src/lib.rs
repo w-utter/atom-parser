@@ -579,9 +579,36 @@ impl <I: Parse, S: Parse + ArraySize, const ZERO_RELATIVE: bool> Parse for Dynam
     }
 }
 
+use std::ops::{BitAnd, BitOr, BitAndAssign, BitOrAssign, BitXor, BitXorAssign};
+trait Flags: Sized + BitAnd + BitAndAssign + BitOr + BitOrAssign + BitXor + BitXorAssign {
+
+}
+
+struct VersionAndFlags<V, F> {
+    version: V,
+    flags: F,
+}
+
 mod atoms {
     use super::*;
     use atom_parser_derive::make_atom;
+
+    make_atom! {
+        #[atom("root")]
+        struct Root {
+            #[children]
+            children: (),
+        }
+    }
+
+    make_atom! {
+        #[atom(root)]
+        enum Children {
+            FileType,
+            Movie,
+        }
+    }
+
     make_atom! {
         #[atom("ftyp")]
         struct FileType {
@@ -632,6 +659,129 @@ mod atoms {
             Track,
             Userdata,
             ColorTable,
+            CompressedMovie,
+        }
+    }
+
+    make_atom! {
+        #[atom("cmov")]
+        struct CompressedMovie {
+            #[children]
+            children: (),
+        }
+    }
+
+    make_atom! {
+        #[atom(cmov)]
+        enum Children {
+            DataCompression,
+            CompressedMovieData,
+        }
+    }
+
+    make_atom! {
+        #[atom("dcom")]
+        struct DataCompression {
+            compression_algorithm: u32,
+        }
+    }
+
+    make_atom! {
+        #[atom("cmvd")]
+        struct CompressedMovieData {
+            #[trailing_payload]
+            compressed_movie_data: Vec<u8>,
+        }
+    }
+
+    make_atom! {
+        #[atom("rmra")]
+        struct ReferenceMovie {
+            #[trailing_iterator]
+            reference_movie_descriptors: ReferenceMovieDescriptor,
+        }
+    }
+
+    make_atom! {
+        #[atom("rmda")]
+        struct ReferenceMovieDescriptor {
+            #[children]
+            children: (),
+        }
+    }
+
+    make_atom!{
+        #[atom(rmda)]
+        enum Children {
+            DataReference2,
+            CPUSpeed,
+            VersionCheck,
+            ComponentDetect,
+            Quality,
+        }
+    }
+
+    make_atom! {
+        // why is there is 2 fccs for the same layout & repr ????
+        #[atom("rdrf")]
+        struct DataReference2 {
+            verion: u8,
+            flags: [u8; 3],
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            children: dref::Child,
+        }
+    }
+
+    make_atom! {
+        #[atom("rmdr")]
+        struct DataRate {
+            flags: [u8; 4],
+            data_rate: u32,
+        }
+    }
+
+    make_atom! {
+        #[atom("rmcs")]
+        struct CPUSpeed {
+            flags: u32,
+            cpu_speed: u32,
+        }
+    }
+
+    make_atom! {
+        #[atom("rmvc")]
+        struct VersionCheck {
+            flags: u32,
+            software_package: u32,
+            version: u32,
+            mask: u32,
+            check_type: u16,
+        }
+    }
+
+    make_atom! {
+        struct ComponentDescription {
+            component_type: FourCC,
+            component_subtype: FourCC,
+            component_manufacturer: FourCC,
+            component_flags: u32,
+            component_flags_mask: u32,
+        }
+    }
+
+    make_atom! {
+        #[atom("rmcd")]
+        struct ComponentDetect {
+            flags: u32,
+            component_description: ComponentDescription,
+            minimum_version: u32,
+        }
+    }
+
+    make_atom! {
+        #[atom("rmqu")]
+        struct Quality {
+            quality: u32,
         }
     }
 
@@ -1048,8 +1198,41 @@ mod atoms {
         struct DataReference {
             verion: u8,
             flags: [u8; 3],
-            // TODO: support for numbered children
-            // e.g, this has DynamicChildren<u32, dref::Child>,
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            children: dref::Child,
+        }
+    }
+
+    make_atom! {
+        #[atom(dref)]
+        enum Children {
+            MacAlias,
+            MacResource,
+            Url,
+        }
+    }
+
+    make_atom! {
+        #[atom("alis")]
+        struct MacAlias {
+            verion: u8,
+            flags: [u8; 3],
+        }
+    }
+
+    make_atom! {
+        #[atom("rsrc")]
+        struct MacResource {
+            verion: u8,
+            flags: [u8; 3],
+        }
+    }
+
+    make_atom! {
+        #[atom(b"url\0")]
+        struct Url {
+            verion: u8,
+            flags: [u8; 3],
         }
     }
 
@@ -1074,26 +1257,79 @@ mod atoms {
         }
     }
 
-
-
-    struct SampleDescriptionEntry {
-        // im assuming that these first 2 can be considered as an AtomHeader
-        // => this can be turned into a child
-        // - need to first figure out if its
-        //  - 'vide' => 'codec' or just trait codec
-        //  currently its running out of space
-        size: u32,
-        data_format: u32,
-        reserved: [u8; 6],
-        data_reference_index: u16,
+    make_atom! {
+        struct SampleDescriptionEntry {
+            size: u32,
+            data_format: FourCC,
+            reserved: [u8; 6],
+            data_reference_index: u16,
+        }
     }
 
     make_atom! {
         #[atom(stsd)]
         enum Children {
-            
+            /*
+            // video
+            Cinepak,
+            Jpeg,
+            UncompressedRgb,
+            UncompressedYuv,
+            Graphics,
+            Animation,
+            AppleVideo,
+            KodakPhoto,
+            Mpeg,
+            MJpegA,
+            MJpegB,
+            Sorenson,
+            // sound
+            UncompressedAudio,
+            UncompressedBinaryAudio,
+            UncompressedTwosComplementAudio,
+            LittleEndian16Audio,
+            Mace3,
+            Mace6,
+            Ima4,
+            Float32Audio,
+            Float64Audio,
+            Int24Audio,
+            Int32Audio,
+            ULawAudio,
+            ALawAudio,
+            ADPCMACM2,
+            IMAADPCMACM17,
+            DVAudio,
+            QDesign,
+            QDesign2,
+            PureVoice,
+            Mpeg3CBR,
+            Mpeg3CBRVBR,
+            // timecode
+            Timecode,
+            // text
+            Text, //TODO: children of text (table 3-4)
+            // TODO: hypertext ?
+            // stream
+            MpegStream,
+            // sprite
+            // TODO: sprite
+            // TODO: this whole thing needs to be gone over and checked
+            */
         }
     }
+
+    // TODO: typed flags & bitfields
+
+    make_atom! {
+        #[atom(stsd)]
+        // TODO: need a better parser for this
+        struct Flags {
+            //a = 1,
+        }
+    }
+
+
 
     make_atom! {
         #[atom("stsd")]
@@ -1171,36 +1407,30 @@ mod atoms {
         }
     }
 
+    make_atom! {
+        #[atom("vide")]
+        struct VideoSampleDescription {
+            // how tf is this structured
+        }
+    }
+
     #[test]
     fn ftyp() {
-        let mut r = InMemoryReader::from_path("../vidTest_qtDL.mov").unwrap();
+        let mut r = InMemoryReader::from_path("../file_example_MOV_480_700kB.mov").unwrap();
         let opts = Default::default();
 
         use Parse;
 
-        while r.remaining_size() > 0 {
-            let atom = AtomHeader::parse(&mut r, &opts).unwrap();
+        let root = Root::parse(&mut r, &opts).unwrap();
+        let mut root_iter = root.children(&mut r, &opts);
 
-            let max_offset = r.offset() + atom.size.size as usize;
-            let mut r = TrailingReader::new(&mut r, max_offset);
-
-            match atom.fcc {
-                FileType::FCC => {
-                    let ft = FileType::parse(&mut r, &opts).unwrap();
-                    println!("ftyp: {ft:?}");
-
-                    for fcc in ft.compatible_brands(&mut r, &opts) {
-                        println!("compatible brand: {:?}", fcc.unwrap());
-                    }
-                }
-                Wide::FCC => (),
-                Skip::FCC | Free::FCC => {
-                    println!("{} bytes of free space", r.remaining_size());
-                }
-                Movie::FCC => {
-                    let movie = Movie::parse(&mut r, &opts).unwrap();
+        while let Some(child) = root_iter.next() {
+            let r = &mut root_iter.reader;
+            match child.unwrap() {
+                root::Child::FileType(ftyp) => println!("file type: {ftyp:?}"),
+                root::Child::Movie(movie) => {
                     println!("moov: {movie:?}");
-                    let mut child_iter = movie.children(&mut r, &opts);
+                    let mut child_iter = movie.children(r, &opts);
 
                     while let Some(child) = child_iter.next() {
                         let r = &mut child_iter.reader;
@@ -1228,9 +1458,8 @@ mod atoms {
                                                 match child.unwrap() {
                                                     edts::Child::EditList(el) => {
                                                         println!("edit list: {el:?}");
-                                                        for entry in el.table_entries(r, &opts) {
-                                                            println!("edit list entry: {entry:?}");
-                                                        }
+                                                        let list_entires = el.table_entries(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                        println!("edit list entries: {list_entires:?}");
                                                     }
                                                     _ => (),
                                                 }
@@ -1261,14 +1490,64 @@ mod atoms {
                                                                     println!("dinfo: {dinfo:?}");
                                                                     let mut child_iter = dinfo.children(r, &opts);
                                                                     while let Some(child) = child_iter.next() {
-                                                                        println!("data info: {child:?}");
+                                                                        let r = &mut child_iter.reader;
+                                                                        match child.unwrap() {
+                                                                            dinf::Child::DataReference(dref) => {
+                                                                                let mut child_iter = dref.children(r, &opts);
+                                                                                while let Some(child) = child_iter.next() {
+                                                                                    match child.unwrap() {
+                                                                                        dref::Child::MacAlias(alis) => println!("alias: {alis:?}"),
+                                                                                        dref::Child::MacResource(rsrc) => println!("r: {rsrc:?}"),
+                                                                                        dref::Child::Url(url) => println!("url: {url:?}"),
+                                                                                        _ => (),
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                            _ => (),
+                                                                        }
                                                                     }
                                                                 }
                                                                 minf::Child::SampleTable(stable) => {
                                                                     println!("stable: {stable:?}");
                                                                     let mut child_iter = stable.children(r, &opts);
                                                                     while let Some(child) = child_iter.next() {
-                                                                        println!("stable c: {child:?}");
+                                                                        let r = &mut child_iter.reader;
+                                                                        match child.unwrap() {
+                                                                            stbl::Child::SampleDescription(desc) => {
+                                                                                println!("{desc:?}");
+                                                                                let mut child_iter = desc.sample_description_table(r, &opts);
+                                                                                while let Some(child) = child_iter.next() {
+                                                                                    let r = &mut child_iter.reader;
+                                                                                    println!("sample desc: {child:?}");
+                                                                                }
+                                                                            }
+                                                                            stbl::Child::TimeToSample(tts) => {
+                                                                                println!("tts: {tts:?}");
+                                                                                let time_to_sample = tts.time_to_sample_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                                println!("tts entries: {time_to_sample:?}");
+                                                                            }
+                                                                            stbl::Child::SyncSample(sync) => {
+                                                                                println!("sync sample: {sync:?}");
+                                                                                let sync_samples = sync.sync_sample_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                                println!("sync sample entries: {sync_samples:?}");
+                                                                            }
+                                                                            stbl::Child::SampleToChunk(stc) => {
+                                                                                println!("stc: {stc:?}");
+                                                                                let sample_to_chunk = stc.sample_to_chunk_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                                println!("stc entries: {sample_to_chunk:?}");
+                                                                            }
+                                                                            stbl::Child::SampleSize(ss) => {
+                                                                                println!("ss: {ss:?}");
+                                                                                let sample_sizes = ss.sample_size_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                                println!("ss entries: {sample_sizes:?}");
+                                                                            }
+                                                                            stbl::Child::ChunkOffset(co) => {
+                                                                                println!("co32: {co:?}");
+                                                                                let offsets = co.chunk_offset_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                                println!("co32 entries: {offsets:?}")
+                                                                            }
+                                                                            stbl::Child::Unsupported(u) => println!("unsupported stbl entry: {u:?}"),
+                                                                        }
                                                                     }
                                                                 }
                                                                 minf::Child::Unsupported(_) => (),
@@ -1294,15 +1573,12 @@ mod atoms {
                             moov::Child::Unsupported(missed) => {
                                 println!("skipped: {missed:?}");
                             }
+                            _ => (),
                         }
                     }
                 }
-                _ => {
-                    println!("skipping {atom:?}");
-                    atom.skip_atom(&mut r).unwrap();
-                }
+                root::Child::Unsupported(a) => println!("unsupported {a:?}"),
             }
-            r.seek_remaining().unwrap();
         }
         panic!()
     }
