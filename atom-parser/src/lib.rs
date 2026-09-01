@@ -1,5 +1,4 @@
 #![feature(array_try_map)]
-#![feature(step_trait)]
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct AtomSize {
@@ -344,35 +343,13 @@ impl Reader for InMemoryReader {
     }
 }
 
-struct Unevaluated<T> {
-    header: AtomHeader,
-    _pd: core::marker::PhantomData<T>,
-}
-
-impl <U: Parse> Unevaluated<U> {
-    fn evaluate<T: Reader>() -> Result<U, ParseError> {
-        todo!()
-    }
-
-    async fn evaluate_async<T: AsyncReader>() -> Result<U, ParseError> {
-        todo!()
-    }
-}
-
-trait Container {
-    type Child;
-    fn children(&self) -> impl Iterator<Item = Result<Self::Child, ParseError>>;
-    // TODO: this needs to be an async iterator
-    fn children_async(&self) -> impl Iterator<Item = Result<Self::Child, ParseError>>;
-}
-
-// TODO: async equivalent
-struct ChildrenIter<'a, R: Reader, C> {
+struct ChildrenIter<'a, R: SwapOffsets, C> {
     _pd: core::marker::PhantomData<C>,
     pub reader: BacktrackReader<TrailingReader<&'a mut R>>,
     opts: &'a ParseOptions,
 }
 
+// TODO: async equivalent
 impl <'a, R: Reader, C: Parse> Iterator for ChildrenIter<'a, R, C> {
     type Item = Result<C, ParseError>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -382,10 +359,6 @@ impl <'a, R: Reader, C: Parse> Iterator for ChildrenIter<'a, R, C> {
             None
         }
     }
-}
-
-trait Leaf {
-    // TODO: api to get data
 }
 
 #[derive(Debug)]
@@ -439,8 +412,6 @@ impl <R: Reader> Reader for BacktrackReader<R> {
     }
 }
 
-// TODO: this should prob be like `max_offset` instead of remaining_size
-// so that it doesnt overflow if we backtrack
 struct TrailingReader<R> {
     reader: R,
     max_offset: usize,
@@ -519,20 +490,55 @@ struct DynamicArray<S, I, const ZERO_RELATIVE: bool> {
 }
 
 struct DynamicArrayIter<'a, R: SwapOffsets, S, I, const ZERO_RELATIVE: bool> {
-    arr: &'a DynamicArray<S, I, ZERO_RELATIVE>,
+    size: S,
+    current: S,
+    exhausted: bool,
+    //arr: &'a DynamicArray<S, I, ZERO_RELATIVE>,
     pub reader: BacktrackReader<&'a mut R>,
     opts: &'a ParseOptions,
+    _pd: core::marker::PhantomData<I>,
+}
+
+fn dynamic_array_iter_has_next<const ZERO_RELATIVE: bool, S: ArraySize>(current: &mut S, max_size: &S, exhausted: &mut bool) -> bool {
+    let has_next = if ZERO_RELATIVE {
+        // inclusive range
+        if *exhausted {
+            false
+        } else {
+            *current <= *max_size
+        }
+    } else {
+        // exclusive range
+        *current < *max_size
+    };
+
+    if !has_next {
+        return false;
+    }
+
+    if ZERO_RELATIVE && current == max_size {
+        *exhausted = true;
+    } else {
+        *current += S::ONE;
+    }
+    true
 }
 
 impl <'a, R: Reader, S: ArraySize, I: Parse, const ZERO_RELATIVE: bool> Iterator for DynamicArrayIter<'a, R, S, I, ZERO_RELATIVE> {
     type Item = Result<I, ParseError>;
     fn next(&mut self) -> Option<Self::Item> {
-        todo!("impl iterator")
+        let has_next = dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(&mut self.current, &self.size, &mut self.exhausted);
+
+        if !has_next {
+            return None;
+        }
+        Some(I::parse(&mut self.reader, &self.opts))
     }
 }
 
-trait ArraySize: core::iter::Step + Clone + Copy {
+trait ArraySize: Clone + Copy + core::ops::AddAssign + core::cmp::Ord {
     const ZERO: Self;
+    const ONE: Self;
 }
 
 macro_rules! impl_array_size {
@@ -540,6 +546,7 @@ macro_rules! impl_array_size {
         $(
             impl ArraySize for $i {
                 const ZERO: Self = 0;
+                const ONE: Self = 1;
             }
         )*
     }
@@ -553,14 +560,11 @@ impl <I: Parse, S: Parse + ArraySize, const ZERO_RELATIVE: bool> Parse for Dynam
     fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
         let size = S::parse(reader, options)?;
         let offset = reader.offset();
-        if ZERO_RELATIVE {
-            for _ in S::ZERO..=size {
-                I::parse(reader, options)?;
-            }
-        } else {
-            for _ in S::ZERO..size {
-                I::parse(reader, options)?;
-            }
+        let mut current = S::ZERO;
+        let mut exhausted = false;
+
+        while dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(&mut current, &size, &mut exhausted) {
+            let _ = I::parse(reader, options)?;
         }
 
         Ok(Self {
@@ -1070,13 +1074,34 @@ mod atoms {
         }
     }
 
+
+
+    struct SampleDescriptionEntry {
+        // im assuming that these first 2 can be considered as an AtomHeader
+        // => this can be turned into a child
+        // - need to first figure out if its
+        //  - 'vide' => 'codec' or just trait codec
+        //  currently its running out of space
+        size: u32,
+        data_format: u32,
+        reserved: [u8; 6],
+        data_reference_index: u16,
+    }
+
+    make_atom! {
+        #[atom(stsd)]
+        enum Children {
+            
+        }
+    }
+
     make_atom! {
         #[atom("stsd")]
         struct SampleDescription {
             version: u8,
             flags: [u8; 3],
-            // TODO: sample description table
-            // see page 70 https://developer.apple.com/standards/qtff-2001.pdf
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            sample_description_table: stsd::Child,
         }
     }
 
@@ -1102,7 +1127,8 @@ mod atoms {
         struct SyncSample {
             version: u8,
             flags: [u8; 3],
-            // TODO: what is the size of the number
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            sync_sample_table: u32,
         }
     }
 
@@ -1130,10 +1156,8 @@ mod atoms {
             version: u8,
             flags: [u8; 3],
             sample_size: u32,
-            /* TODO: ???
             #[dynamic_array(size_type = u32, zero_relative = false)]
-            sample_to_chunk_table: SampleToChunkTableEntry,
-            */
+            sample_size_table: u32,
         }
     }
 
@@ -1142,11 +1166,8 @@ mod atoms {
         struct ChunkOffset {
             version: u8,
             flags: [u8; 3],
-            sample_size: u32,
-            /* TODO: ???
             #[dynamic_array(size_type = u32, zero_relative = false)]
-            sample_to_chunk_table: SampleToChunkTableEntry,
-            */
+            chunk_offset_table: u32,
         }
     }
 
@@ -1207,11 +1228,9 @@ mod atoms {
                                                 match child.unwrap() {
                                                     edts::Child::EditList(el) => {
                                                         println!("edit list: {el:?}");
-                                                        /*
                                                         for entry in el.table_entries(r, &opts) {
-
+                                                            println!("edit list entry: {entry:?}");
                                                         }
-                                                        */
                                                     }
                                                     _ => (),
                                                 }
@@ -1276,7 +1295,6 @@ mod atoms {
                                 println!("skipped: {missed:?}");
                             }
                         }
-                        //r.seek_remaining().unwrap();
                     }
                 }
                 _ => {

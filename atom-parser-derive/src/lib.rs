@@ -259,10 +259,14 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         let arr_name = &dynamic_arr.ident;
                         quote! {
                             pub fn #arr_name<'a, R: Reader>(&'a self, reader: &'a mut R, opts: &'a ParseOptions) -> DynamicArrayIter<'a, R, #size_ty, #arr_ty, #zero_relative> {
+                                let arr = &self.#arr_name;
                                 DynamicArrayIter {
-                                    arr: &self.#arr_name,
-                                    reader: BacktrackReader::new(reader, self.#arr_name.offset),
+                                    size: arr.size,
+                                    current: 0,
+                                    exhausted: false,
+                                    reader: BacktrackReader::new(reader, arr.offset),
                                     opts,
+                                    _pd: core::marker::PhantomData,
                                 }
                             }
                         }
