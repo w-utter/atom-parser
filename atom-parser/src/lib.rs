@@ -373,6 +373,7 @@ struct Children<T> {
     size: usize,
 }
 
+#[derive(Debug)]
 struct SizedChildren<S, T> {
     _pd: core::marker::PhantomData<T>,
     len: S,
@@ -520,6 +521,7 @@ struct Trailing<T> {
     size: usize,
 }
 
+#[derive(Debug)]
 struct Payload {
     offset: usize,
     size: usize,
@@ -600,6 +602,19 @@ struct DynamicArrayIter<'a, R: SwapOffsets, S, I, const ZERO_RELATIVE: bool> {
     pub reader: BacktrackReader<&'a mut R>,
     opts: &'a ParseOptions,
     _pd: core::marker::PhantomData<I>,
+}
+
+impl <'a, R: SwapOffsets, S: ArraySize, I, const ZERO_RELATIVE: bool> DynamicArrayIter<'a, R, S, I, ZERO_RELATIVE> {
+    fn new(size: S, reader: &'a mut R, offset: usize, opts: &'a ParseOptions) -> Self {
+        Self {
+            size,
+            current: S::ZERO,
+            exhausted: false,
+            reader: BacktrackReader::new(reader, offset),
+            opts,
+            _pd: core::marker::PhantomData,
+        }
+    }
 }
 
 fn dynamic_array_iter_has_next<const ZERO_RELATIVE: bool, S: ArraySize>(current: &mut S, max_size: &S, exhausted: &mut bool) -> bool {
@@ -691,7 +706,6 @@ trait Flags<B> {
     fn to_bits(self) -> B;
 }
 
-/*
 mod atoms {
     use super::*;
     use atom_parser_derive::make_atom;
@@ -700,131 +714,107 @@ mod atoms {
         #[atom("root")]
         struct Root {
             #[children]
-            children: (),
+            enum Child {
+                FileType,
+                Movie,
+            }
         }
-    }
 
-    make_atom! {
-        #[atom(root)]
-        enum Children {
-            FileType,
-            Movie,
-        }
-    }
-
-    make_atom! {
         #[atom("ftyp")]
         struct FileType {
             major_brand: FourCC,
             minor_version: u32,
             // FIXME: this should have a better syntax
             // like `Item = FourCC` or something
-            #[trailing_iterator]
+            #[trailing_array]
             compatible_brands: FourCC,
         }
-    }
 
-    make_atom! {
-        #[atom("wide")]
-        struct Wide {}
-    }
-    // FIXME: better syntax for payload
-    // maybe just like `..Payload` or smth
-    make_atom! {
-        #[atom("skip")]
-        struct Skip {
-            #[trailing_payload]
-            free_space: Vec<u8>,
-        }
-    }
-    make_atom! {
-        #[atom("free")]
-        struct Free {
-            #[trailing_payload]
-            free_space: Vec<u8>,
-        }
-    }
-
-    make_atom! {
         #[atom("moov")]
         struct Movie {
             #[children]
-            children: (),
+            enum Child {
+                MovieHeader,
+                Clipping,
+                Track,
+                Userdata,
+                ColorTable,
+                CompressedMovie,
+                ReferenceMovie,
+            }
         }
     }
 
-    // FIXME: preferrably above & below would be grouped 
+    // empty atoms
     make_atom! {
-        #[atom(moov)]
-        enum Children {
-            MovieHeader,
-            Clipping,
-            Track,
-            Userdata,
-            ColorTable,
-            CompressedMovie,
+        #[atom("wide")]
+        struct Wide {}
+
+        #[atom("free")]
+        struct Free {
+            #[payload]
+            free_space: Vec<u8>,
+        }
+
+        #[atom("skip")]
+        struct Skip {
+            #[payload]
+            free_space: Vec<u8>,
         }
     }
 
+    // this can kinda just be anywhere and contain anything
+    make_atom! {
+        #[atom("udta")]
+        struct Userdata {
+
+        }
+    }
+
+    // compressed movie data
     make_atom! {
         #[atom("cmov")]
         struct CompressedMovie {
             #[children]
-            children: (),
+            enum Child {
+                DataCompression,
+                CompressedMovieData,
+            }
         }
-    }
 
-    make_atom! {
-        #[atom(cmov)]
-        enum Children {
-            DataCompression,
-            CompressedMovieData,
-        }
-    }
-
-    make_atom! {
         #[atom("dcom")]
         struct DataCompression {
             compression_algorithm: u32,
         }
-    }
 
-    make_atom! {
         #[atom("cmvd")]
         struct CompressedMovieData {
-            #[trailing_payload]
+            #[payload]
             compressed_movie_data: Vec<u8>,
         }
     }
 
+
+    // reference movies
     make_atom! {
         #[atom("rmra")]
         struct ReferenceMovie {
-            #[trailing_iterator]
+            #[trailing_array]
             reference_movie_descriptors: ReferenceMovieDescriptor,
         }
-    }
 
-    make_atom! {
         #[atom("rmda")]
         struct ReferenceMovieDescriptor {
             #[children]
-            children: (),
+            enum Child {
+                DataReference2,
+                CPUSpeed,
+                VersionCheck,
+                ComponentDetect,
+                Quality,
+            }
         }
-    }
 
-    make_atom!{
-        #[atom(rmda)]
-        enum Children {
-            DataReference2,
-            CPUSpeed,
-            VersionCheck,
-            ComponentDetect,
-            Quality,
-        }
-    }
-
-    make_atom! {
         // why is there is 2 fccs for the same layout & repr ????
         #[atom("rdrf")]
         struct DataReference2 {
@@ -833,25 +823,19 @@ mod atoms {
             #[dynamic_array(size_type = u32, zero_relative = false)]
             children: dref::Child,
         }
-    }
 
-    make_atom! {
         #[atom("rmdr")]
         struct DataRate {
             flags: [u8; 4],
             data_rate: u32,
         }
-    }
 
-    make_atom! {
         #[atom("rmcs")]
         struct CPUSpeed {
             flags: u32,
             cpu_speed: u32,
         }
-    }
 
-    make_atom! {
         #[atom("rmvc")]
         struct VersionCheck {
             flags: u32,
@@ -860,9 +844,14 @@ mod atoms {
             mask: u32,
             check_type: u16,
         }
-    }
 
-    make_atom! {
+        #[atom("rmcd")]
+        struct ComponentDetect {
+            flags: u32,
+            component_description: ComponentDescription,
+            minimum_version: u32,
+        }
+
         struct ComponentDescription {
             component_type: FourCC,
             component_subtype: FourCC,
@@ -870,24 +859,14 @@ mod atoms {
             component_flags: u32,
             component_flags_mask: u32,
         }
-    }
 
-    make_atom! {
-        #[atom("rmcd")]
-        struct ComponentDetect {
-            flags: u32,
-            component_description: ComponentDescription,
-            minimum_version: u32,
-        }
-    }
-
-    make_atom! {
         #[atom("rmqu")]
         struct Quality {
             quality: u32,
         }
     }
 
+    // stuff in movie
     make_atom! {
         #[atom("mvhd")]
         struct MovieHeader {
@@ -910,25 +889,7 @@ mod atoms {
             current_time: u32,
             next_track_id: u32,
         }
-    }
 
-    // FIXME: change macro name,
-    // as since it modifies the struct (reserved, fields, etc)
-    // it can be used for both general atoms and other structs
-    //
-    // also, if multiple structs could be made at the same time instead of having to make a def
-    // for each, that would be preferred
-    make_atom! {
-        struct Color {
-            #[reserved]
-            reserved: u16,
-            red: u16,
-            green: u16,
-            blue: u16,
-        }
-    }
-
-    make_atom! {
         #[atom("ctab")]
         struct ColorTable {
             seed: u32,
@@ -936,47 +897,64 @@ mod atoms {
             #[dynamic_array(size_type = u16, zero_relative = true)]
             color_table: Color,
         }
-    }
 
-    // TODO
-    make_atom! {
-        #[atom("udta")]
-        struct Userdata {
-
+        struct Color {
+            // TODO: bring back better parsing support for normal structs
+            //#[reserved]
+            reserved: u16,
+            red: u16,
+            green: u16,
+            blue: u16,
         }
-    }
 
-    make_atom! {
         #[atom("trak")]
         struct Track {
             #[children]
-            children: ()
+            enum Child {
+                TrackHeader,
+                Clipping,
+                TrackMatte,
+                Edit,
+                TrackReference,
+                TrackLoadingSettings,
+                TrackInputMap,
+                Media,
+                Userdata,
+            }
         }
     }
 
+    // clipping region
+    // can be used in movies/tracks
     make_atom! {
-        #[atom(trak)]
-        enum Children {
-            TrackHeader,
-            Clipping,
-            TrackMatte,
-            Edit,
-            TrackReference,
-            TrackLoadingSettings,
-            TrackInputMap,
-            Media,
-            Userdata,
+        #[atom("clip")]
+        struct Clipping {
+            #[children]
+            enum Child {
+                ClippingRegion,
+            }
+        }
+
+        #[atom("crgn")]
+        struct ClippingRegion {
+            region_size: u16,
+            boundary_box: [u8; 8],
+            #[payload]
+            clipping_region: Vec<u8>
         }
     }
 
-
-    // FIXME: the 1 byte version + 3 bytes flags is pretty common,
-    // may want to make something for that
+    // track specific
     make_atom! {
         #[atom("tkhd")]
         struct TrackHeader {
-            version: u8,
-            flags: [u8; 3],
+            #[full_box]
+            struct Flags {
+                const ENABLED = 1 << 0;
+                const USED = 1 << 1;
+                const USED_IN_PREVIEW = 1 << 2;
+                const USED_IN_POSTER = 1 << 3;
+            },
             creation_time: u32,
             modification_time: u32,
             track_id: u32,
@@ -994,140 +972,99 @@ mod atoms {
             track_width: u32,
             track_height: u32,
         }
-    }
 
-    make_atom! {
-        #[atom("clip")]
-        struct Clipping {
 
-        }
-    }
-
-    make_atom! {
-        #[atom("crgn")]
-        struct ClippingRegion {
-            // ??? there is no info on this
-            // page 44
-        }
-    }
-
-    make_atom! {
         #[atom("matt")]
         struct TrackMatte {
-            
+            #[children]
+            enum Child {
+                CompressedMatte,
+            }
         }
-    }
-
-    make_atom! {
         #[atom("kmat")]
         struct CompressedMatte {
-            version: u8,
-            flags: [u8; 3],
+            #[full_box]
+            struct Flags {
+                // unused
+            },
+            // TODO:
+            // technically any video/image description can be here
         }
-    }
 
-    make_atom! {
         #[atom("edts")]
         struct Edit {
             #[children]
-            children: (),
+            enum Child {
+                EditList,
+            }
         }
-    }
 
-    make_atom! {
-        #[atom(edts)]
-        enum Children {
-            EditList,
-        }
-    }
-
-    make_atom! {
         #[atom("elst")]
         struct EditList {
-            version: u8,
-            flags: [u8; 3],
+            #[full_box]
+            struct Flags {
+                // empty
+            },
             #[dynamic_array(size_type = u32, zero_relative = false)]
             table_entries: EditListEntry,
         }
-    }
 
-    make_atom! {
         struct EditListEntry {
             duration: u32,
             media_time: u32,
             media_rate: u32,
         }
-    }
 
-    make_atom! {
         #[atom("tref")]
         struct TrackReference {
             #[children]
-            children: ()
+            enum Child {
+                TimeCode,
+                ChapterList,
+                Synchonization,
+                Transcript,
+                NonprimarySource,
+                Hint,
+            }
         }
-    }
 
-    make_atom! {
-        #[atom(tref)]
-        enum Children {
-            TimeCode,
-            ChapterList,
-            Synchonization,
-            Transcript,
-            NonprimarySource,
-            Hint,
-        }
-    }
-
-    make_atom! {
         #[atom("tmcd")]
         struct TimeCode {
-            #[trailing_iterator]
-            related_track_ids: u32
+            #[trailing_array]
+            related_track_ids: u32,
         }
-    }
 
-    make_atom! {
         #[atom("chap")]
         struct ChapterList {
-            #[trailing_iterator]
-            related_track_ids: u32
+            #[trailing_array]
+            related_track_ids: u32,
         }
-    }
 
-    make_atom! {
         #[atom("sync")]
         struct Synchonization {
-            #[trailing_iterator]
-            related_track_ids: u32
+            #[trailing_array]
+            related_track_ids: u32,
         }
-    }
 
-    make_atom! {
         #[atom("scpt")]
         struct Transcript {
-            #[trailing_iterator]
-            related_track_ids: u32
+            #[trailing_array]
+            related_track_ids: u32,
         }
-    }
 
-    make_atom! {
         #[atom("ssrc")]
         struct NonprimarySource {
-            #[trailing_iterator]
-            related_track_ids: u32
+            #[trailing_array]
+            related_track_ids: u32,
         }
-    }
 
-    make_atom! {
         #[atom("hint")]
         struct Hint {
-            #[trailing_iterator]
-            related_track_ids: u32
+            #[trailing_array]
+            related_track_ids: u32,
         }
-    }
 
-    make_atom! {
+
         #[atom("load")]
         struct TrackLoadingSettings {
             preload_start_time: u32,
@@ -1135,16 +1072,15 @@ mod atoms {
             preload_flags: u32,
             default_hints: u32,
         }
-    }
 
-    make_atom! {
         #[atom("imap")]
         struct TrackInputMap {
-
+            #[children]
+            enum Child {
+                TrackInput,
+            }
         }
-    }
 
-    make_atom! {
         #[atom(b"\0\0in")]
         struct TrackInput {
             id: u32,
@@ -1153,46 +1089,43 @@ mod atoms {
             child_count: u16,
             #[reserved]
             reserved: [u8; 4],
+            #[children]
+            enum Child {
+                InputType,
+                ObjectId,
+            }
         }
-    }
 
-    make_atom! {
         #[atom(b"\0\0ty")]
         struct InputType {
             ty: u32,
         }
-    }
 
-    make_atom! {
         #[atom("obid")]
         struct ObjectId {
             object_id: u32,
         }
-    }
 
-    make_atom! {
         #[atom("mdia")]
         struct Media {
             #[children]
-            children: (),
+            enum Child {
+                MediaHeader,
+                HandlerReference,
+                MediaInformation,
+                Userdata,
+            }
         }
     }
 
-    make_atom! {
-        #[atom(mdia)]
-        enum Children {
-            MediaHeader,
-            HandlerReference,
-            MediaInformation,
-            Userdata,
-        }
-    }
-
+    //media
     make_atom! {
         #[atom("mdhd")]
         struct MediaHeader {
-            version: u8,
-            flags: [u8; 3],
+            #[full_box]
+            struct Flags {
+                // empty
+            },
             creation_time: u32,
             modification_time: u32,
             time_scale: u32,
@@ -1200,13 +1133,13 @@ mod atoms {
             language: u16,
             quality: u16,
         }
-    }
 
-    make_atom! {
         #[atom("hdlr")]
         struct HandlerReference {
-            version: u8,
-            flags: [u8; 3],
+            #[full_box]
+            struct Flags {
+                // empty
+            },
             component_type: u32,
             component_subtype: u32,
             #[reserved]
@@ -1217,62 +1150,55 @@ mod atoms {
             component_flags_mask: u32,
             // TODO: trailing string for component_name
         }
-    }
-
-    make_atom! {
         #[atom("minf")]
         struct MediaInformation {
             #[children]
-            children: (),
+            enum Child {
+                VideoMediaInformationHeader,
+                SoundMediaInformationHeader,
+                BaseMediaInformationHeader,
+                BaseMediaInformation,
+                HandlerReference,
+                DataInformation,
+                SampleTable,
+            }
         }
     }
 
-    make_atom! {
-        #[atom(minf)]
-        enum Children {
-            VideoMediaInformationHeader,
-            SoundMediaInformationHeader,
-            BaseMediaInformationHeader,
-            BaseMediaInformation,
-            HandlerReference,
-            DataInformation,
-            SampleTable,
-        }
-    }
-
+    // media information
     make_atom! {
         #[atom("vmhd")]
         struct VideoMediaInformationHeader {
-            version: u8,
-            flags: [u8; 3],
+            #[full_box]
+            struct Flags {
+                const NO_LEAN_AHEAD = 1 << 0;
+            },
             graphics_mode: u16,
             opcolor: [u16; 3],
         }
-    }
 
-    make_atom! {
         #[atom("smhd")]
         struct SoundMediaInformationHeader {
-            version: u8,
-            flags: [u8; 3],
+            #[full_box]
+            struct Flags {
+                // empty
+            },
             balance: u16,
             #[reserved]
             resered: [u8; 2]
         }
-    }
 
-    make_atom! {
         #[atom("gmhd")]
         struct BaseMediaInformationHeader {
-            // actually just empty...
+            // empty...
         }
-    }
 
-    make_atom! {
         #[atom("gmin")]
         struct BaseMediaInformation {
-            version: u8,
-            flags: [u8; 3],
+            #[full_box]
+            struct Flags {
+                // empty
+            },
             graphics_mode: u16,
             opcolor: [u16; 3],
             balance: u16,
@@ -1281,94 +1207,159 @@ mod atoms {
         }
     }
 
-    make_atom! {
-        #[atom("dinf")]
-        struct DataInformation {
-            #[children]
-            children: (),
-        }
-    }
-
-    make_atom! {
-        #[atom(dinf)]
-        enum Children {
-            DataReference,
-        }
-    }
-
-    make_atom! {
-        #[atom("dref")]
-        struct DataReference {
-            verion: u8,
-            flags: [u8; 3],
-            #[dynamic_array(size_type = u32, zero_relative = false)]
-            children: dref::Child,
-        }
-    }
-
-    make_atom! {
-        #[atom(dref)]
-        enum Children {
-            MacAlias,
-            MacResource,
-            Url,
-        }
-    }
-
-    make_atom! {
-        #[atom("alis")]
-        struct MacAlias {
-            verion: u8,
-            flags: [u8; 3],
-        }
-    }
-
-    make_atom! {
-        #[atom("rsrc")]
-        struct MacResource {
-            verion: u8,
-            flags: [u8; 3],
-        }
-    }
-
-    make_atom! {
-        #[atom(b"url\0")]
-        struct Url {
-            verion: u8,
-            flags: [u8; 3],
-        }
-    }
-
+    // sample table
     make_atom! {
         #[atom("stbl")]
         struct SampleTable {
             #[children]
-            children: (),
+            enum Child {
+                SampleDescription,
+                TimeToSample,
+                SyncSample,
+                SampleToChunk,
+                SampleSize,
+                ChunkOffset,
+                // ShadowSync, reserved
+            },
         }
-    }
 
-    make_atom! {
-        #[atom(stbl)]
-        enum Children {
-            SampleDescription,
-            TimeToSample,
-            SyncSample,
-            SampleToChunk,
-            SampleSize,
-            ChunkOffset,
-            // ShadowSync, reserved
-        }
-    }
-
-    make_atom! {
         struct SampleDescriptionEntry {
             size: u32,
             data_format: FourCC,
             reserved: [u8; 6],
             data_reference_index: u16,
         }
+
+        #[atom("stsd")]
+        struct SampleDescription {
+            #[full_box]
+            struct Flags {
+                // empty
+            },
+            #[children(u32)]
+            enum Child {
+                // TODO
+            }
+        }
+
+        #[atom("stts")]
+        struct TimeToSample {
+            #[full_box]
+            struct Flags {
+                // empty
+            },
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            time_to_sample_table: TimeToSampleTableEntry,
+        }
+
+        struct TimeToSampleTableEntry {
+            sample_count: u32,
+            sample_duration: u32,
+        }
+
+        #[atom("stss")]
+        struct SyncSample {
+            #[full_box]
+            struct Flags {
+                // empty
+            },
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            sync_sample_table: u32,
+        }
+
+        #[atom("stsc")]
+        struct SampleToChunk {
+            #[full_box]
+            struct Flags {
+                // empty
+            },
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            sample_to_chunk_table: SampleToChunkTableEntry,
+        }
+
+        struct SampleToChunkTableEntry {
+            first_chunk: u32,
+            samples_per_chunk: u32,
+            sample_description_id: u32,
+        }
+
+        #[atom("stsz")]
+        struct SampleSize {
+            #[full_box]
+            struct Flags {
+                // empty
+            },
+            sample_size: u32,
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            sample_size_table: u32,
+        }
     }
 
+    // data information
+    make_atom! {
+        #[atom("dinf")]
+        struct DataInformation {
+            #[children]
+            enum Child {
+                DataReference,
+            }
+        }
+
+        #[atom("dref")]
+        struct DataReference {
+            verion: u8,
+            flags: [u8; 3],
+
+            #[children(u32)]
+            enum Child {
+                MacAlias,
+                MacResource,
+                Url,
+            }
+        }
+
+        #[atom("alis")]
+        struct MacAlias {
+            #[full_box]
+            struct Flags {
+                const SELF_REFERENTIAL = 1 << 0;
+            },
+            #[payload]
+            mac_alias: Vec<u8>,
+        }
+
+        #[atom("rsrc")]
+        struct MacResource {
+            #[full_box]
+            struct Flags {
+                const SELF_REFERENTIAL = 1 << 0;
+            },
+            #[payload]
+            mac_alias_resource: Vec<u8>,
+        }
+
+        #[atom(b"url\0")]
+        struct Url {
+            #[full_box]
+            struct Flags {
+                const SELF_REFERENTIAL = 1 << 0;
+            },
+            #[payload]
+            url: Vec<u8>,
+        }
+
+        #[atom("stco")]
+        struct ChunkOffset {
+            #[full_box]
+            struct Flags {
+                // empty
+            },
+            #[dynamic_array(size_type = u32, zero_relative = false)]
+            chunk_offset_table: u32,
+        }
+    }
+
+    /*
     make_atom! {
         #[atom(stsd)]
         enum Children {
@@ -1422,100 +1413,13 @@ mod atoms {
         }
     }
 
-    // TODO: typed flags & bitfields
-
-    make_atom! {
-        #[atom(stsd)]
-        // TODO: need a better parser for this
-        struct Flags {
-            //a = 1,
-        }
-    }
-
-
-
-    make_atom! {
-        #[atom("stsd")]
-        struct SampleDescription {
-            version: u8,
-            flags: [u8; 3],
-            #[dynamic_array(size_type = u32, zero_relative = false)]
-            sample_description_table: stsd::Child,
-        }
-    }
-
-    make_atom! {
-        struct TimeToSampleTableEntry {
-            sample_count: u32,
-            sample_duration: u32,
-        }
-    }
-
-    make_atom! {
-        #[atom("stts")]
-        struct TimeToSample {
-            version: u8,
-            flags: [u8; 3],
-            #[dynamic_array(size_type = u32, zero_relative = false)]
-            time_to_sample_table: TimeToSampleTableEntry,
-        }
-    }
-
-    make_atom! {
-        #[atom("stss")]
-        struct SyncSample {
-            version: u8,
-            flags: [u8; 3],
-            #[dynamic_array(size_type = u32, zero_relative = false)]
-            sync_sample_table: u32,
-        }
-    }
-
-    make_atom! {
-        struct SampleToChunkTableEntry {
-            first_chunk: u32,
-            samples_per_chunk: u32,
-            sample_description_id: u32,
-        }
-    }
-
-    make_atom! {
-        #[atom("stsc")]
-        struct SampleToChunk {
-            version: u8,
-            flags: [u8; 3],
-            #[dynamic_array(size_type = u32, zero_relative = false)]
-            sample_to_chunk_table: SampleToChunkTableEntry,
-        }
-    }
-
-    make_atom! {
-        #[atom("stsz")]
-        struct SampleSize {
-            version: u8,
-            flags: [u8; 3],
-            sample_size: u32,
-            #[dynamic_array(size_type = u32, zero_relative = false)]
-            sample_size_table: u32,
-        }
-    }
-
-    make_atom! {
-        #[atom("stco")]
-        struct ChunkOffset {
-            version: u8,
-            flags: [u8; 3],
-            #[dynamic_array(size_type = u32, zero_relative = false)]
-            chunk_offset_table: u32,
-        }
-    }
-
     make_atom! {
         #[atom("vide")]
         struct VideoSampleDescription {
             // how tf is this structured
         }
     }
+    */
 
     #[test]
     fn ftyp() {
@@ -1618,7 +1522,7 @@ mod atoms {
                                                                         match child.unwrap() {
                                                                             stbl::Child::SampleDescription(desc) => {
                                                                                 println!("{desc:?}");
-                                                                                let mut child_iter = desc.sample_description_table(r, &opts);
+                                                                                let mut child_iter = desc.children(r, &opts);
                                                                                 while let Some(child) = child_iter.next() {
                                                                                     let r = &mut child_iter.reader;
                                                                                     println!("sample desc: {child:?}");
@@ -1686,4 +1590,3 @@ mod atoms {
         panic!()
     }
 }
-*/
