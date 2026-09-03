@@ -281,6 +281,11 @@ impl <'a, R: Reader> Reader for &'a mut R {
 pub trait AsyncReader {
     async fn async_read(&mut self, bytes: &mut [u8]) -> Result<(), IoError>;
     async fn async_seek(&mut self, amt: usize) -> Result<(), IoError>;
+    fn offset(&self) -> usize;
+    fn remaining_size(&self) -> usize;
+    async fn seek_remaining(&mut self) -> Result<(), IoError> {
+        self.async_seek(self.remaining_size()).await
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Default)]
@@ -366,6 +371,57 @@ struct Children<T> {
     _pd: core::marker::PhantomData<T>,
     offset: usize,
     size: usize,
+}
+
+struct SizedChildren<S, T> {
+    _pd: core::marker::PhantomData<T>,
+    len: S,
+    offset: usize,
+}
+
+impl <S: Parse, I: Parse> Parse for SizedChildren<S, I> {
+    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let len = S::parse(reader, options)?;
+        let offset = reader.offset();
+        Ok(Self {
+            _pd: core::marker::PhantomData,
+            len,
+            offset,
+        })
+    }
+    
+    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let len = S::parse_async(reader, options).await?;
+        let offset = reader.offset();
+        Ok(Self {
+            _pd: core::marker::PhantomData,
+            len,
+            offset,
+        })
+    }
+}
+
+impl <I: Parse> Parse for Children<I> {
+    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let offset = reader.offset();
+        let size = reader.remaining_size();
+        Ok(Self {
+            _pd: core::marker::PhantomData,
+            offset,
+            size,
+        })
+    }
+    
+    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let offset = reader.offset();
+        let size = reader.remaining_size();
+        Ok(Self {
+            _pd: core::marker::PhantomData,
+            offset,
+            size
+        })
+    }
+
 }
 
 struct BacktrackReader<R: SwapOffsets> {
@@ -462,6 +518,53 @@ struct Trailing<T> {
     _pd: core::marker::PhantomData<T>,
     offset: usize,
     size: usize,
+}
+
+struct Payload {
+    offset: usize,
+    size: usize,
+}
+
+impl Parse for Payload {
+    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let offset = reader.offset();
+        let size = reader.remaining_size();
+        Ok(Self {
+            offset,
+            size,
+        })
+    }
+
+    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let offset = reader.offset();
+        let size = reader.remaining_size();
+        Ok(Self {
+            offset,
+            size,
+        })
+    }
+}
+
+impl <I: Parse> Parse for Trailing<I> {
+    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let offset = reader.offset();
+        let size = reader.remaining_size();
+        Ok(Self {
+            offset,
+            size,
+            _pd: core::marker::PhantomData
+        })
+    }
+
+    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let offset = reader.offset();
+        let size = reader.remaining_size();
+        Ok(Self {
+            offset,
+            size,
+            _pd: core::marker::PhantomData
+        })
+    }
 }
 
 struct TrailingIterator<'a, R: SwapOffsets, T> {
@@ -579,16 +682,16 @@ impl <I: Parse, S: Parse + ArraySize, const ZERO_RELATIVE: bool> Parse for Dynam
     }
 }
 
-use std::ops::{BitAnd, BitOr, BitAndAssign, BitOrAssign, BitXor, BitXorAssign};
-trait Flags: Sized + BitAnd + BitAndAssign + BitOr + BitOrAssign + BitXor + BitXorAssign {
-
+trait FlagsParse<B>: Sized {
+    fn try_from_bits(bits: B, options: &ParseOptions) -> Result<Self, ParseError>;
 }
 
-struct VersionAndFlags<V, F> {
-    version: V,
-    flags: F,
+trait Flags<B> {
+    fn from_bits(bits: B) -> Self;
+    fn to_bits(self) -> B;
 }
 
+/*
 mod atoms {
     use super::*;
     use atom_parser_derive::make_atom;
@@ -1583,3 +1686,4 @@ mod atoms {
         panic!()
     }
 }
+*/

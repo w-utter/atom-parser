@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 extended_sized_atoms = []
+store_unknown_fields = []
 
 [dependencies]
 thiserror = "2.0"
