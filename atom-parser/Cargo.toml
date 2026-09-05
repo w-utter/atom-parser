@@ -9,4 +9,5 @@ store_unknown_fields = []
 
 [dependencies]
 thiserror = "2.0"
+futures-core = "0.3"
 atom-parser-derive = {path = "../atom-parser-derive"}

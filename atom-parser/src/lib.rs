@@ -1,4 +1,4 @@
-#![feature(array_try_map)]
+#![feature(maybe_uninit_array_assume_init)]
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct AtomSize {
@@ -95,6 +95,10 @@ impl AtomSize {
 type IoError = std::io::Error;
 
 #[derive(thiserror::Error, Debug)]
+#[error("could not convert between integers")]
+pub struct TryFromIntError;
+
+#[derive(thiserror::Error, Debug)]
 pub enum ParseError {
     #[error("Atom Size is too small")]
     AtomSizeTooSmall,
@@ -102,7 +106,9 @@ pub enum ParseError {
     #[error("extended atom sizes (64 bytes) is not supported")]
     AtomSizeUnsupported,
     #[error("io error")]
-    Io(#[from] IoError)
+    Io(#[from] IoError),
+    #[error("could not convert between integers")]
+    IntegerConversion(#[from] TryFromIntError)
 }
 
 macro_rules! parse_integers {
@@ -147,31 +153,87 @@ pub trait Parse: Sized {
     async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError>;
 }
 
+struct ArrayGuard<'a, T, const N: usize> {
+    arr: &'a mut [core::mem::MaybeUninit<T>; N],
+    initialized: usize,
+}
+
+impl <'a, T, const N: usize> ArrayGuard<'a, T, N> {
+    pub fn new(arr: &'a mut [core::mem::MaybeUninit<T>; N]) -> Self {
+        Self {
+            arr,
+            initialized: 0,
+        }
+    }
+
+    pub unsafe fn push(&mut self, item: T) {
+        debug_assert!(self.initialized < N, "trying to write past array");
+        unsafe {
+            let uninit = self.arr.get_unchecked_mut(self.initialized);
+            uninit.write(item);
+        }
+    }
+
+    pub fn uninit() -> [core::mem::MaybeUninit<T>; N] {
+        [const { core::mem::MaybeUninit::uninit()}; N]
+    }
+
+    pub unsafe fn initialize(arr: [core::mem::MaybeUninit<T>; N]) -> [T; N] {
+        unsafe { 
+            core::mem::MaybeUninit::array_assume_init(arr)
+        }
+    }
+}
+
+impl <'a, T, const N: usize> Drop for ArrayGuard<'a, T, N> {
+    fn drop(&mut self) {
+        debug_assert!(self.initialized <= N, "invalid initialized state");
+        if self.initialized == N {
+            return;
+        }
+
+        for item in &mut self.arr[..self.initialized] {
+            // SAFETY: only iterating over items that are already initialized
+            unsafe {
+                item.assume_init_drop()
+            }
+        }
+    }
+}
+
 impl <const N: usize, I: Parse> Parse for [I; N] {
     fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        let default: [(); N] = [(); N];
-        default.try_map(|_| I::parse(reader, options))
+        let mut arr = ArrayGuard::<I, N>::uninit();
+        {
+            let mut guard = ArrayGuard::<I, N>::new(&mut arr);
+            for _ in 0..N {
+                let item = I::parse(reader, options)?;
+                unsafe {
+                    guard.push(item);
+                }
+            }
+        }
+        Ok(unsafe { ArrayGuard::initialize(arr) })
     }
 
     async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        // TODO: above doesnt work for async
-        todo!()
+        let mut arr = ArrayGuard::<I, N>::uninit();
+        {
+            let mut guard = ArrayGuard::<I, N>::new(&mut arr);
+            for _ in 0..N {
+                let item = I::parse_async(reader, options).await?;
+                unsafe {
+                    guard.push(item);
+                }
+            }
+        }
+        Ok(unsafe { ArrayGuard::initialize(arr) })
     }
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 #[repr(transparent)]
 struct FourCC([u8; 4]);
-
-/*
-impl FourCC {
-    const fn new(fcc: [u8; 4]) -> Self {
-        Self(fcc)
-    }
-
-    const fn try_from_str(str: &str) -> Result<Self, >
-}
-*/
 
 impl core::fmt::Debug for FourCC {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -195,16 +257,6 @@ impl Parse for FourCC {
 pub struct AtomHeader {
     pub size: AtomSize,
     pub fcc: FourCC,
-}
-
-impl AtomHeader {
-    pub fn skip_atom<T: Reader>(&self, reader: &mut T) -> Result<(), IoError> {
-        reader.seek(self.size.size as _)
-    }
-
-    pub async fn skip_atom_async<T: AsyncReader>(&self, reader: &mut T) -> Result<(), IoError> {
-        reader.async_seek(self.size.size as _).await
-    }
 }
 
 impl Parse for AtomHeader {
@@ -247,6 +299,9 @@ pub trait Reader: SwapOffsets {
     fn remaining_size(&self) -> usize;
     fn offset(&self) -> usize;
     fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError>;
+    // reads a cstr and returns its length (not including nul) 
+    // and advances the cursor after the string
+    fn read_cstr(&mut self) -> Result<usize, IoError>;
     fn seek(&mut self, amt: usize) -> Result<(), IoError>;
 
     fn seek_remaining(&mut self) -> Result<(), IoError> {
@@ -273,14 +328,20 @@ impl <'a, R: Reader> Reader for &'a mut R {
         R::read(self, bytes)
     }
 
+    fn read_cstr(&mut self) -> Result<usize, IoError> {
+        R::read_cstr(self)
+    }
+
     fn seek(&mut self, amt: usize) -> Result<(), IoError> {
         R::seek(self, amt)
     }
 }
 
-pub trait AsyncReader {
+pub trait AsyncReader: SwapOffsets {
     async fn async_read(&mut self, bytes: &mut [u8]) -> Result<(), IoError>;
     async fn async_seek(&mut self, amt: usize) -> Result<(), IoError>;
+    // reads a cstr and returns its length (including nul)
+    async fn async_read_cstr(&mut self) -> Result<usize, IoError>;
     fn offset(&self) -> usize;
     fn remaining_size(&self) -> usize;
     async fn seek_remaining(&mut self) -> Result<(), IoError> {
@@ -332,11 +393,20 @@ impl Reader for InMemoryReader {
 
     fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError> {
         if self.remaining_size() < bytes.len() {
-            return Err(std::io::Error::other("not enough spc"));
+            return Err(IoError::other("not enough spc"));
         }
         bytes.copy_from_slice(&self.bytes[self.offset..self.offset+bytes.len()]);
         self.offset += bytes.len();
         Ok(())
+    }
+
+    fn read_cstr(&mut self) -> Result<usize, IoError> {
+        let bytes = &self.bytes[self.offset..];
+        let len = bytes
+            .iter()
+            .position(|&byte| byte == b'\0').ok_or(IoError::other("not enough spc"))?;
+        self.offset += len + 1;
+        Ok(len)
     }
 
     fn seek(&mut self, amt: usize) -> Result<(), IoError> {
@@ -348,11 +418,13 @@ impl Reader for InMemoryReader {
     }
 }
 
-struct ChildrenIter<'a, R: SwapOffsets, C> {
+pub struct ChildrenIter<'a, R: SwapOffsets, C> {
     _pd: core::marker::PhantomData<C>,
     pub reader: BacktrackReader<TrailingReader<&'a mut R>>,
     opts: &'a ParseOptions,
 }
+
+use futures_core::Stream as AsyncIterator;
 
 // TODO: async equivalent
 impl <'a, R: Reader, C: Parse> Iterator for ChildrenIter<'a, R, C> {
@@ -366,18 +438,86 @@ impl <'a, R: Reader, C: Parse> Iterator for ChildrenIter<'a, R, C> {
     }
 }
 
+impl <'a, R: AsyncReader, C: Parse> AsyncIterator for ChildrenIter<'a, R, C> {
+    type Item = Result<C, ParseError>;
+    fn poll_next(self: core::pin::Pin<&mut Self>, ctx: &mut core::task::Context<'_>) -> core::task::Poll<Option<Self::Item>> {
+        // TODO: might need to have the async reader trait poll
+        // then have a separate extended trait
+        todo!() 
+    }
+}
+
 #[derive(Debug)]
-struct Children<T> {
+pub struct Children<T> {
     _pd: core::marker::PhantomData<T>,
     offset: usize,
     size: usize,
 }
 
 #[derive(Debug)]
-struct SizedChildren<S, T> {
+pub struct SizedChildren<S, T> {
     _pd: core::marker::PhantomData<T>,
-    len: S,
+    pub len: S,
     offset: usize,
+}
+
+#[derive(Debug)]
+pub struct PascalString<S> {
+    pub len: S,
+    offset: usize,
+}
+
+impl <S: Parse + TryInto<usize> + Copy> Parse for PascalString<S> {
+    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let len = S::parse(reader, options)?;
+        let offset = reader.offset();
+        let length: usize = len.try_into().map_err(|_| TryFromIntError)?;
+
+        reader.seek(length)?;
+        Ok(Self {
+            len,
+            offset,
+        })
+    }
+
+    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let len = S::parse_async(reader, options).await?;
+        let offset = reader.offset();
+        let length: usize = len.try_into().map_err(|_| TryFromIntError)?;
+
+        reader.async_seek(length).await?;
+        Ok(Self {
+            len,
+            offset,
+        })
+    }
+}
+
+pub struct NullTerminatedString {
+    pub len: usize,
+    offset: usize,
+}
+
+impl Parse for NullTerminatedString {
+    fn parse<T: Reader>(reader: &mut T, _: &ParseOptions) -> Result<Self, ParseError> {
+        let offset = reader.offset();
+        let len = reader.read_cstr()?;
+
+        Ok(Self {
+            offset,
+            len,
+        })
+    }
+
+    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+        let offset = reader.offset();
+        let len = reader.async_read_cstr().await?;
+
+        Ok(Self {
+            offset,
+            len,
+        })
+    }
 }
 
 impl <S: Parse, I: Parse> Parse for SizedChildren<S, I> {
@@ -403,7 +543,7 @@ impl <S: Parse, I: Parse> Parse for SizedChildren<S, I> {
 }
 
 impl <I: Parse> Parse for Children<I> {
-    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+    fn parse<T: Reader>(reader: &mut T, _: &ParseOptions) -> Result<Self, ParseError> {
         let offset = reader.offset();
         let size = reader.remaining_size();
         Ok(Self {
@@ -425,13 +565,13 @@ impl <I: Parse> Parse for Children<I> {
 
 }
 
-struct BacktrackReader<R: SwapOffsets> {
+pub struct BacktrackReader<R: SwapOffsets> {
     reader: R,
     stored_offset: usize,
 }
 
 impl <R: SwapOffsets> BacktrackReader<R> {
-    fn new(mut reader: R, mut backtrack_to: usize) -> Self {
+    pub fn new(mut reader: R, mut backtrack_to: usize) -> Self {
         reader.swap_offsets(&mut backtrack_to);
         Self {
             reader,
@@ -464,18 +604,22 @@ impl <R: Reader> Reader for BacktrackReader<R> {
         self.reader.read(bytes)
     }
 
+    fn read_cstr(&mut self) -> Result<usize, IoError> {
+        self.reader.read_cstr()
+    }
+
     fn seek(&mut self, amt: usize) -> Result<(), IoError> {
         self.reader.seek(amt)
     }
 }
 
-struct TrailingReader<R> {
+pub struct TrailingReader<R> {
     reader: R,
     max_offset: usize,
 }
 
 impl <R: Reader> TrailingReader<R> {
-    fn new(reader: R, max_offset: usize) -> Self {
+    pub fn new(reader: R, max_offset: usize) -> Self {
         Self {
             reader,
             max_offset,
@@ -505,6 +649,15 @@ impl <R: Reader> Reader for TrailingReader<R> {
         self.reader.read(bytes)?;
         Ok(())
     }
+
+    fn read_cstr(&mut self) -> Result<usize, IoError> {
+        let len = self.reader.read_cstr()?;
+        if len > self.remaining_size() {
+            return Err(std::io::Error::other("not enough spc"));
+        }
+        Ok(len)
+    }
+
     fn seek(&mut self, amt: usize) -> Result<(), IoError> {
         if amt > self.remaining_size() {
             return Err(std::io::Error::other("not enough spc"));
@@ -515,20 +668,20 @@ impl <R: Reader> Reader for TrailingReader<R> {
 }
 
 #[derive(Debug)]
-struct Trailing<T> {
+pub struct Trailing<T> {
     _pd: core::marker::PhantomData<T>,
     offset: usize,
     size: usize,
 }
 
 #[derive(Debug)]
-struct Payload {
+pub struct Payload {
     offset: usize,
     size: usize,
 }
 
 impl Parse for Payload {
-    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+    fn parse<T: Reader>(reader: &mut T, _: &ParseOptions) -> Result<Self, ParseError> {
         let offset = reader.offset();
         let size = reader.remaining_size();
         Ok(Self {
@@ -548,7 +701,7 @@ impl Parse for Payload {
 }
 
 impl <I: Parse> Parse for Trailing<I> {
-    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+    fn parse<T: Reader>(reader: &mut T, _: &ParseOptions) -> Result<Self, ParseError> {
         let offset = reader.offset();
         let size = reader.remaining_size();
         Ok(Self {
@@ -569,7 +722,7 @@ impl <I: Parse> Parse for Trailing<I> {
     }
 }
 
-struct TrailingIterator<'a, R: SwapOffsets, T> {
+pub struct TrailingIterator<'a, R: SwapOffsets, T> {
     reader: BacktrackReader<TrailingReader<&'a mut R>>,
     opts: &'a ParseOptions,
     _pd: core::marker::PhantomData<T>,
@@ -588,13 +741,13 @@ impl <'a, T: Parse, R: Reader> Iterator for TrailingIterator<'a, R, T> {
 }
 
 #[derive(Debug)]
-struct DynamicArray<S, I, const ZERO_RELATIVE: bool> {
+pub struct DynamicArray<S, I, const ZERO_RELATIVE: bool> {
     size: S,
     offset: usize,
     _pd: core::marker::PhantomData<I>,
 }
 
-struct DynamicArrayIter<'a, R: SwapOffsets, S, I, const ZERO_RELATIVE: bool> {
+pub struct DynamicArrayIter<'a, R: SwapOffsets, S, I, const ZERO_RELATIVE: bool> {
     size: S,
     current: S,
     exhausted: bool,
@@ -654,7 +807,7 @@ impl <'a, R: Reader, S: ArraySize, I: Parse, const ZERO_RELATIVE: bool> Iterator
     }
 }
 
-trait ArraySize: Clone + Copy + core::ops::AddAssign + core::cmp::Ord {
+pub trait ArraySize: Clone + Copy + core::ops::AddAssign + core::cmp::Ord {
     const ZERO: Self;
     const ONE: Self;
 }
@@ -693,15 +846,28 @@ impl <I: Parse, S: Parse + ArraySize, const ZERO_RELATIVE: bool> Parse for Dynam
     }
 
     async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        todo!()
+        let size = S::parse_async(reader, options).await?;
+        let offset = reader.offset();
+        let mut current = S::ZERO;
+        let mut exhausted = false;
+
+        while dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(&mut current, &size, &mut exhausted) {
+            let _ = I::parse_async(reader, options).await?;
+        }
+
+        Ok(Self {
+            size,
+            offset,
+            _pd: core::marker::PhantomData,
+        })
     }
 }
 
-trait FlagsParse<B>: Sized {
+pub trait FlagsParse<B>: Sized {
     fn try_from_bits(bits: B, options: &ParseOptions) -> Result<Self, ParseError>;
 }
 
-trait Flags<B> {
+pub trait Flags<B> {
     fn from_bits(bits: B) -> Self;
     fn to_bits(self) -> B;
 }
@@ -724,8 +890,6 @@ mod atoms {
         struct FileType {
             major_brand: FourCC,
             minor_version: u32,
-            // FIXME: this should have a better syntax
-            // like `Item = FourCC` or something
             #[trailing_array]
             compatible_brands: FourCC,
         }
@@ -815,30 +979,39 @@ mod atoms {
             }
         }
 
-        // why is there is 2 fccs for the same layout & repr ????
         #[atom("rdrf")]
         struct DataReference2 {
-            verion: u8,
-            flags: [u8; 3],
-            #[dynamic_array(size_type = u32, zero_relative = false)]
-            children: dref::Child,
+            #[flags(u32)]
+            flags: struct Flags {
+                const SELF_CONTAINED = 1 << 0;
+            },
+            data_reference: dref::Child,
         }
 
         #[atom("rmdr")]
         struct DataRate {
-            flags: [u8; 4],
+            #[flags(u32)]
+            flags: struct Flags {
+                // empty
+            },
             data_rate: u32,
         }
 
         #[atom("rmcs")]
         struct CPUSpeed {
-            flags: u32,
+            #[flags(u32)]
+            flags: struct Flags {
+                // empty
+            },
             cpu_speed: u32,
         }
 
         #[atom("rmvc")]
         struct VersionCheck {
-            flags: u32,
+            #[flags(u32)]
+            flags: struct Flags {
+                // empty
+            },
             software_package: u32,
             version: u32,
             mask: u32,
@@ -847,7 +1020,10 @@ mod atoms {
 
         #[atom("rmcd")]
         struct ComponentDetect {
-            flags: u32,
+            #[flags(u32)]
+            flags: struct Flags {
+                // empty
+            },
             component_description: ComponentDescription,
             minimum_version: u32,
         }
@@ -870,8 +1046,10 @@ mod atoms {
     make_atom! {
         #[atom("mvhd")]
         struct MovieHeader {
-            version: u8,
-            flags: [u8; 3],
+            #[full_box]
+            struct Flags {
+                // empty
+            },
             creation_time: u32,
             modification_time: u32,
             time_scale: u32,
@@ -893,14 +1071,17 @@ mod atoms {
         #[atom("ctab")]
         struct ColorTable {
             seed: u32,
-            flags: u16,
+            #[flags(u16)]
+            flags: struct Flags {
+                #[expected]
+                const EXPECTED = 0x8000;
+            },
             #[dynamic_array(size_type = u16, zero_relative = true)]
             color_table: Color,
         }
 
         struct Color {
-            // TODO: bring back better parsing support for normal structs
-            //#[reserved]
+            #[reserved]
             reserved: u16,
             red: u16,
             green: u16,
@@ -988,7 +1169,7 @@ mod atoms {
                 // unused
             },
             // TODO:
-            // technically any video/image description can be here
+            // technically any video description can be here
         }
 
         #[atom("edts")]
@@ -1069,7 +1250,11 @@ mod atoms {
         struct TrackLoadingSettings {
             preload_start_time: u32,
             preload_duration: u32,
-            preload_flags: u32,
+            #[flags(u32)]
+            preload_flags: struct Flags {
+                const PRELOADED_REGARDLESS = 1 << 0;
+                const PRELOAD_IF_ENABLED = 1 << 1;
+            },
             default_hints: u32,
         }
 
@@ -1148,7 +1333,8 @@ mod atoms {
             component_flags: u32,
             #[reserved]
             component_flags_mask: u32,
-            // TODO: trailing string for component_name
+            #[pascal_string(u8)]
+            component_name: String,
         }
         #[atom("minf")]
         struct MediaInformation {
@@ -1156,6 +1342,7 @@ mod atoms {
             enum Child {
                 VideoMediaInformationHeader,
                 SoundMediaInformationHeader,
+                TimecodeMediaInformation,
                 BaseMediaInformationHeader,
                 BaseMediaInformation,
                 HandlerReference,
@@ -1205,6 +1392,30 @@ mod atoms {
             #[reserved]
             reserved: [u8; 2]
         }
+
+        #[atom("tmci")]
+        struct TimecodeMediaInformation {
+            #[full_box]
+            struct Flags {
+                // empty
+            },
+            text_font: u16,
+            #[flags(u16)]
+            text_face: struct TextFace {
+                const BOLD = 1 << 0;
+                const ITALIC = 1 << 1;
+                const UNDERLINE = 1 << 2;
+                const OUTLINE = 1 << 3;
+                const SHADOW = 1 << 4;
+                const CONDENSE = 1 << 5;
+                const EXTEND = 1 << 6;
+            },
+            text_size: u16,
+            text_color: [u16; 3],
+            background_color: [u16; 3],
+            #[pascal_string(u8)]
+            font_name: String,
+        }
     }
 
     // sample table
@@ -1223,11 +1434,11 @@ mod atoms {
             },
         }
 
-        struct SampleDescriptionEntry {
-            size: u32,
-            data_format: FourCC,
+        struct SampleDescriptionEntry<D> {
+            #[reserved]
             reserved: [u8; 6],
             data_reference_index: u16,
+            description: D,
         }
 
         #[atom("stsd")]
@@ -1307,9 +1518,10 @@ mod atoms {
 
         #[atom("dref")]
         struct DataReference {
-            verion: u8,
-            flags: [u8; 3],
-
+            #[full_box]
+            struct Flags {
+                // empty
+            },
             #[children(u32)]
             enum Child {
                 MacAlias,
@@ -1359,67 +1571,229 @@ mod atoms {
         }
     }
 
-    /*
-    make_atom! {
-        #[atom(stsd)]
-        enum Children {
-            /*
-            // video
-            Cinepak,
-            Jpeg,
-            UncompressedRgb,
-            UncompressedYuv,
-            Graphics,
-            Animation,
-            AppleVideo,
-            KodakPhoto,
-            Mpeg,
-            MJpegA,
-            MJpegB,
-            Sorenson,
-            // sound
-            UncompressedAudio,
-            UncompressedBinaryAudio,
-            UncompressedTwosComplementAudio,
-            LittleEndian16Audio,
-            Mace3,
-            Mace6,
-            Ima4,
-            Float32Audio,
-            Float64Audio,
-            Int24Audio,
-            Int32Audio,
-            ULawAudio,
-            ALawAudio,
-            ADPCMACM2,
-            IMAADPCMACM17,
-            DVAudio,
-            QDesign,
-            QDesign2,
-            PureVoice,
-            Mpeg3CBR,
-            Mpeg3CBRVBR,
-            // timecode
-            Timecode,
-            // text
-            Text, //TODO: children of text (table 3-4)
-            // TODO: hypertext ?
-            // stream
-            MpegStream,
-            // sprite
-            // TODO: sprite
-            // TODO: this whole thing needs to be gone over and checked
-            */
+    // video media
+    pub mod sample_description {
+        use super::*;
+        make_atom! {
+            struct Video {
+                version: u16,
+                #[reserved]
+                revision_level: u16,
+                vendor: u32,
+                temporal_quality: u32,
+                spatial_quality: u32,
+                width: u16,
+                height: u16,
+                horizontal_resolution: u32,
+                vertical_resolution: u32,
+                #[reserved]
+                data_size: u32,
+                // frames of data per sample
+                frame_count: u16,
+                #[pascal_string(u32)]
+                compressor_name: String,
+                pixel_depth: u32,
+                color_table_id: u16,
+            }
+            // TODO: mjpeg stuff?
+            // - see page 99
+
+
+            struct Sound {
+                version: u16,
+                revision_level: u16,
+                vendor: u32,
+                number_of_channels: u16,
+                sample_size: u16,
+                compression_id: u16,
+                packet_size: u16,
+                sample_rate: u32,
+            }
+
+            struct Timecode {
+                #[reserved]
+                reserved: u32,
+                #[flags(u32)]
+                flags: struct Flags {
+                    const DROP_FRAME = 1 << 0;
+                    const WRAP_AFTER_24H = 1 << 1;
+                    const SUPPORTS_NEGATIVE_TIME = 1 << 2;
+                    const IS_TAPE_COUNTER = 1 << 3;
+                },
+                time_scale: u32,
+                frame_duration: u32,
+                number_of_frames: u8,
+                #[reserved]
+                reserved: [u8; 3],
+                source_reference: Userdata,
+            }
+
+            struct Text {
+                #[flags(u32)]
+                display_flags: struct DisplayFlags {
+                    const DONT_AUTO_SCALE = 1 << 1;
+                    const USE_MOVIE_BACKGROUND_COLOR = 1 << 4;
+                    const SCROLL_IN = 1 << 5;
+                    const SCROLL_OUT = 1 << 6;
+                    const HORIZONTAL_SCROLL = 1 << 7;
+                    const REVERSE_SCROLL = 1 << 8;
+                    const CONTINUOUS_SCROLL = 1 << 9;
+                    const DROP_SHADOW = 1 << 12;
+                    const ANTI_ALIAS = 1 << 13;
+                    const KEY_TEXT = 1 << 14;
+                },
+                text_justification: u32,
+                default_text_box: u64,
+                #[reserved]
+                reserved: [u8; 8],
+                font_number: u16,
+                #[flags(u16)]
+                font_face: struct FontFace {
+                    const BOLD = 1 << 0;
+                    const ITALIC = 1 << 1;
+                    const UNDERLINE = 1 << 2;
+                    const OUTLINE = 1 << 3;
+                    const SHADOW = 1 << 4;
+                    const CONDENSE = 1 << 5;
+                    const EXTEND = 1 << 6;
+                },
+                #[reserved]
+                reserved: u8,
+                #[reserved]
+                reserved: [u8; 2],
+                foreground_color: [u16; 3],
+                #[pascal_string(u8)]
+                text_name: String,
+            }
+            // TODO: text sample extensions / hypertext
+            // - see page 111
+
+            struct Music {
+                #[flags(u32)]
+                flags: struct Flags {
+                    // empty
+                }
+            }
+
+            struct Mpeg {
+                // empty
+            }
+
+            struct Sprite {
+                // empty
+            }
+            
+            struct Tween {
+                // empty
+            }
+
+            struct Q3D {
+                // empty
+            }
+
+            struct Streaming {
+                version: u32,
+                #[reserved]
+                reserved: [u8; 4],
+                flags: u32,
+            }
+
+            struct Hint {
+                version: u16,
+                last_compatible_version: u16,
+                max_packet_size: u32,
+                // TODO: children for rtp
+                // - see page 151
+            }
         }
     }
 
+    type VideoSampleDescription = SampleDescriptionEntry<sample_description::Video>;
+    type SoundSampleDescription = SampleDescriptionEntry<sample_description::Sound>;
+    type TimecodeSampleDescription = SampleDescriptionEntry<sample_description::Timecode>;
+    type TextSampleDescription = SampleDescriptionEntry<sample_description::Text>;
+    type MusicSampleDescription = SampleDescriptionEntry<sample_description::Music>;
+    type MpegSampleDescription = SampleDescriptionEntry<sample_description::Mpeg>;
+    type SpriteSampleDescription = SampleDescriptionEntry<sample_description::Sprite>;
+    type TweenSampleDescription = SampleDescriptionEntry<sample_description::Sprite>;
+    type Q3DSampleDescription = SampleDescriptionEntry<sample_description::Q3D>;
+    type StreamingSampleDescription = SampleDescriptionEntry<sample_description::Streaming>;
+
+
+    // hints
     make_atom! {
-        #[atom("vide")]
-        struct VideoSampleDescription {
-            // how tf is this structured
+        #[atom("hnti")]
+        struct HintInfo {
+            #[children]
+            enum Child {
+
+            }
+        }
+
+        #[atom("trpy")]
+        struct TrackPayloadSizeHint64 {
+            byte_len: u64,
+        }
+        #[atom("totl")]
+        struct TrackPayloadSizeHint32 {
+            byte_len: u32,
+        }
+        #[atom("nump")]
+        struct NetworkPacketHint64 {
+            network_packet_count: u64,
+        }
+        #[atom("npck")]
+        struct NetworkPacketHint32 {
+            network_packet_count: u32,
+        }
+        #[atom("tpyl")]
+        struct ByteCountHint64 {
+            total_bytes_minus_rtp_headers: u64,
+        }
+        #[atom("tpay")]
+        struct ByteCountHint32 {
+            total_bytes_minus_rtp_headers: u32,
+        }
+        #[atom("maxr")]
+        struct DatarateHint {
+            granularity_ms: u32,
+            maximum_datarate: u32,
+        }
+        #[atom("dmed")]
+        struct MediaTrackBytesHint {
+            byte_count: u64,
+        }
+        #[atom("dimm")]
+        struct ImmediateBytesHint {
+            byte_count: u64,
+        }
+        #[atom("drep")]
+        struct RepeatedBytesHint {
+            byte_count: u64,
+        }
+        #[atom("tmin")]
+        struct MinTransmissionTimeHint {
+            shortest_transmission_ms: u32,
+        }
+        #[atom("tmax")]
+        struct MaxTransmissionTimeHint {
+            longest_transmission_ms: u32,
+        }
+        #[atom("pmax")]
+        struct LargestPacketHint {
+            byte_count: u32,
+        }
+        #[atom("dmax")]
+        struct LargestPacketDurationHint {
+            largest_duration_ms: u32,
+        }
+        #[atom("payt")]
+        struct PayloadTypeHint {
+            payload_number: u32,
+            #[pascal_string(u8)]
+            rtpmap: String,
         }
     }
-    */
 
     #[test]
     fn ftyp() {
@@ -1490,6 +1864,7 @@ mod atoms {
                                                             match child.unwrap() {
                                                                 minf::Child::VideoMediaInformationHeader(vid) => println!("vid: {vid:?}"),
                                                                 minf::Child::SoundMediaInformationHeader(snd) => println!("snd: {snd:?}"),
+                                                                minf::Child::TimecodeMediaInformation(info) => println!("timecode: {info:?}"),
                                                                 minf::Child::BaseMediaInformationHeader(base) => println!("base: {base:?}"),
                                                                 minf::Child::BaseMediaInformation(base) => println!("base info: {base:?}"),
                                                                 minf::Child::HandlerReference(href) => println!("href: {href:?}"),

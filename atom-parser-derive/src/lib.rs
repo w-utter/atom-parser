@@ -167,7 +167,18 @@ impl StructFieldAttr {
                     let #name = <#ty>::parse(reader, options)?;
                 }.into()
             }
-            _ => todo!("3"),
+            Self::PascalString {
+                length_ty
+            } => {
+                quote! {
+                    let #name = PascalString::<#length_ty>::parse(reader, options)?;
+                }
+            }
+            Self::NullTerminatedString => {
+                quote! {
+                    let #name = NullTerminatedString::parse(reader, options)?;
+                }
+            }
         }
     }
 
@@ -201,7 +212,18 @@ impl StructFieldAttr {
                     let #name = <#ty>::parse_async(reader, options).await?;
                 }.into()
             }
-            _ => todo!("4"),
+            Self::PascalString {
+                length_ty
+            } => {
+                quote! {
+                    let #name = PascalString::<#length_ty>::parse_async(reader, options).await?;
+                }
+            }
+            Self::NullTerminatedString =>  {
+                quote! {
+                    let #name = NullTerminatedString::parse_async(reader, options).await?;
+                }
+            }
         }
     }
 
@@ -210,12 +232,11 @@ impl StructFieldAttr {
         use quote::quote;
         Some(match self {
             Self::Reserved => return None,
-            Self::Normal | Self::DynamicArray { .. } | Self::TrailingArray | Self::Payload => {
+            Self::Normal | Self::DynamicArray { .. } | Self::TrailingArray | Self::Payload | Self::PascalString { .. } | Self::NullTerminatedString => {
                 quote! {
                     #name,
                 }.into()
             }
-            _ => todo!("5"),
         })
     }
 
@@ -236,17 +257,24 @@ impl StructFieldAttr {
                 length_ty,
             } => {
                 quote! {
-                    #name: DynamicArray<#length_ty, #ty, #zero_relative>,
+                    #name: DynamicArray<#length_ty, #ty, #zero_relative>
                 }
             }
             Self::TrailingArray => {
                 quote! {
-                    #name: Trailing<#ty>,
+                    #name: Trailing<#ty>
                 }
             }
             Self::Payload => {
                 quote! {
-                    #name: Payload,
+                    #name: Payload
+                }
+            }
+            Self::PascalString {
+                length_ty,
+            } => {
+                quote! {
+                    #name: PascalString<#length_ty>
                 }
             }
             _ => todo!("6"),
@@ -287,7 +315,8 @@ impl StructFieldAttr {
             }
             // TODO
             Self::Payload => return None,
-            _ => todo!("a")
+            Self::PascalString { .. } => return None,
+            Self::NullTerminatedString => return None,
         })
     }
 }
@@ -301,7 +330,7 @@ struct Flag {
 
 impl syn::parse::Parse for Flag {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let mut attrs = input.call(syn::Attribute::parse_outer)?;
+        let attrs = input.call(syn::Attribute::parse_outer)?;
         if attrs.len() > 1 {
             panic!("more than 1 attr specified for flag")
         }
@@ -586,11 +615,11 @@ impl AtomField {
             } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        children: SizedChildren<#size_ty, #atom_mod::Child>
+                        pub children: SizedChildren<#size_ty, #atom_mod::Child>
                     }
                 } else {
                     quote! {
-                        children: Children<#atom_mod::Child>
+                        pub children: Children<#atom_mod::Child>
                     }
                 }
             }
@@ -599,7 +628,7 @@ impl AtomField {
                 ..
             } => {
                 quote! {
-                    atom_flags: #atom_mod::#name
+                    pub atom_flags: #atom_mod::#name
                 }
             }
             Self::Flags {
@@ -609,7 +638,7 @@ impl AtomField {
             } => {
                 let field_name = field_name.clone().unwrap_or(syn::Ident::new("flags", proc_macro2::Span::call_site()));
                 quote! {
-                    #field_name: #atom_mod::#name
+                    pub #field_name: #atom_mod::#name
                 }
             }
             _ => todo!("9"),
@@ -1008,9 +1037,10 @@ impl syn::parse::Parse for ChildList {
     }
 }
 
-fn format_parse_impl(name: &syn::Ident, sync_parsing: &[proc_macro2::TokenStream], async_parsing: &[proc_macro2::TokenStream], field_collection: &[proc_macro2::TokenStream]) -> proc_macro2::TokenStream {
+fn format_parse_impl(name: &syn::Ident, sync_parsing: &[proc_macro2::TokenStream], async_parsing: &[proc_macro2::TokenStream], field_collection: &[proc_macro2::TokenStream], generics: &syn::Generics) -> proc_macro2::TokenStream {
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     quote::quote! {
-        impl Parse for #name {
+        impl #impl_generics Parse for #name #ty_generics #where_clause {
             fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
                 #(#sync_parsing)*
                 Ok(Self {
@@ -1093,12 +1123,30 @@ impl syn::parse::Parse for AtomField {
 }
 
 enum Definition {
-    Struct(syn::ItemStruct),
+    Struct(StructDefinition),
     Atom(AtomDefinition)
 }
 
 struct AtomFields {
     inner: Vec<AtomField>,
+}
+
+impl AtomFields {
+    fn group_inline_definitions(fields: &[AtomField], mod_name: &syn::Ident) -> Option<proc_macro2::TokenStream> {
+        use quote::quote;
+        let inline_definitions = fields.iter().filter_map(|field| field.as_inline_definition());
+
+        if inline_definitions.clone().count() == 0 {
+            return None;
+        }
+
+        Some(quote! {
+            mod #mod_name {
+                use super::*;
+                #(#inline_definitions)*
+            }
+        })
+    }
 }
 
 impl syn::parse::Parse for AtomFields {
@@ -1123,22 +1171,64 @@ struct AtomDefinition {
 }
 
 impl AtomDefinition {
-    fn group_inline_field_definitions(&self, atom_mod: &syn::Ident) -> Option<proc_macro2::TokenStream> {
-        use quote::quote;
-        let inline_definitions = self.fields.iter().filter_map(|field| field.as_inline_definition());
+    fn parse_from_syn(input: syn::parse::ParseStream, fcc: FourCC, attrs: Vec<syn::Attribute>, name: syn::Ident) -> syn::Result<Self> {
+        let fields = input.parse::<AtomFields>()?.inner;
+        Ok(Self {
+            fcc,
+            attrs,
+            name,
+            fields,
+        })
+    }
+}
 
-        if inline_definitions.clone().count() == 0 {
-            return None;
+struct StructDefinition {
+    attrs: Vec<syn::Attribute>,
+    name: syn::Ident,
+    generics: syn::Generics,
+    fields: Vec<AtomField>,
+}
+
+impl StructDefinition {
+    fn parse_from_syn(input: syn::parse::ParseStream, attrs: Vec<syn::Attribute>, name: syn::Ident) -> syn::Result<Self> {
+        let mut generics = input.parse::<syn::Generics>()?;
+        let lookahead = input.lookahead1();
+        if lookahead.peek(syn::Token![where]) {
+            generics.where_clause = Some(input.parse()?);
+        }
+        let fields = input.parse::<AtomFields>()?.inner;
+
+        if fields.iter().any(|field| matches!(field, AtomField::FullBox {..} | AtomField::Children { .. })) {
+            panic!("unsupported field in non-atom definition");
         }
 
-        Some(quote! {
-            mod #atom_mod {
-                use super::*;
-                #(#inline_definitions)*
-            }
+        Ok(Self {
+            attrs,
+            name,
+            generics,
+            fields,
         })
     }
 
+    fn module_name(&self) -> syn::Ident {
+        let name = self.name.to_string();
+
+        let mut snake = String::default();
+        for (i, ch) in name.chars().enumerate() {
+            if ch.is_uppercase() {
+                if i > 0 {
+                    snake.push('_');
+                }
+                snake.push(ch.to_ascii_lowercase());
+            } else {
+                snake.push(ch);
+            }
+        }
+        syn::Ident::new(&snake, proc_macro2::Span::call_site())
+    }
+}
+
+impl AtomDefinition {
     fn verify_definition(&self) -> syn::parse::Result<()> {
         // TODO: 
         // make sure that 
@@ -1160,27 +1250,16 @@ impl syn::parse::Parse for Definition {
 
         let fcc = fcc.next().map(|(pos, _)| pos).map(|pos| attrs.swap_remove(pos)).map(|attr| FourCC::from_syn(attr)).transpose()?;
 
+        let _: syn::Visibility = input.parse()?;
+        let _: syn::Token![struct] = input.parse()?;
+        let name = input.parse()?;
+
         Ok(match fcc {
             Some(fcc) => {
-                let _: syn::Visibility = input.parse()?;
-                let _: syn::Token![struct] = input.parse()?;
-                let name = input.parse()?;
-                let fields = input.parse::<AtomFields>()?.inner;
-
-                Self::Atom (
-                    AtomDefinition {
-                        fcc,
-                        attrs,
-                        name,
-                        fields,
-                    }
-                )
+                Self::Atom (AtomDefinition::parse_from_syn(input, fcc, attrs, name)?)
             }
             None => {
-                Self::Struct(syn::ItemStruct {
-                    attrs,
-                    .. input.parse()?
-                })
+                Self::Struct(StructDefinition::parse_from_syn(input, attrs, name)?)
             }
         })
     }
@@ -1204,54 +1283,57 @@ impl syn::parse::Parse for DefinitionList {
 
 #[proc_macro]
 pub fn make_atom(input: TokenStream) -> TokenStream {
-    let input = syn::parse_macro_input!(input as DefinitionList);
+    let mut input = syn::parse_macro_input!(input as DefinitionList);
 
     use quote::quote;
-    let defs = input.defs.iter().map(|def| {
+    let defs = input.defs.iter_mut().map(|def| {
         match def {
             Definition::Struct(item) => {
-                use syn::Fields;
-                match &item.fields {
-                    Fields::Named(named) => {
-
-                        let sync_parsing = named.named.iter().map(|field| {
-                            let name = &field.ident;
-                            let ty = &field.ty;
-                            quote! {
-                                let #name = <#ty>::parse(reader, options)?;
-                            }
-                        });
-
-                        let collection = named.named.iter().map(|field| {
-                            let name = &field.ident;
-                            quote! {
-                                #name,
-                            }
-                        });
-
-                        let name = &item.ident;
-
-                        quote! {
-                            #[derive(Debug)]
-                            #item
-
-                            impl Parse for #name {
-                                fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-                                    #(#sync_parsing)*
-                                    Ok(Self {
-                                        #(#collection)*
-                                    })
-                                }
-
-                                async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-                                    todo!()
-                                }
-                            }
-                        }
+                for param in &mut item.generics.params {
+                    if let syn::GenericParam::Type(type_param) = param {
+                        type_param.bounds.push(syn::parse_quote!(Parse));
                     }
-                    _ => quote! {
-                        #item
+                }
+
+                let StructDefinition {
+                    attrs,
+                    name,
+                    fields,
+                    generics,
+                } = &item;
+
+                let atom_mod = item.module_name();
+                let attrs = attrs.iter();
+                // since some fields are omitted
+                // (e.g reserved/padding)
+                let atom_fields = fields.iter().filter_map(|field| field.as_field_decl(&atom_mod));
+
+                let mod_specific = AtomFields::group_inline_definitions(fields, &atom_mod);
+
+                let sync_parsing = fields.iter().map(|f| f.as_sync_parse(&atom_mod)).collect::<Vec<_>>();
+                let async_parsing = fields.iter().map(|f| f.as_async_parse(&atom_mod)).collect::<Vec<_>>();
+                let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
+
+                let helper_fns = fields.iter().filter_map(|f| f.as_helper_fn(&atom_mod)).collect::<Vec<_>>();
+
+                let parse_impl = format_parse_impl(name, &sync_parsing, &async_parsing, &field_collection, generics);
+
+                let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+                quote! {
+                    #(#attrs)*
+                    #[derive(Debug)]
+                    pub struct #name #generics {
+                        #(#atom_fields),*
                     }
+
+                    impl #impl_generics #name #ty_generics #where_clause {
+                        #(#helper_fns)*
+                    }
+
+                    #parse_impl
+
+                    #mod_specific
                 }
             }
             Definition::Atom(atom) => {
@@ -1268,7 +1350,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                 // (e.g reserved/padding)
                 let atom_fields = fields.iter().filter_map(|field| field.as_field_decl(&atom_mod));
 
-                let mod_specific = atom.group_inline_field_definitions(&atom_mod);
+                let mod_specific = AtomFields::group_inline_definitions(fields, &atom_mod);
 
                 let [fcc_0, fcc_1, fcc_2, fcc_3] = fcc.as_fcc();
                 let sync_parsing = fields.iter().map(|f| f.as_sync_parse(&atom_mod)).collect::<Vec<_>>();
@@ -1277,7 +1359,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
                 let helper_fns = fields.iter().filter_map(|f| f.as_helper_fn(&atom_mod)).collect::<Vec<_>>();
 
-                let parse_impl = format_parse_impl(name, &sync_parsing, &async_parsing, &field_collection);
+                let parse_impl = format_parse_impl(name, &sync_parsing, &async_parsing, &field_collection, &Default::default());
 
                 quote! {
                     #(#attrs)*
