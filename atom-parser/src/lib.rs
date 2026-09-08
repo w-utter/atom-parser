@@ -1874,9 +1874,14 @@ mod atoms {
                                                 let r = &mut child_iter.reader;
                                                 match child.unwrap() {
                                                     edts::Child::EditList(el) => {
-                                                        println!("edit list: {el:?}");
-                                                        let list_entires = el.table_entries(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
-                                                        println!("edit list entries: {list_entires:?}");
+                                                        match el.version {
+                                                            elst::EditListVersions::V0(el) => {
+                                                                println!("edit list: {el:?}");
+                                                                let list_entires = el.table_entries(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                println!("edit list entries: {list_entires:?}");
+                                                            }
+                                                            elst::EditListVersions::Unknown(v) => println!("unknown elst: {v}"),
+                                                        }
                                                     }
                                                     _ => (),
                                                 }
@@ -1911,14 +1916,19 @@ mod atoms {
                                                                         let r = &mut child_iter.reader;
                                                                         match child.unwrap() {
                                                                             dinf::Child::DataReference(dref) => {
-                                                                                let mut child_iter = dref.children(r, &opts);
-                                                                                while let Some(child) = child_iter.next() {
-                                                                                    match child.unwrap() {
-                                                                                        dref::Child::MacAlias(alis) => println!("alias: {alis:?}"),
-                                                                                        dref::Child::MacResource(rsrc) => println!("r: {rsrc:?}"),
-                                                                                        dref::Child::Url(url) => println!("url: {url:?}"),
-                                                                                        _ => (),
+                                                                                match dref.version {
+                                                                                    dref::DataReferenceVersions::V0(dref) => {
+                                                                                        let mut child_iter = dref.children(r, &opts);
+                                                                                        while let Some(child) = child_iter.next() {
+                                                                                            match child.unwrap() {
+                                                                                                dref::v0::Child::MacAlias(alis) => println!("alias: {alis:?}"),
+                                                                                                dref::v0::Child::MacResource(rsrc) => println!("r: {rsrc:?}"),
+                                                                                                dref::v0::Child::Url(url) => println!("url: {url:?}"),
+                                                                                                _ => (),
+                                                                                            }
+                                                                                        }
                                                                                     }
+                                                                                    dref::DataReferenceVersions::Unknown(v) => println!("unknown dref: {v}"),
                                                                                 }
                                                                             }
                                                                             _ => (),
@@ -1932,37 +1942,67 @@ mod atoms {
                                                                         let r = &mut child_iter.reader;
                                                                         match child.unwrap() {
                                                                             stbl::Child::SampleDescription(desc) => {
-                                                                                println!("{desc:?}");
-                                                                                let mut child_iter = desc.children(r, &opts);
-                                                                                while let Some(child) = child_iter.next() {
-                                                                                    let r = &mut child_iter.reader;
-                                                                                    println!("sample desc: {child:?}");
+                                                                                match desc.version {
+                                                                                    stsd::SampleDescriptionVersions::V0(desc) => {
+                                                                                        println!("{desc:?}");
+                                                                                        let mut child_iter = desc.children(r, &opts);
+                                                                                        while let Some(child) = child_iter.next() {
+                                                                                            let r = &mut child_iter.reader;
+                                                                                            println!("sample desc: {child:?}");
+                                                                                        }
+                                                                                    }
+                                                                                    stsd::SampleDescriptionVersions::Unknown(v) => println!("unknown stsd: {v}"),
                                                                                 }
                                                                             }
                                                                             stbl::Child::TimeToSample(tts) => {
-                                                                                println!("tts: {tts:?}");
-                                                                                let time_to_sample = tts.time_to_sample_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
-                                                                                println!("tts entries: {time_to_sample:?}");
+                                                                                match tts.version {
+                                                                                    stts::TimeToSampleVersions::V0(tts) => {
+                                                                                        println!("tts: {tts:?}");
+                                                                                        let time_to_sample = tts.time_to_sample_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                                        println!("tts entries: {time_to_sample:?}");
+                                                                                    }
+                                                                                    stts::TimeToSampleVersions::Unknown(v) => println!("unknown stts: {v}"),
+                                                                                }
                                                                             }
                                                                             stbl::Child::SyncSample(sync) => {
-                                                                                println!("sync sample: {sync:?}");
-                                                                                let sync_samples = sync.sync_sample_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
-                                                                                println!("sync sample entries: {sync_samples:?}");
+                                                                                match sync.version {
+                                                                                    stss::SyncSampleVersions::V0(sync) => {
+                                                                                        println!("sync sample: {sync:?}");
+                                                                                        let sync_samples = sync.sync_sample_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                                        println!("sync sample entries: {sync_samples:?}");
+                                                                                    }
+                                                                                    stss::SyncSampleVersions::Unknown(v) => println!("unknown stts: {v}"),
+                                                                                }
                                                                             }
                                                                             stbl::Child::SampleToChunk(stc) => {
-                                                                                println!("stc: {stc:?}");
-                                                                                let sample_to_chunk = stc.sample_to_chunk_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
-                                                                                println!("stc entries: {sample_to_chunk:?}");
+                                                                                match stc.version {
+                                                                                    stsc::SampleToChunkVersions::V0(stc) => {
+                                                                                        println!("stc: {stc:?}");
+                                                                                        let sample_to_chunk = stc.sample_to_chunk_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                                        println!("stc entries: {sample_to_chunk:?}");
+                                                                                    }
+                                                                                    stsc::SampleToChunkVersions::Unknown(v) => println!("unknown stsc: {v}"),
+                                                                                }
                                                                             }
                                                                             stbl::Child::SampleSize(ss) => {
-                                                                                println!("ss: {ss:?}");
-                                                                                let sample_sizes = ss.sample_size_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
-                                                                                println!("ss entries: {sample_sizes:?}");
+                                                                                match ss.version {
+                                                                                    stsz::SampleSizeVersions::V0(ss) => {
+                                                                                        println!("ss: {ss:?}");
+                                                                                        let sample_sizes = ss.sample_size_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                                        println!("ss entries: {sample_sizes:?}");
+                                                                                    }
+                                                                                    stsz::SampleSizeVersions::Unknown(v) => println!("unknown stsz: {v}"),
+                                                                                }
                                                                             }
                                                                             stbl::Child::ChunkOffset(co) => {
-                                                                                println!("co32: {co:?}");
-                                                                                let offsets = co.chunk_offset_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
-                                                                                println!("co32 entries: {offsets:?}")
+                                                                                match co.version {
+                                                                                    stco::ChunkOffsetVersions::V0(co) => {
+                                                                                        println!("co32: {co:?}");
+                                                                                        let offsets = co.chunk_offset_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                                        println!("co32 entries: {offsets:?}")
+                                                                                    }
+                                                                                    stco::ChunkOffsetVersions::Unknown(v) => println!("unknown stco: {v}"),
+                                                                                }
                                                                             }
                                                                             stbl::Child::Unsupported(u) => println!("unsupported stbl entry: {u:?}"),
                                                                         }

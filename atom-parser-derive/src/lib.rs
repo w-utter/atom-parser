@@ -343,21 +343,38 @@ struct Flag {
     name: syn::Ident,
     val: syn::Expr,
     expected: bool,
+    version_num: HashSet<syn::LitInt>,
 }
 
 
 impl syn::parse::Parse for Flag {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let attrs = input.call(syn::Attribute::parse_outer)?;
-        if attrs.len() > 1 {
-            panic!("more than 1 attr specified for flag")
+        if attrs.len() > 2 {
+            panic!("more than 2 attrs specified for flag")
         }
-        let expected = attrs.into_iter().next().map(|attr| {
-            if !attr.path().is_ident("expected") {
-                panic!("unknown attr")
+
+        let mut expected = None;
+        let mut version_num = None;
+        for attr in attrs.into_iter() {
+            let path = attr.path();
+            if path.is_ident("expected") {
+                if expected.is_some() {
+                    panic!("duplicate expected attrs")
+                }
+                expected = Some(true)
+            } else if path.is_ident("version") {
+                if version_num.is_some() {
+                    panic!("duplicate version attrs")
+                }
+                version_num = Some(VersionList::parse_version_num_from_attr(attr)?)
+            } else {
+                panic!("unknown attr for field")
             }
-            true
-        }).unwrap_or(false);
+        }
+        let version_num = version_num.unwrap_or_default();
+        let expected = expected.unwrap_or_default();
+
         let _: syn::Token![const] = input.parse()?;
         let name = input.parse()?;
         let _: syn::Token![=] = input.parse()?;
@@ -365,7 +382,8 @@ impl syn::parse::Parse for Flag {
         Ok(Self {
             name,
             val,
-            expected
+            expected,
+            version_num,
         })
     }
 }
@@ -382,13 +400,19 @@ impl FlagList {
         true
     }
 
-    fn flags_impl<'a>(name: &'a syn::Ident, flags: &'a [Flag], repr: &'a syn::Type) -> impl Iterator<Item = proc_macro2::TokenStream> + 'a {
-        // TODO: this should cast to the Name type 
-        // - s.t flags are stored as Flags rather than u32
-        flags.iter().map(move |flag| {
+    fn flags_impl<'a>(name: &'a syn::Ident, flags: &'a [Flag], repr: &'a syn::Type, version: Option<&'a syn::LitInt>) -> impl Iterator<Item = proc_macro2::TokenStream> + 'a {
+        flags.iter().filter_map(move |flag| {
+            if let Some(v) = version {
+                if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
+                    return None;
+                }
+            } else if !flag.version_num.is_empty() {
+                panic!("version specified for flags but no version identifier")
+            }
+
             let flag_name = &flag.name;
             let flag_val = &flag.val;
-            quote::quote!(const #flag_name: #name = Self::from_bits_(#flag_val as #repr);)
+            Some(quote::quote!(const #flag_name: #name = Self::from_bits_(#flag_val as #repr);))
         })
     }
 
@@ -842,7 +866,7 @@ impl AtomField {
         })
     }
 
-    fn as_inline_definition(&self) -> Option<proc_macro2::TokenStream> {
+    fn as_inline_definition(&self, version: Option<&syn::LitInt>) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
         Some(match self {
             Self::Struct(_, _) => return None,
@@ -850,7 +874,17 @@ impl AtomField {
                 children,
                 ..
             } => {
-                let variants = children.iter().map(|child| &child.name).collect::<Vec<_>>();
+                let variants = children.iter().filter_map(|child| {
+                    if let Some(v) = version {
+                        if !child.version_num.is_empty() && !child.version_num.contains(v) {
+                            return None
+                        }
+                    } else if !child.version_num.is_empty() {
+                        panic!("child version but no version identifier");
+                    }
+                    Some(&child.name)
+                }).collect::<Vec<_>>();
+
                 quote! {
                     #[derive(Debug)]
                     pub enum Child {
@@ -914,7 +948,7 @@ impl AtomField {
                 let repr = syn::parse_quote!(u32);
                 let flags_check = FlagList::flags_parse_check(flags);
                 //let flags_impl = FlagList::flags_trait_impl(name, flags, &repr);
-                let flags = FlagList::flags_impl(name, flags, &repr);
+                let flags = FlagList::flags_impl(name, flags, &repr, version);
                 let flag_storage_elision = elide_flags.then(|| quote! { #[cfg(feature = "store_unknown_fields")] });
 
                 let bitops_impl = FlagList::flags_bitops_impl(name);
@@ -988,7 +1022,7 @@ impl AtomField {
                 let flags_trait_impl = FlagList::flags_trait_impl(name, flags, parse_repr);
                 let bitops_impl = FlagList::flags_bitops_impl(name);
 
-                let flags = FlagList::flags_impl(name, flags, parse_repr);
+                let flags = FlagList::flags_impl(name, flags, parse_repr, version);
                 let flag_storage_elision = elide_flags.then(|| quote! { #[cfg(feature = "store_unknown_fields")] });
 
                 // TODO: bit ops
@@ -1038,20 +1072,31 @@ impl AtomField {
 #[derive(Clone)]
 struct Child {
     name: syn::Ident,
-    fcc: Option<FourCC>,
+    version_num: HashSet<syn::LitInt>,
 }
 
 impl syn::parse::Parse for Child {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let mut attrs = input.call(syn::Attribute::parse_outer)?;
-        // TODO: get override atom
-        // eg
-        // #[atom(abcd)]
-        // ChilaA
+        let attrs = input.call(syn::Attribute::parse_outer)?;
+
+        let mut version_num = None;
+        for attr in attrs.into_iter() {
+            let path = attr.path();
+            if path.is_ident("version") {
+                if version_num.is_some() {
+                    panic!("duplicate version attrs")
+                }
+                version_num = Some(VersionList::parse_version_num_from_attr(attr)?);
+            } else {
+                panic!("unknown attr");
+            }
+        }
+        let version_num = version_num.unwrap_or_default();
+
         let name = input.parse()?;
         Ok(Self {
             name,
-            fcc: None,
+            version_num,
         })
     }
 }
@@ -1075,7 +1120,7 @@ impl syn::parse::Parse for ChildList {
 
 #[derive(Clone)]
 struct Version {
-    version_num: syn::LitInt,
+    version_num: HashSet<syn::LitInt>,
     version_name: syn::Ident,
     fields: Vec<AtomField>,
 }
@@ -1095,8 +1140,8 @@ impl syn::parse::Parse for Version {
         if !version_attr.path().is_ident("version") {
             panic!("unknown attr")
         }
-        let version_num = version_attr.parse_args::<syn::LitInt>()?;
 
+        let version_num = VersionList::parse_version_num_from_attr(version_attr)?;
         let version_name = input.parse()?;
         let content;
         syn::braced!(content in input);
@@ -1113,6 +1158,12 @@ impl syn::parse::Parse for Version {
 
 struct VersionList {
     inner: Vec<Version>,
+}
+
+impl VersionList {
+    fn parse_version_num_from_attr(attr: syn::Attribute) -> syn::parse::Result<HashSet<syn::LitInt>> {
+        Ok(attr.parse_args_with(syn::punctuated::Punctuated::<syn::LitInt, syn::Token![,]>::parse_terminated)?.into_iter().collect::<HashSet<_>>())
+    }
 }
 
 impl syn::parse::Parse for VersionList {
@@ -1227,9 +1278,9 @@ struct AtomFields {
 }
 
 impl AtomFields {
-    fn group_inline_definitions(fields: &[AtomField], mod_name: &syn::Ident) -> Option<proc_macro2::TokenStream> {
+    fn group_inline_definitions(fields: &[AtomField], mod_name: &syn::Ident, version: Option<&syn::LitInt>) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
-        let inline_definitions = fields.iter().filter_map(|field| field.as_inline_definition());
+        let inline_definitions = fields.iter().filter_map(|field| field.as_inline_definition(version));
 
         if inline_definitions.clone().count() == 0 {
             return None;
@@ -1258,7 +1309,7 @@ impl syn::parse::Parse for AtomFields {
     }
 }
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // TODO: this needs to be integrated
 // - Fullbox parsing also needs to be changed slightly
@@ -1321,11 +1372,13 @@ fn try_expand_into_versioned_fields(fields: Vec<AtomField>, version: Option<syn:
                         versions,
                     } => {
                         for version in versions {
-                            if !map.contains_key(&version.version_num) {
-                                map.insert(version.version_num.clone(), version_independent.clone());
+                            for v in &version.version_num {
+                                if !map.contains_key(v) {
+                                    map.insert(v.clone(), version_independent.clone());
+                                }
+                                let version_specific = map.get_mut(v).unwrap();
+                                version_specific.extend(version.fields.clone());
                             }
-                            let version_specific = map.get_mut(&version.version_num).unwrap();
-                            version_specific.extend(version.fields.clone());
                         }
                     }
                     field => {
@@ -1597,7 +1650,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         let version_specific = versioned.versions.iter().map(|(v, fields)| {
                             let version_mod = Versioned::version_mod_from_lit(v);
 
-                            let version_specific = fields.iter().filter_map(|field| field.as_inline_definition());
+                            let version_specific = fields.iter().filter_map(|field| field.as_inline_definition(Some(v)));
                             let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, Some(&version_mod))).collect::<Vec<_>>();
                             let async_parsing = fields.iter().filter_map(|f| f.as_async_parse(&atom_mod, Some(&version_mod))).collect::<Vec<_>>();
                             let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
@@ -1694,7 +1747,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         // (e.g reserved/padding)
                         let atom_fields = fields.iter().filter_map(|field| field.as_field_decl(Some(&atom_mod)));
 
-                        let mod_specific = AtomFields::group_inline_definitions(&fields, &atom_mod);
+                        let mod_specific = AtomFields::group_inline_definitions(&fields, &atom_mod, None);
 
                         let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, None)).collect::<Vec<_>>();
                         let async_parsing = fields.iter().filter_map(|f| f.as_async_parse(&atom_mod, None)).collect::<Vec<_>>();
@@ -1746,7 +1799,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         let version_specific = versioned.versions.iter().map(|(v, fields)| {
                             let version_mod = Versioned::version_mod_from_lit(v);
 
-                            let version_specific = fields.iter().filter_map(|field| field.as_inline_definition());
+                            let version_specific = fields.iter().filter_map(|field| field.as_inline_definition(Some(v)));
                             let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, Some(&version_mod))).collect::<Vec<_>>();
                             let async_parsing = fields.iter().filter_map(|f| f.as_async_parse(&atom_mod, Some(&version_mod))).collect::<Vec<_>>();
                             let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
@@ -1818,7 +1871,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         // (e.g reserved/padding)
                         let atom_fields = fields.iter().filter_map(|field| field.as_field_decl(Some(&atom_mod)));
 
-                        let mod_specific = AtomFields::group_inline_definitions(&fields, &atom_mod);
+                        let mod_specific = AtomFields::group_inline_definitions(&fields, &atom_mod, None);
 
                         let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, None)).collect::<Vec<_>>();
                         let async_parsing = fields.iter().filter_map(|f| f.as_async_parse(&atom_mod, None)).collect::<Vec<_>>();
