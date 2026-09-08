@@ -1,6 +1,7 @@
 extern crate proc_macro;
 use proc_macro::TokenStream;
 
+#[derive(Clone)]
 enum StructFieldAttr {
     // definition of repeated fields `Entry` with length of type `Size`
     //
@@ -38,12 +39,18 @@ enum StructFieldAttr {
     // #[payload]
     // some_field: [u8],
     Payload,
+    // the field that identifies the version number
+    //
+    // #[version]
+    // version: u8,
+    VersionIdentifier,
     // just a normal field
     //
     // field: u8,
     Normal,
 }
 
+#[derive(Clone)]
 struct FourCC([u8; 4]);
 
 impl FourCC {
@@ -132,16 +139,18 @@ impl StructFieldAttr {
             Self::TrailingArray
         } else if path.is_ident("payload") {
             Self::Payload
+        } else if path.is_ident("version") {
+            Self::VersionIdentifier
         } else {
             unreachable!("unknown attr");
         })
     }
 
-    fn as_sync_parse(&self, field: &syn::Field) -> proc_macro2::TokenStream {
+    fn as_sync_parse(&self, field: &syn::Field) -> Option<proc_macro2::TokenStream> {
         let name = &field.ident;
         let ty = &field.ty;
         use quote::quote;
-        match self {
+        Some(match self {
             Self::Reserved => {
                 quote! {
                     let _reserved = <#ty>::parse(reader, options)?;
@@ -179,14 +188,16 @@ impl StructFieldAttr {
                     let #name = NullTerminatedString::parse(reader, options)?;
                 }
             }
-        }
+            // builtin parsing in versioned impl
+            Self::VersionIdentifier => return None,
+        })
     }
 
-    fn as_async_parse(&self, field: &syn::Field) -> proc_macro2::TokenStream {
+    fn as_async_parse(&self, field: &syn::Field) -> Option<proc_macro2::TokenStream> {
         let name = &field.ident;
         let ty = &field.ty;
         use quote::quote;
-        match self {
+        Some(match self {
             Self::Reserved => {
                 quote! {
                     //let _reserved = <#ty>::parse_async(reader, options).await?;
@@ -224,14 +235,16 @@ impl StructFieldAttr {
                     let #name = NullTerminatedString::parse_async(reader, options).await?;
                 }
             }
-        }
+            // builtin parsing in versioned impl
+            Self::VersionIdentifier => return None,
+        })
     }
 
     fn as_collection(&self, field: &syn::Field) -> Option<proc_macro2::TokenStream> {
         let name = &field.ident;
         use quote::quote;
         Some(match self {
-            Self::Reserved => return None,
+            Self::Reserved | Self::VersionIdentifier => return None,
             Self::Normal | Self::DynamicArray { .. } | Self::TrailingArray | Self::Payload | Self::PascalString { .. } | Self::NullTerminatedString => {
                 quote! {
                     #name,
@@ -246,7 +259,7 @@ impl StructFieldAttr {
 
         use quote::quote;
         Some(match self {
-            Self::Reserved => return None,
+            Self::Reserved | Self::VersionIdentifier => return None,
             Self::Normal => {
                 quote! {
                     #field
@@ -277,7 +290,11 @@ impl StructFieldAttr {
                     #name: PascalString<#length_ty>
                 }
             }
-            _ => todo!("6"),
+            Self::NullTerminatedString => {
+                quote! {
+                    #name: NullTerminatedString,
+                }
+            }
         })
     }
     
@@ -287,7 +304,7 @@ impl StructFieldAttr {
 
         use quote::quote;
         Some(match self {
-            Self::Normal | Self::Reserved => return None,
+            Self::Normal | Self::Reserved | Self::VersionIdentifier => return None,
             Self::TrailingArray => {
                 quote! {
                     pub fn #name<'a, R: Reader>(&self, reader: &'a mut R, opts: &'a ParseOptions) -> TrailingIterator<'a, R, #ty> {
@@ -321,6 +338,7 @@ impl StructFieldAttr {
     }
 }
 
+#[derive(Clone)]
 struct Flag {
     name: syn::Ident,
     val: syn::Expr,
@@ -494,7 +512,7 @@ impl syn::parse::Parse for FlagList {
     }
 }
 
-
+#[derive(Clone)]
 enum AtomField {
     // 1 byte of version followed by 3 bytes of flags
     // common at the start of some atoms
@@ -533,19 +551,18 @@ enum AtomField {
         parse_repr: syn::Type,
         flags: Vec<Flag>
     },
-    // the field that identifies the version number
-    //
-    // #[version]
-    // version: u8,
-    VersionIdentifier,
     // inline definitions of different versions
     //
-    // #[version]
+    // #[versions]
     // enum Version {
     //      #[version(0)]
-    //      V1(/* verison specific */)
+    //      V1 {
+    //         /* verison specific */
+    //      },
     // }
-    Version,
+    Version {
+        versions: Vec<Version>,
+    },
     // inline definitions of the atoms children
     //
     // #[children]
@@ -587,8 +604,14 @@ impl AtomField {
                 parse_repr,
                 flags,
             }
-        } else if path.is_ident("version") {
-            todo!("8")
+        } else if path.is_ident("versions") {
+            let _: syn::Token![enum] = input.parse()?;
+            let _: syn::Ident = input.parse()?;
+
+            let versions = input.parse::<VersionList>()?.inner;
+            Self::Version {
+                versions,
+            }
         } else if path.is_ident("children") {
             let _: syn::Token![enum] = input.parse()?;
             let _: syn::Ident = input.parse()?;
@@ -605,8 +628,11 @@ impl AtomField {
         })
     }
 
-    fn as_field_decl(&self, atom_mod: &syn::Ident) -> Option<proc_macro2::TokenStream> {
+    fn as_field_decl(&self, atom_mod: Option<&syn::Ident>) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
+
+        let mod_name = atom_mod.map(|name| quote!(#name::));
+
         Some(match self {
             Self::Struct(f, attr) => return attr.as_field_decl(f),
             Self::Children {
@@ -615,11 +641,11 @@ impl AtomField {
             } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        pub children: SizedChildren<#size_ty, #atom_mod::Child>
+                        pub children: SizedChildren<#size_ty, #mod_name Child>
                     }
                 } else {
                     quote! {
-                        pub children: Children<#atom_mod::Child>
+                        pub children: Children<#mod_name Child>
                     }
                 }
             }
@@ -628,7 +654,7 @@ impl AtomField {
                 ..
             } => {
                 quote! {
-                    pub atom_flags: #atom_mod::#name
+                    pub atom_flags: #mod_name #name
                 }
             }
             Self::Flags {
@@ -638,15 +664,16 @@ impl AtomField {
             } => {
                 let field_name = field_name.clone().unwrap_or(syn::Ident::new("flags", proc_macro2::Span::call_site()));
                 quote! {
-                    pub #field_name: #atom_mod::#name
+                    pub #field_name: #mod_name #name
                 }
             }
             _ => todo!("9"),
         })
     }
 
-    fn as_helper_fn(&self, atom_mod: &syn::Ident) -> Option<proc_macro2::TokenStream> {
+    fn as_helper_fn(&self, atom_mod: Option<&syn::Ident>) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
+        let mod_name = atom_mod.map(|name| quote!(#name::));
         Some(match self {
             Self::Struct(f, attr) => return attr.as_helper_fn(f),
             Self::Children {
@@ -655,14 +682,14 @@ impl AtomField {
             } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        pub fn children<'a, R: Reader>(&self, reader: &'a mut R, opts: &'a ParseOptions) -> DynamicArrayIter<'a, R, #size_ty, #atom_mod::Child, false> {
+                        pub fn children<'a, R: Reader>(&self, reader: &'a mut R, opts: &'a ParseOptions) -> DynamicArrayIter<'a, R, #size_ty, #mod_name Child, false> {
                             let arr = &self.children;
                             DynamicArrayIter::new(arr.len, reader, arr.offset, opts)
                         }
                     }
                 } else {
                     quote! {
-                        pub fn children<'a, R: Reader>(&self, reader: &'a mut R, opts: &'a ParseOptions) -> ChildrenIter<'a, R, #atom_mod::Child> {
+                        pub fn children<'a, R: Reader>(&self, reader: &'a mut R, opts: &'a ParseOptions) -> ChildrenIter<'a, R, #mod_name Child> {
                             let children = &self.children;
                             let max_offset = children.offset + children.size;
                             ChildrenIter {
@@ -679,21 +706,25 @@ impl AtomField {
         })
     }
 
-    fn as_async_parse(&self, atom_mod: &syn::Ident) -> proc_macro2::TokenStream {
+    fn as_async_parse(&self, atom_mod: &syn::Ident, version_mod: Option<&syn::Ident>) -> Option<proc_macro2::TokenStream> {
+        let mod_name = match version_mod {
+            Some(v) => quote!(#atom_mod::#v),
+            None => quote!(#atom_mod)
+        };
         use quote::quote;
-        match self {
-            Self::Struct(field, attr) => attr.as_async_parse(field),
+        Some(match self {
+            Self::Struct(field, attr) => return attr.as_async_parse(field),
             Self::Children {
                 size_ty,
                 children,
             } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        let children = <SizedChildren<#size_ty, #atom_mod::Child>>::parse_async(reader, options).await?;
+                        let children = <SizedChildren<#size_ty, #mod_name::Child>>::parse_async(reader, options).await?;
                     }
                 } else {
                     quote! {
-                        let children = <Children<#atom_mod::Child>>::parse_async(reader, options).await?;
+                        let children = <Children<#mod_name::Child>>::parse_async(reader, options).await?;
                     }
                 }
             }
@@ -702,10 +733,9 @@ impl AtomField {
                 ..
             } => {
                 quote! {
-                    let (version_identifier, atom_flags) = {
-                        let bits = u32::parse_async(reader, options).await?;
-                        let [b0, b1, b2, b3] = u32::to_be_bytes(bits);
-                        (b0, #atom_mod::#name::from_bytes([b1, b2, b3]))
+                    let atom_flags = {
+                        let bytes = <[u8; 3]>::parse_async(reader, options).await?;
+                        #mod_name::#name::try_from_bits(bytes, options)?
                     };
                 }
             }
@@ -719,29 +749,35 @@ impl AtomField {
                     let #field_name = {
                         use crate::FlagsParse;
                         let flags = <#parse_repr>::parse_async(reader, options).await?;
-                        <#atom_mod::#name>::try_from_bits(flags, options)?
+                        <#mod_name::#name>::try_from_bits(flags, options)?
                     };
                 }
             }
             _ => todo!("10"),
-        }
+        })
     }
 
-    fn as_sync_parse(&self, atom_mod: &syn::Ident) -> proc_macro2::TokenStream {
+    fn as_sync_parse(&self, atom_mod: &syn::Ident, version_mod: Option<&syn::Ident>) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
-        match self {
-            Self::Struct(field, attr) => attr.as_sync_parse(field),
+
+        let mod_name = match version_mod {
+            Some(v) => quote!(#atom_mod::#v),
+            None => quote!(#atom_mod)
+        };
+
+        Some(match self {
+            Self::Struct(field, attr) => return attr.as_sync_parse(field),
             Self::Children {
                 size_ty,
                 children,
             } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        let children = <SizedChildren<#size_ty, #atom_mod::Child>>::parse(reader, options)?;
+                        let children = <SizedChildren<#size_ty, #mod_name::Child>>::parse(reader, options)?;
                     }
                 } else {
                     quote! {
-                        let children = <Children<#atom_mod::Child>>::parse(reader, options)?;
+                        let children = <Children<#mod_name::Child>>::parse(reader, options)?;
                     }
                 }
             }
@@ -750,10 +786,9 @@ impl AtomField {
                 ..
             } => {
                 quote! {
-                    let (version_identifier, atom_flags) = {
-                        let bits = u32::parse(reader, options)?;
-                        let [b0, b1, b2, b3] = u32::to_ne_bytes(bits);
-                        (b0, #atom_mod::#name::from_bytes([b1, b2, b3]))
+                    let atom_flags = {
+                        let bytes = <[u8; 3]>::parse(reader, options)?;
+                        #mod_name::#name::try_from_bits(bytes, options)?
                     };
                 }
             }
@@ -767,12 +802,12 @@ impl AtomField {
                     let #field_name = {
                         use crate::FlagsParse;
                         let flags = <#parse_repr>::parse(reader, options)?;
-                        <#atom_mod::#name>::try_from_bits(flags, options)?
+                        <#mod_name::#name>::try_from_bits(flags, options)?
                     };
                 }
             }
             _ => todo!("11"),
-        }
+        })
     }
 
     fn as_collection(&self) -> Option<proc_macro2::TokenStream> {
@@ -803,7 +838,7 @@ impl AtomField {
                     #field_name,
                 }
             }
-            _ => todo!("12"),
+            Self::Version{..} => return None,
         })
     }
 
@@ -812,8 +847,8 @@ impl AtomField {
         Some(match self {
             Self::Struct(_, _) => return None,
             Self::Children {
-                size_ty,
                 children,
+                ..
             } => {
                 let variants = children.iter().map(|child| &child.name).collect::<Vec<_>>();
                 quote! {
@@ -995,11 +1030,12 @@ impl AtomField {
                     }
                 }
             }
-            _ => todo!("13")
+            Self::Version{ .. } => return None,
         })
     }
 }
 
+#[derive(Clone)]
 struct Child {
     name: syn::Ident,
     fcc: Option<FourCC>,
@@ -1037,7 +1073,63 @@ impl syn::parse::Parse for ChildList {
     }
 }
 
-fn format_parse_impl(name: &syn::Ident, sync_parsing: &[proc_macro2::TokenStream], async_parsing: &[proc_macro2::TokenStream], field_collection: &[proc_macro2::TokenStream], generics: &syn::Generics) -> proc_macro2::TokenStream {
+#[derive(Clone)]
+struct Version {
+    version_num: syn::LitInt,
+    version_name: syn::Ident,
+    fields: Vec<AtomField>,
+}
+
+impl syn::parse::Parse for Version {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let attrs = input.call(syn::Attribute::parse_outer)?;
+        if attrs.len() != 1 {
+            panic!("incorrect # of attrs (only need #[version(0)])")
+        }
+
+        let version_attr = attrs
+            .into_iter()
+            .next()
+            .unwrap();
+
+        if !version_attr.path().is_ident("version") {
+            panic!("unknown attr")
+        }
+        let version_num = version_attr.parse_args::<syn::LitInt>()?;
+
+        let version_name = input.parse()?;
+        let content;
+        syn::braced!(content in input);
+        let content = content.parse_terminated(AtomField::parse, syn::Token![,])?;
+        let fields = content.into_iter().collect::<Vec<_>>();
+
+        Ok(Self {
+            version_num,
+            version_name,
+            fields,
+        })
+    }
+}
+
+struct VersionList {
+    inner: Vec<Version>,
+}
+
+impl syn::parse::Parse for VersionList {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let content;
+        syn::braced!(content in input);
+
+        let content = content.parse_terminated(Version::parse, syn::Token![,])?;
+        let inner = content.into_iter().collect::<Vec<_>>();
+        Ok(Self {
+            inner,
+        })
+
+    }
+}
+
+fn format_parse_impl(name: &syn::Ident, sync_parsing: &[proc_macro2::TokenStream], async_parsing: &[proc_macro2::TokenStream], field_collection: &[proc_macro2::TokenStream], generics: &syn::Generics, generic_collection: Option<proc_macro2::TokenStream>) -> proc_macro2::TokenStream {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     quote::quote! {
         impl #impl_generics Parse for #name #ty_generics #where_clause {
@@ -1045,6 +1137,7 @@ fn format_parse_impl(name: &syn::Ident, sync_parsing: &[proc_macro2::TokenStream
                 #(#sync_parsing)*
                 Ok(Self {
                     #(#field_collection)*
+                    #generic_collection
                 })
             }
 
@@ -1052,6 +1145,7 @@ fn format_parse_impl(name: &syn::Ident, sync_parsing: &[proc_macro2::TokenStream
                 #(#async_parsing)*
                 Ok(Self {
                     #(#field_collection)*
+                    #generic_collection
                 })
             }
         }
@@ -1068,7 +1162,7 @@ fn parse_normal_field(input: syn::parse::ParseStream, attrs: Vec<syn::Attribute>
 fn is_atom_attr(path: &syn::Path) -> bool {
     path.is_ident("full_box")
     || path.is_ident("flags")
-    || path.is_ident("version")
+    || path.is_ident("versions")
     || path.is_ident("children")
 }
 
@@ -1079,6 +1173,7 @@ fn is_struct_attr(path: &syn::Path) -> bool {
     || path.is_ident("null_terminated_string")
     || path.is_ident("trailing_array")
     || path.is_ident("payload")
+    || path.is_ident("version")
 }
 
 impl syn::parse::Parse for AtomField {
@@ -1122,7 +1217,7 @@ impl syn::parse::Parse for AtomField {
     }
 }
 
-enum Definition {
+enum DefinitionKind {
     Struct(StructDefinition),
     Atom(AtomDefinition)
 }
@@ -1162,6 +1257,98 @@ impl syn::parse::Parse for AtomFields {
         })
     }
 }
+
+use std::collections::HashMap;
+
+// TODO: this needs to be integrated
+// - Fullbox parsing also needs to be changed slightly
+//      - e.g it only does the [u8; 3] parsing
+fn try_expand_into_versioned_fields(fields: Vec<AtomField>, version: Option<syn::LitInt>) -> syn::Result<Result<Versioned, Vec<AtomField>>> {
+    let versions = fields.iter().filter(|field| matches!(field, AtomField::Version { .. }));
+    let mut version_identifier = fields.iter().enumerate().filter(|(_, field)| matches!(field, AtomField::FullBox { .. } | AtomField::Struct(_, StructFieldAttr::VersionIdentifier)));
+
+    if version_identifier.clone().count() > 1 {
+        panic!("more than 1 version identifier")
+    }
+
+    match (version_identifier.next(), &version, versions.count()) {
+        (None, Some(_), _) => panic!("verion attr but no version identifier"),
+        (None, _, vs) if vs > 0 => panic!("verions present but no version identifier"),
+        (Some(_), None, v) if v == 0 => panic!("version identifier but no verisons"),
+        (_, Some(_), v) if v > 0 => panic!("version attr and versions present"),
+        (Some((i, _)), _, _) if i > 0 => panic!("version identifier needs to be declared as the first field"),
+        (None, _, _) => return Ok(Err(fields)),
+        (_, Some(version_num), _) => {
+            let mut map = HashMap::new();
+
+            let mut version_repr = None;
+            let mut out_fields = vec![];
+
+            for field in &fields {
+                match field {
+                    AtomField::Struct(field, StructFieldAttr::VersionIdentifier) => {
+                        version_repr = Some(field.ty.clone());
+                    }
+                    AtomField::Version { .. } => unreachable!(),
+                    field => {
+                        if matches!(field, AtomField::FullBox { .. }) {
+                            let repr = syn::parse_quote!(u8);
+                            version_repr = Some(repr);
+                        }
+                        out_fields.push(field.clone());
+                    }
+                }
+            }
+
+            map.insert(version_num.clone(), out_fields);
+            Ok(Ok(Versioned {
+                versions: map,
+                version_repr: version_repr.unwrap()
+            }))
+        }
+        _ => {
+            let mut map = HashMap::new();
+
+            let mut version_independent = vec![];
+            let mut version_repr = None;
+
+            for field in &fields {
+                match field {
+                    AtomField::Struct(field, StructFieldAttr::VersionIdentifier) => {
+                        version_repr = Some(field.ty.clone());
+                    }
+                    AtomField::Version {
+                        versions,
+                    } => {
+                        for version in versions {
+                            if !map.contains_key(&version.version_num) {
+                                map.insert(version.version_num.clone(), version_independent.clone());
+                            }
+                            let version_specific = map.get_mut(&version.version_num).unwrap();
+                            version_specific.extend(version.fields.clone());
+                        }
+                    }
+                    field => {
+                        if matches!(field, AtomField::FullBox { .. }) {
+                            let repr = syn::parse_quote!(u8);
+                            version_repr = Some(repr);
+                        }
+                        for (_, version_specific) in &mut map {
+                            version_specific.push(field.clone());
+                        }
+                        version_independent.push(field.clone());
+                    }
+                }
+            }
+
+            Ok(Ok(Versioned {
+                versions: map,
+                version_repr: version_repr.unwrap(),
+            }))
+        }
+    }
+}
+
 
 struct AtomDefinition {
     fcc: FourCC,
@@ -1250,23 +1437,122 @@ impl syn::parse::Parse for Definition {
 
         let fcc = fcc.next().map(|(pos, _)| pos).map(|pos| attrs.swap_remove(pos)).map(|attr| FourCC::from_syn(attr)).transpose()?;
 
+        let mut version = attrs.iter().enumerate().filter(|(_, attr)| attr.path().is_ident("version"));
+
+        if version.clone().count() > 1 {
+            panic!("more than 1 version");
+        }
+
+        let version = version.next().map(|(pos, _)| pos).map(|pos| attrs.swap_remove(pos)).map(|attr| attr.parse_args::<syn::LitInt>()).transpose()?;
+
         let _: syn::Visibility = input.parse()?;
         let _: syn::Token![struct] = input.parse()?;
         let name = input.parse()?;
 
-        Ok(match fcc {
+        let kind = match fcc {
             Some(fcc) => {
-                Self::Atom (AtomDefinition::parse_from_syn(input, fcc, attrs, name)?)
+                DefinitionKind::Atom (AtomDefinition::parse_from_syn(input, fcc, attrs, name)?)
             }
             None => {
-                Self::Struct(StructDefinition::parse_from_syn(input, attrs, name)?)
+                DefinitionKind::Struct(StructDefinition::parse_from_syn(input, attrs, name)?)
             }
+        };
+
+        Ok(Self {
+            version,
+            kind,
         })
     }
 }
 
+struct Definition {
+    version: Option<syn::LitInt>,
+    kind: DefinitionKind,
+}
+
 struct DefinitionList {
     defs: Vec<Definition>,
+}
+
+struct Versioned {
+    version_repr: syn::Type,
+    versions: HashMap<syn::LitInt, Vec<AtomField>>,
+}
+
+impl Versioned {
+    fn version_mod_from_lit(v: &syn::LitInt) -> syn::Ident {
+        quote::format_ident!("v{v}")
+    }
+
+    fn versioned_struct_from_lit(name: &syn::Ident, v: &syn::LitInt) -> syn::Ident {
+        quote::format_ident!("{name}V{v}")
+    }
+
+    fn versioned_enum_variant_from_lit(v: &syn::LitInt) -> syn::Ident {
+        quote::format_ident!("V{v}")
+    }
+
+    fn format_enum_name_from_versioned_struct(name: &syn::Ident) -> syn::Ident {
+        quote::format_ident!("{name}Versions")
+    }
+
+    fn format_versioned_struct(&self, name: &syn::Ident, attrs: &[syn::Attribute], generics: &syn::Generics) -> proc_macro2::TokenStream {
+        use quote::quote;
+        let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+        let enum_name = Self::format_enum_name_from_versioned_struct(name);
+        let enum_variants = self.versions.iter().map(|(v, _)| {
+            let variant = Self::versioned_enum_variant_from_lit(v);
+            let version_mod = Self::version_mod_from_lit(v);
+            let versioned_name = Self::versioned_struct_from_lit(&name, v);
+            quote!(#variant(#version_mod::#versioned_name #ty_generics),)
+        });
+
+        let sync_parsing = self.versions.iter().map(|(v, _)| {
+            let variant = Self::versioned_enum_variant_from_lit(v);
+            let version_mod = Self::version_mod_from_lit(v);
+            let versioned_name = Self::versioned_struct_from_lit(&name, v);
+
+            quote!(#v => Self::#variant(#version_mod::#versioned_name::parse(reader, options)?),)
+        });
+
+        let async_parsing = self.versions.iter().map(|(v, _)| {
+            let variant = Self::versioned_enum_variant_from_lit(v);
+            let version_mod = Self::version_mod_from_lit(v);
+            let versioned_name = Self::versioned_struct_from_lit(&name, v);
+            quote!(#v => Self::#variant(#version_mod::#versioned_name::parse_async(reader, options).await?),)
+        });
+
+        let version_repr = &self.version_repr;
+
+        quote! {
+            #(#attrs)*
+            #[derive(Debug)]
+            pub enum #enum_name #generics {
+                #(#enum_variants)*
+                Unknown(#version_repr),
+            }
+
+            use super::*;
+            impl #impl_generics Parse for #enum_name #ty_generics #where_clause {
+                fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+                    let version_ident = <#version_repr>::parse(reader, options)?;
+                    Ok(match version_ident {
+                        #(#sync_parsing)*
+                        u => Self::Unknown(u),
+                    })
+                }
+
+                async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+                    let version_ident = <#version_repr>::parse_async(reader, options).await?;
+                    Ok(match version_ident {
+                        #(#async_parsing)*
+                        u => Self::Unknown(u),
+                    })
+                }
+            }
+        }
+    }
 }
 
 impl syn::parse::Parse for DefinitionList {
@@ -1283,102 +1569,286 @@ impl syn::parse::Parse for DefinitionList {
 
 #[proc_macro]
 pub fn make_atom(input: TokenStream) -> TokenStream {
-    let mut input = syn::parse_macro_input!(input as DefinitionList);
+    let input = syn::parse_macro_input!(input as DefinitionList);
 
     use quote::quote;
-    let defs = input.defs.iter_mut().map(|def| {
-        match def {
-            Definition::Struct(item) => {
+
+    let defs = input.defs.into_iter().map(|def| {
+        match def.kind {
+            DefinitionKind::Struct(mut item) => {
                 for param in &mut item.generics.params {
                     if let syn::GenericParam::Type(type_param) = param {
                         type_param.bounds.push(syn::parse_quote!(Parse));
                     }
                 }
 
+                let atom_mod = item.module_name();
                 let StructDefinition {
                     attrs,
                     name,
                     fields,
                     generics,
-                } = &item;
+                } = item;
 
-                let atom_mod = item.module_name();
-                let attrs = attrs.iter();
-                // since some fields are omitted
-                // (e.g reserved/padding)
-                let atom_fields = fields.iter().filter_map(|field| field.as_field_decl(&atom_mod));
+                match try_expand_into_versioned_fields(fields, def.version) {
+                    Ok(Ok(versioned)) => {
+                        let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-                let mod_specific = AtomFields::group_inline_definitions(fields, &atom_mod);
+                        let version_specific = versioned.versions.iter().map(|(v, fields)| {
+                            let version_mod = Versioned::version_mod_from_lit(v);
 
-                let sync_parsing = fields.iter().map(|f| f.as_sync_parse(&atom_mod)).collect::<Vec<_>>();
-                let async_parsing = fields.iter().map(|f| f.as_async_parse(&atom_mod)).collect::<Vec<_>>();
-                let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
+                            let version_specific = fields.iter().filter_map(|field| field.as_inline_definition());
+                            let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, Some(&version_mod))).collect::<Vec<_>>();
+                            let async_parsing = fields.iter().filter_map(|f| f.as_async_parse(&atom_mod, Some(&version_mod))).collect::<Vec<_>>();
+                            let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
+                            let helper_fns = fields.iter().filter_map(|f| f.as_helper_fn(None)).collect::<Vec<_>>();
 
-                let helper_fns = fields.iter().filter_map(|f| f.as_helper_fn(&atom_mod)).collect::<Vec<_>>();
+                            let name = Versioned::versioned_struct_from_lit(&name, v);
 
-                let parse_impl = format_parse_impl(name, &sync_parsing, &async_parsing, &field_collection, generics);
+                            // so that if one version has a generic and another doesnt, all versions
+                            // are bounded by the same generics
+                            let (generic_storage, generic_collection) = if generics.params.is_empty() {
+                                (None, None)
+                            } else {
+                                let lts = generics.params.iter().filter_map(|param| {
+                                    if let syn::GenericParam::Lifetime(lt) = param {
+                                        Some(lt.lifetime.clone())
+                                    } else {
+                                        None
+                                    }
+                                });
+                                let rest = generics.params.iter().filter_map(|param| {
+                                    use syn::GenericParam;
+                                    Some(match param {
+                                        GenericParam::Type(ty) => ty.ident.clone(),
+                                        GenericParam::Const(c) => c.ident.clone(),
+                                        _ => return None,
+                                    })
+                                });
 
-                let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+                                let items = quote!(#(#lts,)*#(#rest,)*);
+                                (
+                                    Some(quote!(_pd: core::marker::PhantomData< (( #items )) >)),
+                                    Some(quote!(_pd: core::marker::PhantomData,))
+                                )
+                            };
 
-                quote! {
-                    #(#attrs)*
-                    #[derive(Debug)]
-                    pub struct #name #generics {
-                        #(#atom_fields),*
+                            let parse_impl = format_parse_impl(&name, &sync_parsing, &async_parsing, &field_collection, &generics, generic_collection);
+                            let fields = fields.iter().filter_map(|field| field.as_field_decl(None));
+
+                            quote! {
+                                pub mod #version_mod {
+                                    use super::*;
+                                    #(#attrs)*
+                                    #[derive(Debug)]
+                                    pub struct #name #generics {
+                                        #(#fields,)*
+                                        #generic_storage
+                                    }
+
+                                    impl #impl_generics #name #ty_generics #where_clause{
+                                        #(#helper_fns)*
+                                    }
+
+                                    #parse_impl
+                                    #(#version_specific)*
+                                }
+                            }
+                        });
+
+                        let versions = versioned.format_versioned_struct(&name, &attrs, &generics);
+                        let enum_name = Versioned::format_enum_name_from_versioned_struct(&name);
+
+                        quote! {
+                            mod #atom_mod {
+                                #versions
+                                #(#version_specific)*
+                            }
+
+                            #(#attrs)*
+                            #[derive(Debug)]
+                            struct #name #generics {
+                                pub version: #atom_mod::#enum_name #ty_generics,
+                            }
+
+                            impl #impl_generics Parse for #name #ty_generics #where_clause {
+                                fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+                                    let version = #atom_mod::#enum_name::parse(reader, options)?;
+                                    Ok(Self {
+                                        version,
+                                    })
+                                }
+
+                                async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+                                    let version = #atom_mod::#enum_name::parse_async(reader, options).await?;
+                                    Ok(Self {
+                                        version,
+                                    })
+                                }
+                            }
+                        }
                     }
+                    Ok(Err(fields)) => {
+                        let attrs = attrs.iter();
+                        // since some fields are omitted
+                        // (e.g reserved/padding)
+                        let atom_fields = fields.iter().filter_map(|field| field.as_field_decl(Some(&atom_mod)));
 
-                    impl #impl_generics #name #ty_generics #where_clause {
-                        #(#helper_fns)*
+                        let mod_specific = AtomFields::group_inline_definitions(&fields, &atom_mod);
+
+                        let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, None)).collect::<Vec<_>>();
+                        let async_parsing = fields.iter().filter_map(|f| f.as_async_parse(&atom_mod, None)).collect::<Vec<_>>();
+                        let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
+
+                        let helper_fns = fields.iter().filter_map(|f| f.as_helper_fn(Some(&atom_mod))).collect::<Vec<_>>();
+
+                        let parse_impl = format_parse_impl(&name, &sync_parsing, &async_parsing, &field_collection, &generics, None);
+
+                        let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+                        quote! {
+                            #(#attrs)*
+                            #[derive(Debug)]
+                            pub struct #name #generics {
+                                #(#atom_fields),*
+                            }
+
+                            impl #impl_generics #name #ty_generics #where_clause {
+                                #(#helper_fns)*
+                            }
+
+                            #parse_impl
+
+                            #mod_specific
+                        }
                     }
-
-                    #parse_impl
-
-                    #mod_specific
+                    Err(e) => {
+                        todo!()
+                    }
                 }
             }
-            Definition::Atom(atom) => {
+            DefinitionKind::Atom(atom) => {
                 let AtomDefinition {
                     fcc,
                     attrs,
                     name,
                     fields,
-                } = &atom;
+                } = atom;
 
+                //TODO: (this and for the normal struct version)
+                // - some of this might be able to be shared
+                // - this also means that some of the atoms will break
+                //      - most are just fullboxes that need to have the #[version(0)] attr specified
                 let atom_mod = fcc.as_ident();
-                let attrs = attrs.iter();
-                // since some fields are omitted
-                // (e.g reserved/padding)
-                let atom_fields = fields.iter().filter_map(|field| field.as_field_decl(&atom_mod));
-
-                let mod_specific = AtomFields::group_inline_definitions(fields, &atom_mod);
-
                 let [fcc_0, fcc_1, fcc_2, fcc_3] = fcc.as_fcc();
-                let sync_parsing = fields.iter().map(|f| f.as_sync_parse(&atom_mod)).collect::<Vec<_>>();
-                let async_parsing = fields.iter().map(|f| f.as_async_parse(&atom_mod)).collect::<Vec<_>>();
-                let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
+                match try_expand_into_versioned_fields(fields, def.version) {
+                    Ok(Ok(versioned)) => {
+                        let version_specific = versioned.versions.iter().map(|(v, fields)| {
+                            let version_mod = Versioned::version_mod_from_lit(v);
 
-                let helper_fns = fields.iter().filter_map(|f| f.as_helper_fn(&atom_mod)).collect::<Vec<_>>();
+                            let version_specific = fields.iter().filter_map(|field| field.as_inline_definition());
+                            let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, Some(&version_mod))).collect::<Vec<_>>();
+                            let async_parsing = fields.iter().filter_map(|f| f.as_async_parse(&atom_mod, Some(&version_mod))).collect::<Vec<_>>();
+                            let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
+                            let helper_fns = fields.iter().filter_map(|f| f.as_helper_fn(None)).collect::<Vec<_>>();
 
-                let parse_impl = format_parse_impl(name, &sync_parsing, &async_parsing, &field_collection, &Default::default());
+                            let name = Versioned::versioned_struct_from_lit(&name, v);
 
-                quote! {
-                    #(#attrs)*
-                    #[derive(Debug)]
-                    struct #name {
-                        #(#atom_fields),*
+                            let parse_impl = format_parse_impl(&name, &sync_parsing, &async_parsing, &field_collection, &Default::default(), None);
+                            let fields = fields.iter().filter_map(|field| field.as_field_decl(None));
+
+                            quote! {
+                                pub mod #version_mod {
+                                    use super::*;
+                                    #(#attrs)*
+                                    #[derive(Debug)]
+                                    pub struct #name {
+                                        #(#fields),*
+                                    }
+
+                                    impl #name {
+                                        #(#helper_fns)*
+                                    }
+
+                                    #parse_impl
+                                    #(#version_specific)*
+                                }
+                            }
+                        });
+
+                        let versions = versioned.format_versioned_struct(&name, &attrs, &Default::default());
+                        let enum_name = Versioned::format_enum_name_from_versioned_struct(&name);
+
+                        quote! {
+                            mod #atom_mod {
+                                #versions
+                                #(#version_specific)*
+                            }
+
+                            #(#attrs)*
+                            #[derive(Debug)]
+                            struct #name {
+                                pub version: #atom_mod::#enum_name,
+                            }
+
+                            impl Parse for #name {
+                                fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+                                    let version = #atom_mod::#enum_name::parse(reader, options)?;
+                                    Ok(Self {
+                                        version,
+                                    })
+                                }
+
+                                async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+                                    let version = #atom_mod::#enum_name::parse_async(reader, options).await?;
+                                    Ok(Self {
+                                        version,
+                                    })
+                                }
+                            }
+
+                            impl Atom for #name {
+                                const FCC: FourCC = FourCC([#fcc_0, #fcc_1, #fcc_2, #fcc_3]);
+                            }
+                        }
                     }
+                    Ok(Err(fields)) => {
+                        let attrs = attrs.iter();
+                        // since some fields are omitted
+                        // (e.g reserved/padding)
+                        let atom_fields = fields.iter().filter_map(|field| field.as_field_decl(Some(&atom_mod)));
 
-                    impl #name {
-                        #(#helper_fns)*
+                        let mod_specific = AtomFields::group_inline_definitions(&fields, &atom_mod);
+
+                        let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, None)).collect::<Vec<_>>();
+                        let async_parsing = fields.iter().filter_map(|f| f.as_async_parse(&atom_mod, None)).collect::<Vec<_>>();
+                        let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
+
+                        let helper_fns = fields.iter().filter_map(|f| f.as_helper_fn(Some(&atom_mod))).collect::<Vec<_>>();
+
+                        let parse_impl = format_parse_impl(&name, &sync_parsing, &async_parsing, &field_collection, &Default::default(), None);
+
+                        quote! {
+                            #(#attrs)*
+                            #[derive(Debug)]
+                            struct #name {
+                                #(#atom_fields),*
+                            }
+
+                            impl #name {
+                                #(#helper_fns)*
+                            }
+
+                            impl Atom for #name {
+                                const FCC: FourCC = FourCC([#fcc_0, #fcc_1, #fcc_2, #fcc_3]);
+                            }
+
+                            #parse_impl
+
+                            #mod_specific
+                        }
                     }
-
-                    impl Atom for #name {
-                        const FCC: FourCC = FourCC([#fcc_0, #fcc_1, #fcc_2, #fcc_3]);
-                    }
-
-                    #parse_impl
-
-                    #mod_specific
+                    Err(e) => todo!()
                 }
             }
         }

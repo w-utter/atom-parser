@@ -872,6 +872,22 @@ pub trait Flags<B> {
     fn to_bits(self) -> B;
 }
 
+mod test {
+    use super::*;
+    use atom_parser_derive::make_atom;
+    make_atom! {
+        // TODO: support for multiple versions in the specified version
+        //  so like #[version(0, 1, 2)]
+        //  - this is _only_ for when its a part of a #[versions] field
+        // 
+        // TODO
+        //  - better module resolution for parser
+        //      - e.g, either use ::mod_name:: or self::mod_name so types cannot get confused.
+        //      - that also means that the test impl would have to be moved to another crate
+        //          - this is probably better for testing anyway
+    }
+}
+
 mod atoms {
     use super::*;
     use atom_parser_derive::make_atom;
@@ -985,7 +1001,7 @@ mod atoms {
             flags: struct Flags {
                 const SELF_CONTAINED = 1 << 0;
             },
-            data_reference: dref::Child,
+            data_reference: dref::v0::Child,
         }
 
         #[atom("rmdr")]
@@ -1044,6 +1060,7 @@ mod atoms {
 
     // stuff in movie
     make_atom! {
+        #[version(0)]
         #[atom("mvhd")]
         struct MovieHeader {
             #[full_box]
@@ -1127,6 +1144,7 @@ mod atoms {
 
     // track specific
     make_atom! {
+        #[version(0)]
         #[atom("tkhd")]
         struct TrackHeader {
             #[full_box]
@@ -1162,6 +1180,7 @@ mod atoms {
                 CompressedMatte,
             }
         }
+        #[version(0)]
         #[atom("kmat")]
         struct CompressedMatte {
             #[full_box]
@@ -1180,6 +1199,7 @@ mod atoms {
             }
         }
 
+        #[version(0)]
         #[atom("elst")]
         struct EditList {
             #[full_box]
@@ -1305,6 +1325,7 @@ mod atoms {
 
     //media
     make_atom! {
+        #[version(0)]
         #[atom("mdhd")]
         struct MediaHeader {
             #[full_box]
@@ -1319,6 +1340,7 @@ mod atoms {
             quality: u16,
         }
 
+        #[version(0)]
         #[atom("hdlr")]
         struct HandlerReference {
             #[full_box]
@@ -1354,6 +1376,7 @@ mod atoms {
 
     // media information
     make_atom! {
+        #[version(0)]
         #[atom("vmhd")]
         struct VideoMediaInformationHeader {
             #[full_box]
@@ -1364,6 +1387,7 @@ mod atoms {
             opcolor: [u16; 3],
         }
 
+        #[version(0)]
         #[atom("smhd")]
         struct SoundMediaInformationHeader {
             #[full_box]
@@ -1380,6 +1404,7 @@ mod atoms {
             // empty...
         }
 
+        #[version(0)]
         #[atom("gmin")]
         struct BaseMediaInformation {
             #[full_box]
@@ -1393,6 +1418,7 @@ mod atoms {
             reserved: [u8; 2]
         }
 
+        #[version(0)]
         #[atom("tmci")]
         struct TimecodeMediaInformation {
             #[full_box]
@@ -1441,6 +1467,7 @@ mod atoms {
             description: D,
         }
 
+        #[version(0)]
         #[atom("stsd")]
         struct SampleDescription {
             #[full_box]
@@ -1453,6 +1480,7 @@ mod atoms {
             }
         }
 
+        #[version(0)]
         #[atom("stts")]
         struct TimeToSample {
             #[full_box]
@@ -1468,6 +1496,7 @@ mod atoms {
             sample_duration: u32,
         }
 
+        #[version(0)]
         #[atom("stss")]
         struct SyncSample {
             #[full_box]
@@ -1478,6 +1507,7 @@ mod atoms {
             sync_sample_table: u32,
         }
 
+        #[version(0)]
         #[atom("stsc")]
         struct SampleToChunk {
             #[full_box]
@@ -1494,6 +1524,7 @@ mod atoms {
             sample_description_id: u32,
         }
 
+        #[version(0)]
         #[atom("stsz")]
         struct SampleSize {
             #[full_box]
@@ -1516,6 +1547,7 @@ mod atoms {
             }
         }
 
+        #[version(0)]
         #[atom("dref")]
         struct DataReference {
             #[full_box]
@@ -1530,6 +1562,7 @@ mod atoms {
             }
         }
 
+        #[version(0)]
         #[atom("alis")]
         struct MacAlias {
             #[full_box]
@@ -1540,6 +1573,7 @@ mod atoms {
             mac_alias: Vec<u8>,
         }
 
+        #[version(0)]
         #[atom("rsrc")]
         struct MacResource {
             #[full_box]
@@ -1550,6 +1584,7 @@ mod atoms {
             mac_alias_resource: Vec<u8>,
         }
 
+        #[version(0)]
         #[atom(b"url\0")]
         struct Url {
             #[full_box]
@@ -1560,6 +1595,7 @@ mod atoms {
             url: Vec<u8>,
         }
 
+        #[version(0)]
         #[atom("stco")]
         struct ChunkOffset {
             #[full_box]
@@ -1964,4 +2000,106 @@ mod atoms {
         }
         panic!()
     }
+
+    make_atom! {
+        struct A {
+            #[version]
+            a: u8,
+            #[versions]
+            enum Version {
+                #[version(0)]
+                V1 {
+                    num: u16,
+                },
+                #[version(1)]
+                V2 {
+                    num: u32,
+                },
+            }
+        }
+    }
+
+    //want to replace something like
+    // struct SomeAtom {
+    //      version: u8,
+    //      flags: u32,
+    //      version_dependent: u32,
+    //      other_version_dependent: u16,
+    //      after_item: u8,
+    // }
+    //
+    // and turn it into something like
+    //
+    // struct SomeAtom {
+    //  enum SomeAtomVersion {
+    //      Version1 {
+    //          flags: u32,
+    //          version_dependent: u32,
+    //          after_item: u8,
+    //      }
+    //      Version2 {
+    //          flags: u32,
+    //          other_version_dependent: u16,
+    //          after_item: u8,
+    //      }
+    //  }
+    // }
+    //  so if there is 1+ versions definitions in the atom (e.g if it exists in the atomdefinition)
+    //  then everything needs to be grouped and collected based on versions
+    //  and the only field available in the atom is the version
+    //  - this is because the version changes the understanding of what is in the fields and how to
+    //  interact with them
+    //
+    //
+    //  - TODO
+    //      - if version identifier is specified (through #[version] or #[full_box])
+    //          - either
+    //              - group all #[versions] which version match
+    //                  - all other fields keep the same order
+    //                      - so like the only thing versions does is create a copy of all
+    //                      compatible fields
+    //                      - like 
+    //                          a: u8
+    //                          #[versions]
+    //                          enum Version {
+    //                              #[version(0)]
+    //                              V1 {
+    //                                  b: u16
+    //                              }
+    //                              #[version(1)]
+    //                              V2 {
+    //                                  c: u32
+    //                              }
+    //                          }
+    //                          d: u64
+    //
+    //                          would turn into
+    //                          enum Version {
+    //                              V1 {
+    //                                  a: u8,
+    //                                  b: u16,
+    //                                  d: u64
+    //                              }
+    //                              V2 {
+    //                                  a: u8,
+    //                                  c: u32,
+    //                                  d: u64,
+    //                              }
+    //                              Unknown(uint)
+    //                          }
+    //              - if a top level #[version(num)] is specified, then that it is assumed that
+    //              *only* that version is supported, and all other versions are unknown
+
+    // there should be a fn to definition to do something like expand_versions(self) -> Result<ExpandedSelf, Self> { }
+    // that expands the current definition into one that has all of its expansions
+    // so itd be like 
+    // struct Versioned<T> {
+    //  version: LitInt,
+    //  item: T,
+    // }
+    //
+    // struct ExpandedDefinition<T> {
+    //      
+    // }
+
 }
