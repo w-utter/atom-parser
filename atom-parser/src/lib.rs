@@ -1,7 +1,35 @@
 #![feature(maybe_uninit_array_assume_init)]
 
+macro_rules! impl_take_reader {
+    () => {
+        fn take_reader(self) -> (R, &'a ParseOptions) {
+            match self {
+                Self::Done(reader, opts) => return (reader, opts),
+                _ => unreachable!("invalid state"),
+            }
+        }
+    }
+}
+
+pub enum AsyncIterState<'a, R, T> {
+    Iterating(T),
+    Done(R, &'a ParseOptions),
+    Empty,
+}
+
+impl <'a, R, T: TakeReader<'a, R>> TakeReader<'a, R> for AsyncIterState<'a, R, T> {
+    impl_take_reader!{}
+    fn borrow_reader(&mut self) -> &mut R {
+        match self {
+            Self::Iterating(t) => t.borrow_reader(),
+            Self::Done(r, _) => r,
+            Self::Empty => unreachable!(),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct AtomSize {
+pub struct AtomSize {
     #[cfg(not(feature = "extended_sized_atoms"))]
     size: u32,
     #[cfg(feature = "extended_sized_atoms")]
@@ -40,6 +68,8 @@ impl AtomSize {
         }
         #[cfg(not(feature = "extended_sized_atoms"))]
         {
+            let _ = reader;
+            let _ = options;
             if size == 1 {
                 return Err(ParseError::AtomSizeUnsupported);
             }
@@ -54,43 +84,99 @@ impl AtomSize {
         }
     }
 
-    async fn parse_async<T: AsyncReader>(size: u32, reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+    fn create_fut<'a, R: PollReader + Unpin>(size: u32, reader: R, options: &'a ParseOptions) -> AtomSizeParse<'a, R> {
         #[cfg(feature = "extended_sized_atoms")]
         {
-            if !matches!(size, 0 | 1) && size < Self::MIN_ATOM_SIZE_32 {
-                return Err(ParseError::AtomSizeTooSmall)
-            }
-
-            let size = if size == 1 {
-                let extended_size = u64::parse_async(reader, options).await?;
-                if extended_size < Self::MIN_ATOM_SIZE_64 {
-                    return Err(ParseError::AtomSizeTooSmall)
-                }
-                extended_size - Self::MIN_ATOM_SIZE_64
+            if size == 1 {
+                AtomSizeParse::ExtendedSize(u64::create_fut(reader, options))
             } else {
-                (size - Self::MIN_ATOM_SIZE_32) as u64
-            };
-
-            Ok(Self {
-                size
-            })
+                AtomSizeParse::Waiting(size, reader, options)
+            }
         }
         #[cfg(not(feature = "extended_sized_atoms"))]
         {
-            if size == 1 {
-                return Err(ParseError::AtomSizeUnsupported);
-            }
-
-            if size != 0 && size < Self::MIN_ATOM_SIZE_32 {
-                return Err(ParseError::AtomSizeTooSmall)
-            }
-
-            Ok(Self {
-                size: size - Self::MIN_ATOM_SIZE_32
-            })
+            AtomSizeParse::Waiting(size, reader, options)
         }
     }
 }
+
+pub enum AtomSizeParse<'a, R: PollReader + Unpin> {
+    Waiting(u32, R, &'a ParseOptions),
+    #[cfg(feature = "extended_sized_atoms")]
+    ExtendedSize(<u64 as AsyncParse>::Fut<'a, R>),
+    Done(R, &'a ParseOptions),
+    Empty,
+}
+
+impl <'a, R: PollReader + Unpin> Future for AtomSizeParse<'a, R> {
+    type Output = Result<AtomSize, ParseError>;
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        loop {
+            let this = core::mem::replace(&mut *self, AtomSizeParse::Empty);
+            match this {
+                AtomSizeParse::Waiting(size, reader, opts) => {
+                    *self = Self::Done(reader, opts);
+                    #[cfg(not(feature = "extended_sized_atoms"))]
+                    if size == 1 {
+                        let _ = cx;
+                        return core::task::Poll::Ready(Err(ParseError::AtomSizeUnsupported));
+                    }
+
+                    if size != 0 && size < AtomSize::MIN_ATOM_SIZE_32 {
+                        return std::task::Poll::Ready(Err(ParseError::AtomSizeTooSmall))
+                    }
+                    return core::task::Poll::Ready(Ok(AtomSize {
+                        #[cfg(feature = "extended_sized_atoms")]
+                        size: u64::from(size),
+                        #[cfg(not(feature = "extended_sized_atoms"))]
+                        size,
+                    }))
+                }
+                #[cfg(feature = "extended_sized_atoms")]
+                AtomSizeParse::ExtendedSize(mut fut) => {
+                    match core::pin::Pin::new(&mut fut).poll(cx) {
+                        core::task::Poll::Pending => {
+                            *self = AtomSizeParse::ExtendedSize(fut);
+                            return core::task::Poll::Pending;
+                        }
+                        core::task::Poll::Ready(res) => {
+                            let IntegerParse::Done(reader, options) = fut else {
+                                unreachable!("invalid future state");
+                            };
+                            *self = AtomSizeParse::Done(reader, options);
+                            return std::task::Poll::Ready(res.and_then(|extended_size| {
+                                if extended_size < AtomSize::MIN_ATOM_SIZE_64 {
+                                    Err(ParseError::AtomSizeTooSmall)
+                                } else {
+                                    Ok(AtomSize {
+                                        size: extended_size - AtomSize::MIN_ATOM_SIZE_64
+                                    })
+                                }
+                            }))
+                        }
+                    }
+                }
+                AtomSizeParse::Done(..) => panic!("polled future after completion"),
+                AtomSizeParse::Empty => unreachable!(),
+            }
+        }
+    }
+}
+
+impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for AtomSizeParse<'a, R> {
+    impl_take_reader!{}
+
+    fn borrow_reader(&mut self) -> &mut R {
+        match self {
+            Self::Waiting(_, r, _) => r,
+            #[cfg(feature = "extended_sized_atoms")]
+            Self::ExtendedSize(s) => s.borrow_reader(),
+            Self::Done(r, ..) => r,
+            _ => unreachable!(),
+        }
+    }
+}
+
 
 type IoError = std::io::Error;
 
@@ -126,20 +212,61 @@ macro_rules! parse_integers {
                         <$i>::from_le_bytes(buf)
                     })
                 }
+            }
+            
+            impl AsyncParse for $i {
+                type Fut<'a, R: PollReader + Unpin> = IntegerParse<'a, R, $i, { core::mem::size_of::<$i>() }>;
+                fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+                    IntegerParse::Waiting(reader, options, [0; _], core::marker::PhantomData)
+                }
+            }
 
-                async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-                    let mut buf = [0; core::mem::size_of::<$i>()];
-                    reader.async_read(&mut buf).await?;
-
-                    Ok(if matches!(options.endianess, Endianess::Big) {
-                        // likely path
-                        <$i>::from_be_bytes(buf)
-                    } else {
-                        <$i>::from_le_bytes(buf)
-                    })
+            impl <'a, R: PollReader + Unpin> Future for IntegerParse<'a, R, $i, { core::mem::size_of::<$i>() }> {
+                type Output = Result<$i, ParseError>;
+                fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+                    let this = core::mem::replace(&mut *self, IntegerParse::Empty);
+                    match this {
+                        IntegerParse::Waiting(mut r, opts, mut buf, _) => {
+                            match core::pin::Pin::new(&mut r).poll_read(cx, &mut buf) {
+                                core::task::Poll::Pending => {
+                                    *self = Self::Waiting(r, opts, buf, core::marker::PhantomData);
+                                    return core::task::Poll::Pending
+                                }
+                                core::task::Poll::Ready(res) => {
+                                    *self = Self::Done(r, opts);
+                                    return std::task::Poll::Ready(Ok(res.map(|_| if matches!(opts.endianess, Endianess::Big) {
+                                        // likely path
+                                        <$i>::from_be_bytes(buf)
+                                    } else {
+                                        <$i>::from_le_bytes(buf)
+                                    })?))
+                                }
+                            }
+                        }
+                        IntegerParse::Done(..) => panic!("future polled after completion"),
+                        IntegerParse::Empty => unreachable!(),
+                    }
                 }
             }
         )*
+    }
+}
+
+pub enum IntegerParse<'a, R, T, const N: usize> {
+    Waiting(R, &'a ParseOptions, [u8; N], core::marker::PhantomData<T>),
+    Done(R, &'a ParseOptions),
+    Empty
+}
+
+impl <'a, R, T, const N: usize> TakeReader<'a, R> for IntegerParse<'a, R, T, N> {
+    impl_take_reader!{}
+
+    fn borrow_reader(&mut self) -> &mut R {
+        match self {
+            Self::Waiting(r, ..) => r,
+            Self::Done(r, ..) => r,
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -148,9 +275,21 @@ parse_integers!{
     i8, i16, i32, i64,
 }
 
-pub trait Parse: Sized {
+pub trait Parse: Sized + AsyncParse {
     fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError>;
-    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError>;
+    fn parse_async<'a, 'r, T: AsyncReader>(reader: &'r mut T, options: &'a ParseOptions) -> <Self as AsyncParse>::Fut<'a, &'r mut T> {
+        <Self as AsyncParse>::create_fut(reader, options)
+    }
+}
+
+pub trait TakeReader<'a, R> {
+    fn take_reader(self) -> (R, &'a ParseOptions);
+    fn borrow_reader(&mut self) -> &mut R;
+}
+
+pub trait AsyncParse: Sized {
+    type Fut<'a, R: PollReader + Unpin>: Future<Output = Result<Self, ParseError>> + TakeReader<'a, R> + Unpin;
+    fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R>;
 }
 
 struct ArrayGuard<'a, T, const N: usize> {
@@ -172,6 +311,7 @@ impl <'a, T, const N: usize> ArrayGuard<'a, T, N> {
             let uninit = self.arr.get_unchecked_mut(self.initialized);
             uninit.write(item);
         }
+        self.initialized += 1;
     }
 
     pub fn uninit() -> [core::mem::MaybeUninit<T>; N] {
@@ -201,7 +341,7 @@ impl <'a, T, const N: usize> Drop for ArrayGuard<'a, T, N> {
     }
 }
 
-impl <const N: usize, I: Parse> Parse for [I; N] {
+impl <const N: usize, I: Parse + Unpin> Parse for [I; N] {
     fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
         let mut arr = ArrayGuard::<I, N>::uninit();
         {
@@ -215,25 +355,112 @@ impl <const N: usize, I: Parse> Parse for [I; N] {
         }
         Ok(unsafe { ArrayGuard::initialize(arr) })
     }
+}
 
-    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        let mut arr = ArrayGuard::<I, N>::uninit();
-        {
-            let mut guard = ArrayGuard::<I, N>::new(&mut arr);
-            for _ in 0..N {
-                let item = I::parse_async(reader, options).await?;
-                unsafe {
-                    guard.push(item);
-                }
+pub struct ArrayParse<'a, R: PollReader + Unpin, I: AsyncParse + Unpin, const N: usize> {
+    initialized: usize,
+    storage: [core::mem::MaybeUninit<I>; N],
+    state: AsyncIterState<'a, R, I::Fut<'a, R>>,
+}
+
+impl <'a, R: PollReader + Unpin, I: AsyncParse + Unpin, const N: usize> Drop for ArrayParse<'a, R, I, N> {
+    fn drop(&mut self) {
+        debug_assert!(self.initialized <= N, "invalid initialized state");
+        if self.initialized == N {
+            return;
+        }
+
+        for item in &mut self.storage[..self.initialized] {
+            // SAFETY: only iterating over items that are already initialized
+            unsafe {
+                item.assume_init_drop()
             }
         }
-        Ok(unsafe { ArrayGuard::initialize(arr) })
+    }
+}
+
+impl <'a, R: PollReader + Unpin, I: AsyncParse + Unpin, const N: usize> Future for ArrayParse<'a, R, I, N> {
+    type Output = Result<[I; N], ParseError>;
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        use core::pin::Pin;
+        use core::task::Poll;
+        loop {
+            match core::mem::replace(&mut self.state, AsyncIterState::Empty) {
+                AsyncIterState::Iterating(mut fut) => {
+                    match Pin::new(&mut fut).poll(cx) {
+                        Poll::Pending => {
+                            self.state = AsyncIterState::Iterating(fut);
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(i) => {
+                            let i = i?;
+                            debug_assert!(self.initialized < N, "trying to write past array");
+                            let idx = self.initialized;
+                            unsafe {
+                                let uninit = self.storage.get_unchecked_mut(idx);
+                                uninit.write(i);
+                            }
+                            self.initialized += 1;
+                            if self.initialized == N {
+                                let (reader, opts) = fut.take_reader();
+                                self.state = AsyncIterState::Done(reader, opts);
+                                let finished = core::mem::replace(&mut self.storage, [const {core::mem::MaybeUninit::uninit()}; N]);
+                                self.initialized = 0;
+                                // SAFETY: all items are initialized
+                                let arr = unsafe {
+                                    ArrayGuard::initialize(finished)
+                                };
+                                return Poll::Ready(Ok(arr))
+                            }
+                            let (reader, opts) = fut.take_reader();
+                            self.state = AsyncIterState::Iterating(I::create_fut(reader, opts));
+                            continue;
+                        }
+                    }
+                }
+                AsyncIterState::Done(r, o) if N == 0 => {
+                    self.state = AsyncIterState::Done(r, o);
+                    // SAFETY: array is empty
+                    return Poll::Ready(Ok(unsafe {
+                        ArrayGuard::initialize([const {core::mem::MaybeUninit::uninit()}; N])
+                    }))
+                }
+                _ => panic!("invalid state"),
+            }
+        }
+    }
+}
+
+impl <'a, R: PollReader + Unpin, I: AsyncParse + Unpin, const N: usize> TakeReader<'a, R> for ArrayParse<'a, R, I, N> {
+    fn take_reader(mut self) -> (R, &'a ParseOptions) {
+        let state = core::mem::replace(&mut self.state, AsyncIterState::Empty);
+        state.take_reader()
+    }
+    fn borrow_reader(&mut self) -> &mut R {
+        self.state.borrow_reader()
+    }
+}
+
+impl <const N: usize, I: AsyncParse + Unpin> AsyncParse for [I; N] {
+    type Fut<'a, R: PollReader + Unpin> = ArrayParse<'a, R, I, N>;
+    fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+        let state = if N == 0 {
+            AsyncIterState::Done(reader, options)
+        } else {
+            AsyncIterState::Iterating(I::create_fut(reader, options))
+        };
+
+        ArrayParse {
+            initialized: 0,
+            storage: [const { core::mem::MaybeUninit::uninit()}; N],
+            state,
+        }
     }
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 #[repr(transparent)]
-struct FourCC([u8; 4]);
+pub struct FourCC([u8; 4]);
 
 impl core::fmt::Debug for FourCC {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -246,10 +473,46 @@ impl Parse for FourCC {
         let inner = u32::parse(reader, options)?;
         Ok(Self(inner.to_be_bytes()))
     }
+}
 
-    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        let inner = u32::parse_async(reader, options).await?;
-        Ok(Self(inner.to_be_bytes()))
+pub struct FourCCParse<'a, R: PollReader + Unpin> {
+    inner: <u32 as AsyncParse>::Fut<'a, R>,
+}
+
+impl <'a, R: PollReader + Unpin> Future for FourCCParse<'a, R> {
+    type Output = Result<FourCC, ParseError>;
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        let mut this = core::mem::replace(&mut *self, FourCCParse { inner: IntegerParse::Empty });
+        use core::task::Poll;
+        match core::pin::Pin::new(&mut this.inner).poll(cx) {
+            Poll::Pending => {
+                core::mem::swap(&mut this, &mut *self);
+                return Poll::Pending;
+            }
+            Poll::Ready(res) => {
+                core::mem::swap(&mut this, &mut *self);
+                return Poll::Ready(res.map(|num| FourCC(num.to_be_bytes())))
+            }
+        }
+    }
+}
+
+impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for FourCCParse<'a, R> {
+    fn take_reader(self) -> (R, &'a ParseOptions) { 
+        self.inner.take_reader()
+    }
+    fn borrow_reader(&mut self) -> &mut R {
+        self.inner.borrow_reader()
+    }
+}
+
+impl AsyncParse for FourCC {
+    type Fut<'a, R: PollReader + Unpin> = FourCCParse<'a, R>;
+    fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+        FourCCParse {
+            inner: u32::create_fut(reader, options),
+        }
+        
     }
 }
 
@@ -269,19 +532,122 @@ impl Parse for AtomHeader {
             fcc,
         })
     }
+}
 
-    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        let size = u32::parse_async(reader, options).await?;
-        let fcc = FourCC::parse_async(reader, options).await?;
-        let size = AtomSize::parse_async(size, reader, options).await?;
-        Ok(Self {
-            size,
-            fcc,
-        })
+pub enum AtomHeaderParse<'a, R: PollReader + Unpin> {
+    Waiting(<u32 as AsyncParse>::Fut<'a, R>),
+    Fourcc {
+        size: u32,
+        fourcc: <FourCC as AsyncParse>::Fut<'a, R>,
+    },
+    AtomSize {
+        fourcc: FourCC,
+        // the u32 size from before is moved here
+        size: AtomSizeParse<'a, R>,
+    },
+    Done(R, &'a ParseOptions),
+    Empty,
+}
+
+impl <'a, R: PollReader + Unpin> Future for AtomHeaderParse<'a, R> {
+    type Output = Result<AtomHeader, ParseError>;
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        use core::pin::Pin;
+        use core::task::Poll;
+        loop {
+            let this = core::mem::replace(&mut *self, Self::Empty);
+            match this {
+                Self::Waiting(mut fut) => {
+                    match Pin::new(&mut fut).poll(cx) {
+                        Poll::Pending => {
+                            *self = Self::Waiting(fut);
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(size) => {
+                            let size = size?;
+                            let IntegerParse::Done(reader, options) = fut else {
+                                unreachable!("bad future state");
+                            };
+                            *self = AtomHeaderParse::Fourcc {
+                                size,
+                                fourcc: FourCC::create_fut(reader, options),
+                            }
+                        }
+                    }
+                }
+                Self::Fourcc {
+                    size,
+                    mut fourcc,
+                } => {
+                    match Pin::new(&mut fourcc).poll(cx) {
+                        Poll::Pending => {
+                            *self = Self::Fourcc { size, fourcc };
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(fcc) => {
+                            let fcc = fcc?;
+                            let IntegerParse::Done(reader, opts) = fourcc.inner else {
+                                unreachable!("invalid state");
+                            };
+                            *self = Self::AtomSize{
+                                fourcc: fcc, 
+                                size: AtomSize::create_fut(size, reader, opts)
+                            };
+                        }
+                    }
+                }
+                Self::AtomSize {
+                    fourcc,
+                    mut size,
+                } => {
+                    match Pin::new(&mut size).poll(cx) {
+                        Poll::Pending => {
+                            *self = Self::AtomSize { fourcc, size };
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(atom_size) => {
+                            let AtomSizeParse::Done(reader, opts) = size else {
+                                unreachable!("invalid state");
+                            };
+                            *self = Self::Done(reader, opts);
+                            return Poll::Ready(atom_size.map(|size| {
+                                AtomHeader {
+                                    size,
+                                    fcc: fourcc,
+                                }
+                            }))
+                        }
+                    }
+                }
+                Self::Done(..) => panic!("repoll future"),
+                Self::Empty => unreachable!(),
+            }
+        }
     }
 }
 
-trait Atom: Sized {
+impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for AtomHeaderParse<'a, R> {
+    impl_take_reader!{}
+
+    fn borrow_reader(&mut self) -> &mut R {
+        match self {
+            Self::Waiting(r) => r.borrow_reader(),
+            Self::Fourcc { fourcc, .. } => fourcc.borrow_reader(),
+            Self::AtomSize { size, ..} => size.borrow_reader(),
+            Self::Done(r, ..) => r,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl AsyncParse for AtomHeader {
+    type Fut<'a, R: PollReader + Unpin> = AtomHeaderParse<'a, R>;
+    fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+        AtomHeaderParse::Waiting(u32::create_fut(reader, options))
+    }
+}
+
+pub trait Atom: Sized {
     const FCC: FourCC;
     // Ok(exact) if known staticly, Err((lower, upper)) if known size range
     // this is the size *not* including the atoms header (e.g 4 + 4 u32, 4 + 4 + 8 u64)
@@ -291,7 +657,7 @@ trait Atom: Sized {
     */
 }
 
-trait SwapOffsets {
+pub trait SwapOffsets {
     fn swap_offsets(&mut self, offset: &mut usize);
 }
 
@@ -337,20 +703,301 @@ impl <'a, R: Reader> Reader for &'a mut R {
     }
 }
 
-pub trait AsyncReader: SwapOffsets {
-    async fn async_read(&mut self, bytes: &mut [u8]) -> Result<(), IoError>;
-    async fn async_seek(&mut self, amt: usize) -> Result<(), IoError>;
+mod async_impl {
+    use super::IoError;
+    use core::pin::Pin;
+    use core::task::{Poll, Context, ready};
+    pub trait PollReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<Result<(), IoError>>;
+
+        fn poll_read_cstr(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<usize, IoError>>;
+
+        fn seek_start(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            amt: usize,
+        ) -> Result<(), IoError>;
+
+        fn poll_seek_complete(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), IoError>>;
+
+        fn offset(&self) -> usize;
+        fn remaining_size(&self) -> usize;
+    }
+
+    impl <'a, R: ?Sized + Unpin + PollReader> PollReader for &'a mut R {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<Result<(), IoError>> {
+            Pin::new(&mut **self).poll_read(cx, buf)
+        }
+
+        fn poll_read_cstr(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<usize, IoError>> {
+            Pin::new(&mut **self).poll_read_cstr(cx)
+        }
+
+        fn seek_start(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            amt: usize,
+        ) -> Result<(), IoError> {
+            Pin::new(&mut **self).seek_start(cx, amt)
+        }
+
+        fn poll_seek_complete(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), IoError>> {
+            Pin::new(&mut **self).poll_seek_complete(cx)
+        }
+
+        fn offset(&self) -> usize {
+            R::offset(self)
+        }
+
+        fn remaining_size(&self) -> usize {
+            R::remaining_size(self)
+        }
+    }
+
+    use pin_project::pin_project;
+    use core::marker::PhantomPinned;
+    use core::future::Future;
+    #[pin_project]
+    pub struct AsyncRead<'a, R: ?Sized> {
+        reader: &'a mut R,
+        buf: &'a mut [u8],
+        #[pin]
+        _pin: PhantomPinned,
+    }
+
+    pub(crate) fn read<'a, R: ?Sized + PollReader>(reader: &'a mut R, buf: &'a mut [u8]) -> AsyncRead<'a, R> {
+        AsyncRead {
+            reader,
+            buf,
+            _pin: PhantomPinned,
+        }
+    }
+
+    impl <R: ?Sized + PollReader + Unpin> Future for AsyncRead<'_, R> {
+        type Output = Result<(), IoError>;
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
+            let me = self.project();
+            ready!(Pin::new(me.reader).poll_read(cx, me.buf))?;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[pin_project(UnsafeUnpin)]
+    pub struct AsyncReadCstr<R> {
+        pub reader: R,
+        #[pin]
+        _pin: PhantomPinned,
+    }
+
+    unsafe impl <R: Unpin> pin_project::UnsafeUnpin for AsyncReadCstr<R> {}
+
+    pub(crate) fn read_cstr<'a, R: PollReader>(reader: R) -> AsyncReadCstr<R> {
+        AsyncReadCstr {
+            reader,
+            _pin: PhantomPinned,
+        }
+    }
+
+    impl <R: PollReader + Unpin> Future for AsyncReadCstr<R> {
+        type Output = Result<usize, IoError>;
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<usize, IoError>> {
+            let me = self.project();
+            let len = ready!(Pin::new(me.reader).poll_read_cstr(cx))?;
+            Poll::Ready(Ok(len))
+        }
+    }
+
+    #[pin_project(UnsafeUnpin)]
+    pub struct AsyncSeek<R> {
+        pub reader: R,
+        amt: Option<usize>,
+        #[pin]
+        _pin: PhantomPinned,
+    }
+
+    unsafe impl <R: Unpin> pin_project::UnsafeUnpin for AsyncSeek<R> {}
+
+    pub(crate) fn seek<R: PollReader>(reader: R, amt: usize) -> AsyncSeek<R> {
+        AsyncSeek {
+            reader,
+            amt: Some(amt),
+            _pin: PhantomPinned,
+        }
+    }
+
+    impl <R: PollReader + Unpin> Future for AsyncSeek<R> {
+        type Output = Result<(), IoError>;
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
+            let me = self.project();
+            match me.amt {
+                Some(amt) => {
+                    ready!(Pin::new(&mut *me.reader).poll_seek_complete(cx))?;
+                    match Pin::new(&mut *me.reader).seek_start(cx, *amt) {
+                        Ok(()) => {
+                            *me.amt = None;
+                            Pin::new(&mut *me.reader).poll_seek_complete(cx)
+                        }
+                        Err(e) => Poll::Ready(Err(e))
+                    }
+                }
+                None => {
+                    Pin::new(&mut *me.reader).poll_seek_complete(cx)
+                }
+            }
+        }
+    }
+
+    use super::{BacktrackReader, TrailingReader, SwapOffsets};
+
+    impl <R: PollReader + Unpin> PollReader for TrailingReader<R> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<Result<(), IoError>> {
+            if buf.len() > self.remaining_size() {
+                return Poll::Ready(Err(std::io::Error::other("not enough spc")));
+            }
+            Pin::new(&mut self.reader).poll_read(cx, buf)
+        }
+
+        fn poll_read_cstr(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<usize, IoError>> {
+            let len = ready!(Pin::new(&mut self.reader).poll_read_cstr(cx))?;
+
+            if len > self.remaining_size() {
+                return Poll::Ready(Err(std::io::Error::other("not enough spc")));
+            }
+            Poll::Ready(Ok(len))
+        }
+
+        fn seek_start(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            amt: usize,
+        ) -> Result<(), IoError> {
+            Pin::new(&mut self.reader).seek_start(cx, amt)
+        }
+
+        fn poll_seek_complete(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), IoError>> {
+            Pin::new(&mut self.reader).poll_seek_complete(cx)
+        }
+
+        fn offset(&self) -> usize {
+            self.reader.offset()
+        }
+
+        fn remaining_size(&self) -> usize {
+            self.max_offset.checked_sub(self.reader.offset()).unwrap_or_default()
+        }
+    }
+
+    impl <R: PollReader + SwapOffsets + Unpin> PollReader for BacktrackReader<R> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<Result<(), IoError>> {
+            Pin::new(&mut self.reader).poll_read(cx, buf)
+        }
+
+        fn poll_read_cstr(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<usize, IoError>> {
+            Pin::new(&mut self.reader).poll_read_cstr(cx)
+        }
+
+        fn seek_start(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            amt: usize,
+        ) -> Result<(), IoError> {
+            Pin::new(&mut self.reader).seek_start(cx, amt)
+        }
+
+        fn poll_seek_complete(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), IoError>> {
+            Pin::new(&mut self.reader).poll_seek_complete(cx)
+        }
+
+        fn offset(&self) -> usize {
+            self.reader.offset()
+        }
+
+        fn remaining_size(&self) -> usize {
+            self.reader.remaining_size()
+        }
+    }
+}
+
+use async_impl::{AsyncRead, AsyncReadCstr, AsyncSeek, PollReader};
+
+pub trait AsyncReader: SwapOffsets + PollReader + Unpin {
+    fn async_read<'a>(&'a mut self, bytes: &'a mut [u8]) -> AsyncRead<'a, Self> {
+        async_impl::read(self, bytes)
+    }
+    fn async_seek(&mut self, amt: usize) -> AsyncSeek<&mut Self> {
+        async_impl::seek(self, amt)
+    }
+
     // reads a cstr and returns its length (including nul)
-    async fn async_read_cstr(&mut self) -> Result<usize, IoError>;
-    fn offset(&self) -> usize;
-    fn remaining_size(&self) -> usize;
-    async fn seek_remaining(&mut self) -> Result<(), IoError> {
-        self.async_seek(self.remaining_size()).await
+    fn async_read_cstr(&mut self) -> AsyncReadCstr<&mut Self> {
+        async_impl::read_cstr(self)
+    }
+
+    fn seek_remaining(&mut self) -> AsyncSeek<&mut Self> {
+        self.async_seek(self.remaining_size())
+    }
+}
+
+impl <'r, R: AsyncReader> AsyncReader for &'r mut R {
+    fn async_read<'a>(&'a mut self, bytes: &'a mut [u8]) -> AsyncRead<'a, Self> {
+        async_impl::read(self, bytes)
+    }
+    fn async_seek(&mut self, amt: usize) -> AsyncSeek<&mut Self> {
+        async_impl::seek(self, amt)
+    }
+
+    // reads a cstr and returns its length (including nul)
+    fn async_read_cstr(&mut self) -> AsyncReadCstr<&mut Self> {
+        async_impl::read_cstr(self)
+    }
+
+    fn seek_remaining(&mut self) -> AsyncSeek<&mut Self> {
+        self.async_seek(self.remaining_size())
     }
 }
 
 #[derive(Debug, PartialEq, Eq, Default)]
-enum Endianess {
+pub enum Endianess {
     #[default]
     Big,
     Little,
@@ -392,7 +1039,8 @@ impl Reader for InMemoryReader {
     }
 
     fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError> {
-        if self.remaining_size() < bytes.len() {
+        let remaining = Reader::remaining_size(self);
+        if remaining < bytes.len() {
             return Err(IoError::other("not enough spc"));
         }
         bytes.copy_from_slice(&self.bytes[self.offset..self.offset+bytes.len()]);
@@ -410,11 +1058,70 @@ impl Reader for InMemoryReader {
     }
 
     fn seek(&mut self, amt: usize) -> Result<(), IoError> {
-        if amt > self.remaining_size() {
+        let remaining = Reader::remaining_size(self);
+        if amt > remaining {
             return Err(std::io::Error::other("not enough spc"));
         }
         self.offset += amt;
         Ok(())
+    }
+}
+
+impl PollReader for InMemoryReader {
+    fn poll_read(
+        mut self: core::pin::Pin<&mut Self>,
+        _: &mut core::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> core::task::Poll<Result<(), IoError>> {
+        let remaining = PollReader::remaining_size(&*self);
+        if remaining < buf.len() {
+            return core::task::Poll::Ready(Err(IoError::other("not enough spc")));
+        }
+
+        buf.copy_from_slice(&self.bytes[self.offset..self.offset+buf.len()]);
+        self.offset += buf.len();
+
+        core::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_read_cstr(
+        mut self: core::pin::Pin<&mut Self>,
+        _: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Result<usize, IoError>> {
+        let bytes = &self.bytes[self.offset..];
+        let len = bytes
+            .iter()
+            .position(|&byte| byte == b'\0').ok_or(IoError::other("not enough spc"))?;
+        self.offset += len + 1;
+        core::task::Poll::Ready(Ok(len))
+    }
+
+    fn seek_start(
+        mut self: core::pin::Pin<&mut Self>,
+        _: &mut core::task::Context<'_>,
+        amt: usize,
+    ) -> Result<(), IoError> {
+        let remaining = PollReader::remaining_size(&*self);
+        if amt > remaining {
+            return Err(std::io::Error::other("not enough spc"));
+        }
+
+        self.offset += amt;
+        Ok(())
+    }
+
+    fn poll_seek_complete(
+        self: core::pin::Pin<&mut Self>,
+        _: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Result<(), IoError>> {
+        core::task::Poll::Ready(Ok(()))
+    }
+
+    fn offset(&self) -> usize {
+        core::cmp::min(self.offset, self.bytes.len())
+    }
+    fn remaining_size(&self) -> usize {
+        self.bytes.len().checked_sub(self.offset).unwrap_or_default()
     }
 }
 
@@ -424,9 +1131,55 @@ pub struct ChildrenIter<'a, R: SwapOffsets, C> {
     opts: &'a ParseOptions,
 }
 
+impl <'a, R: SwapOffsets + Reader, C> ChildrenIter<'a, R, C> {
+    pub fn from_children(children: &Children<C>, reader: &'a mut R, opts: &'a ParseOptions) -> Self {
+        let Children {
+            offset,
+            size,
+            ..
+        } = children;
+
+        let max_offset = offset + size;
+        let reader = BacktrackReader::new(TrailingReader::new(reader, max_offset), children.offset);
+        Self {
+            reader,
+            opts,
+            _pd: core::marker::PhantomData,
+        }
+    }
+}
+
 use futures_core::Stream as AsyncIterator;
 
-// TODO: async equivalent
+pub struct AsyncChildrenIter<'a, R: SwapOffsets + PollReader + Unpin, C: AsyncParse> {
+    state: AsyncIterState<'a, BacktrackReader<TrailingReader<&'a mut R>>, <C as AsyncParse>::Fut<'a, BacktrackReader<TrailingReader<&'a mut R>>>>
+}
+
+impl <'a, R: SwapOffsets + PollReader + Unpin + Reader, C: AsyncParse> AsyncChildrenIter<'a, R, C> {
+    pub fn from_children(children: &Children<C>, reader: &'a mut R, opts: &'a ParseOptions) -> Self {
+        let Children {
+            offset,
+            size,
+            ..
+        } = children;
+
+
+        let max_offset = offset + size;
+        let reader = BacktrackReader::new(TrailingReader::new(reader, max_offset), children.offset);
+        let remaining = PollReader::remaining_size(&reader);
+
+        let state = if remaining == 0 {
+            AsyncIterState::Done(reader, opts)
+        } else {
+            AsyncIterState::Iterating(C::create_fut(reader, opts))
+        };
+
+        Self {
+            state
+        }
+    }
+}
+
 impl <'a, R: Reader, C: Parse> Iterator for ChildrenIter<'a, R, C> {
     type Item = Result<C, ParseError>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -438,12 +1191,47 @@ impl <'a, R: Reader, C: Parse> Iterator for ChildrenIter<'a, R, C> {
     }
 }
 
-impl <'a, R: AsyncReader, C: Parse> AsyncIterator for ChildrenIter<'a, R, C> {
+impl <'a, R: SwapOffsets + PollReader + Unpin, C: AsyncParse + Unpin> AsyncIterator for AsyncChildrenIter<'a, R, C> where <C as AsyncParse>::Fut<'a, R>: Unpin {
     type Item = Result<C, ParseError>;
-    fn poll_next(self: core::pin::Pin<&mut Self>, ctx: &mut core::task::Context<'_>) -> core::task::Poll<Option<Self::Item>> {
-        // TODO: might need to have the async reader trait poll
-        // then have a separate extended trait
-        todo!() 
+    fn poll_next(mut self: core::pin::Pin<&mut Self>, ctx: &mut core::task::Context<'_>) -> core::task::Poll<Option<Self::Item>> {
+        use core::pin::Pin;
+        use core::task::Poll;
+
+        let state = core::mem::replace(&mut *self, Self { state: AsyncIterState::Empty }).state;
+
+        match state {
+            AsyncIterState::Done(r, o) => {
+                self.state = AsyncIterState::Done(r, o);
+                return Poll::Ready(None)
+            }
+            AsyncIterState::Iterating(mut i) => {
+                match Pin::new(&mut i).poll(ctx) {
+                    Poll::Pending => {
+                        self.state = AsyncIterState::Iterating(i);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(res) => {
+                        let (reader, opts) = i.take_reader();
+                        self.state = if reader.remaining_size() == 0 {
+                            AsyncIterState::Done(reader, opts)
+                        } else {
+                            AsyncIterState::Iterating(C::create_fut(reader, opts))
+                        };
+                        return Poll::Ready(Some(res))
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl <'a, R: SwapOffsets + PollReader + Unpin, C: AsyncParse + Unpin> TakeReader<'a, BacktrackReader<TrailingReader<&'a mut R>>> for AsyncChildrenIter<'a, R, C> where <C as AsyncParse>::Fut<'a, R>: Unpin {
+    fn take_reader(self) -> (BacktrackReader<TrailingReader<&'a mut R>>, &'a ParseOptions) {
+        self.state.take_reader()
+    }
+    fn borrow_reader(&mut self) -> &mut BacktrackReader<TrailingReader<&'a mut R>> {
+        self.state.borrow_reader()
     }
 }
 
@@ -457,17 +1245,36 @@ pub struct Children<T> {
 #[derive(Debug)]
 pub struct SizedChildren<S, T> {
     _pd: core::marker::PhantomData<T>,
-    pub len: S,
+    len: S,
     offset: usize,
 }
 
 #[derive(Debug)]
 pub struct PascalString<S> {
-    pub len: S,
+    len: S,
     offset: usize,
 }
 
-impl <S: Parse + TryInto<usize> + Copy> Parse for PascalString<S> {
+pub struct Extent<O, S> {
+    pub offset: O,
+    pub len: S,
+}
+
+impl <S: Copy> PascalString<S> {
+    pub fn extent(&self) -> Extent<usize, S> {
+        let Self {
+            len,
+            offset,
+        } = self;
+
+        Extent {
+            offset: *offset,
+            len: *len,
+        }
+    }
+}
+
+impl <S: Parse + TryInto<usize> + Copy + Unpin> Parse for PascalString<S> {
     fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
         let len = S::parse(reader, options)?;
         let offset = reader.offset();
@@ -479,23 +1286,120 @@ impl <S: Parse + TryInto<usize> + Copy> Parse for PascalString<S> {
             offset,
         })
     }
+}
 
-    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        let len = S::parse_async(reader, options).await?;
-        let offset = reader.offset();
-        let length: usize = len.try_into().map_err(|_| TryFromIntError)?;
+pub enum PascalStringParse<'a, R: PollReader + Unpin, S: AsyncParse + TryInto<usize> + Unpin> where <S as AsyncParse>::Fut<'a, R>: Unpin {
+    Waiting(<S as AsyncParse>::Fut<'a, R>),
+    Seeking{
+        offset: usize, 
+        len: S, 
+        fut: AsyncSeek<R>, 
+        opts: &'a ParseOptions
+    },
+    Done(R, &'a ParseOptions),
+    Empty,
+}
 
-        reader.async_seek(length).await?;
-        Ok(Self {
-            len,
-            offset,
-        })
+impl <'a, R: PollReader + Unpin, S: AsyncParse + TryInto<usize> + Unpin + Copy> Future for PascalStringParse<'a, R, S> where <S as AsyncParse>::Fut<'a, R>: Unpin {
+    type Output = Result<PascalString<S>, ParseError>;
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        use core::pin::Pin;
+        use core::task::Poll;
+        loop {
+            match core::mem::replace(&mut *self, Self::Empty) {
+                Self::Waiting(mut s) => {
+                    match Pin::new(&mut s).poll(cx) {
+                        Poll::Pending => {
+                            *self = Self::Waiting(s);
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(res) => {
+                            let res = res?;
+                            let (reader, opts) = s.take_reader();
+                            let len = res.try_into().map_err(|_| ParseError::IntegerConversion(TryFromIntError))?;
+                            let offset = reader.offset();
+
+                            *self = Self::Seeking {
+                                offset,
+                                len: res,
+                                fut: async_impl::seek(reader, len),
+                                opts,
+                            }
+                        }
+                    }
+                }
+                Self::Seeking {
+                    offset,
+                    len,
+                    mut fut,
+                    opts,
+                } => {
+                    match Pin::new(&mut fut).poll(cx) {
+                        Poll::Pending => {
+                            *self = Self::Seeking{
+                                offset,
+                                len, 
+                                fut, 
+                                opts
+                            };
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(res) => {
+                            let reader = fut.reader;
+                            *self = Self::Done(reader, opts);
+                            return Poll::Ready(Ok(res.map(|_| PascalString {
+                                offset,
+                                len,
+                            })?))
+                        }
+                    }
+                }
+                Self::Done(..) => panic!("polled after done"),
+                Self::Empty => unreachable!(),
+            }
+        }
+    }
+}
+
+impl <'a, R: PollReader + Unpin, S: AsyncParse + TryInto<usize> + Unpin> TakeReader<'a, R> for PascalStringParse<'a, R, S> where <S as AsyncParse>::Fut<'a, R>: Unpin {
+    impl_take_reader!{}
+    fn borrow_reader(&mut self) -> &mut R {
+        match self {
+            Self::Waiting(w) => w.borrow_reader(),
+            Self::Seeking {
+                fut,
+                ..
+            } => &mut fut.reader,
+            Self::Done(r, ..) => r,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl <S: AsyncParse + TryInto<usize> + Unpin + Copy> AsyncParse for PascalString<S> {
+    type Fut<'a, R: PollReader + Unpin> = PascalStringParse<'a, R, S>;
+    fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+        PascalStringParse::Waiting(S::create_fut(reader, options))
     }
 }
 
 pub struct NullTerminatedString {
-    pub len: usize,
+    len: usize,
     offset: usize,
+}
+
+impl NullTerminatedString {
+    pub fn extent(&self) -> Extent<usize, usize> {
+        let Self {
+            len,
+            offset,
+        } = self;
+
+        Extent {
+            len: *len,
+            offset: *offset,
+        }
+    }
 }
 
 impl Parse for NullTerminatedString {
@@ -508,19 +1412,41 @@ impl Parse for NullTerminatedString {
             len,
         })
     }
+}
 
-    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        let offset = reader.offset();
-        let len = reader.async_read_cstr().await?;
+pub struct NullTerminatedStringParse<'a, R>(usize, AsyncReadCstr<R>, &'a ParseOptions);
 
-        Ok(Self {
-            offset,
+impl <'a, R: PollReader + Unpin> Future for NullTerminatedStringParse<'a, R> {
+    type Output = Result<NullTerminatedString, ParseError>;
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        use core::task::{Poll, ready};
+        use core::pin::Pin;
+        let len = ready!(Pin::new(&mut self.1).poll(cx))?;
+        Poll::Ready(Ok(NullTerminatedString {
+            offset: self.0,
             len,
-        })
+        }))
     }
 }
 
-impl <S: Parse, I: Parse> Parse for SizedChildren<S, I> {
+impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for NullTerminatedStringParse<'a, R> {
+    fn take_reader(self) -> (R, &'a ParseOptions) {
+        (self.1.reader, self.2)
+    }
+    fn borrow_reader(&mut self) -> &mut R {
+        &mut self.1.reader
+    }
+}
+
+impl AsyncParse for NullTerminatedString {
+    type Fut<'a, R: PollReader + Unpin> = NullTerminatedStringParse<'a, R>;
+    fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+        let offset = reader.offset();
+        NullTerminatedStringParse(offset, async_impl::read_cstr(reader), options)
+    }
+}
+
+impl <S: Parse + Unpin, I: Parse + Unpin> Parse for SizedChildren<S, I> {
     fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
         let len = S::parse(reader, options)?;
         let offset = reader.offset();
@@ -530,19 +1456,77 @@ impl <S: Parse, I: Parse> Parse for SizedChildren<S, I> {
             offset,
         })
     }
-    
-    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        let len = S::parse_async(reader, options).await?;
-        let offset = reader.offset();
-        Ok(Self {
-            _pd: core::marker::PhantomData,
-            len,
-            offset,
-        })
+}
+
+pub enum SizedChildrenParse<'a, R: PollReader + Unpin, S: AsyncParse + Unpin, C> where <S as AsyncParse>::Fut<'a, R>: Unpin {
+    Size {
+        offset: usize,
+        fut: <S as AsyncParse>::Fut<'a, R>, 
+        _pd: core::marker::PhantomData<C>
+    },
+    Done(R, &'a ParseOptions),
+    Empty,
+}
+
+impl <'a, R: PollReader + Unpin, S: AsyncParse + Unpin, C: AsyncParse + Unpin> Future for SizedChildrenParse<'a, R, S, C> where <S as AsyncParse>::Fut<'a, R>: Unpin {
+    type Output = Result<SizedChildren<S, C>, ParseError>;
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        use core::pin::Pin;
+        use core::task::Poll;
+        let this = core::mem::replace(&mut *self, Self::Empty);
+        match this {
+            Self::Size {
+                offset,
+                mut fut, 
+                ..
+            } => {
+                match Pin::new(&mut fut).poll(cx) {
+                    Poll::Pending => {
+                        *self = Self::Size{fut, offset, _pd: core::marker::PhantomData};
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(size) => {
+                        let (reader, options) = fut.take_reader();
+                        *self = Self::Done(reader, options);
+                        return Poll::Ready(size.map(|len| {
+                            SizedChildren {
+                                offset,
+                                len,
+                                _pd: core::marker::PhantomData,
+                            }
+                        }))
+                    }
+                }
+            }
+            Self::Done(..) => panic!("poll after completion"),
+            Self::Empty => unreachable!(),
+        }
     }
 }
 
-impl <I: Parse> Parse for Children<I> {
+impl <'a, R: PollReader + Unpin, S: AsyncParse + Unpin, C: AsyncParse> TakeReader<'a, R> for SizedChildrenParse<'a, R, S, C> {
+    impl_take_reader!{}
+    fn borrow_reader(&mut self) -> &mut R {
+        match self {
+            Self::Size {
+                fut,
+                ..
+            } => fut.borrow_reader(),
+            Self::Done(r, _) => r,
+            Self::Empty => unreachable!(),
+        }
+    }
+}
+
+impl <S: AsyncParse + Unpin, C: AsyncParse + Unpin> AsyncParse for SizedChildren<S, C> {
+    type Fut<'a, R: PollReader + Unpin> = SizedChildrenParse<'a, R, S, C>;
+    fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+        let offset = reader.offset();
+        SizedChildrenParse::Size { offset, fut: S::create_fut(reader, options), _pd: core::marker::PhantomData }
+    }
+}
+
+impl <I: Parse + Unpin> Parse for Children<I> {
     fn parse<T: Reader>(reader: &mut T, _: &ParseOptions) -> Result<Self, ParseError> {
         let offset = reader.offset();
         let size = reader.remaining_size();
@@ -552,17 +1536,36 @@ impl <I: Parse> Parse for Children<I> {
             size,
         })
     }
-    
-    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        let offset = reader.offset();
-        let size = reader.remaining_size();
-        Ok(Self {
-            _pd: core::marker::PhantomData,
-            offset,
-            size
-        })
-    }
+}
 
+pub struct ChildrenParse<'a, R, C>(R, &'a ParseOptions, core::marker::PhantomData<C>);
+impl <'a, R: PollReader + Unpin, C: AsyncParse> Future for ChildrenParse<'a, R, C> {
+    type Output = Result<Children<C>, ParseError>;
+    fn poll(self: core::pin::Pin<&mut Self>, _: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        let offset = self.0.offset();
+        let size = self.0.remaining_size();
+        core::task::Poll::Ready(Ok(Children {
+            offset,
+            size,
+            _pd: core::marker::PhantomData,
+        }))
+    }
+}
+
+impl <'a, R: PollReader + Unpin, C: AsyncParse> TakeReader<'a, R> for ChildrenParse<'a, R, C> {
+    fn take_reader(self) -> (R, &'a ParseOptions) {
+        (self.0, self.1)
+    }
+    fn borrow_reader(&mut self) -> &mut R {
+        &mut self.0
+    }
+}
+
+impl <C: AsyncParse + Unpin> AsyncParse for Children<C> {
+    type Fut<'a, R: PollReader + Unpin> = ChildrenParse<'a, R, C>;
+    fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+        ChildrenParse(reader, options, core::marker::PhantomData)
+    }
 }
 
 pub struct BacktrackReader<R: SwapOffsets> {
@@ -680,6 +1683,20 @@ pub struct Payload {
     size: usize,
 }
 
+impl Payload {
+    pub fn extent(&self) -> Extent<usize, usize> {
+        let Self {
+            offset,
+            size,
+        } = self;
+
+        Extent {
+            offset: *offset,
+            len: *size,
+        }
+    }
+}
+
 impl Parse for Payload {
     fn parse<T: Reader>(reader: &mut T, _: &ParseOptions) -> Result<Self, ParseError> {
         let offset = reader.offset();
@@ -689,18 +1706,38 @@ impl Parse for Payload {
             size,
         })
     }
+}
 
-    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        let offset = reader.offset();
-        let size = reader.remaining_size();
-        Ok(Self {
+pub struct PayloadParse<'a, R>(R, &'a ParseOptions);
+impl <'a, R: PollReader + Unpin> Future for PayloadParse<'a, R> {
+    type Output = Result<Payload, ParseError>;
+    fn poll(self: core::pin::Pin<&mut Self>, _: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        let offset = self.0.offset();
+        let size = self.0.remaining_size();
+        core::task::Poll::Ready(Ok(Payload {
             offset,
             size,
-        })
+        }))
     }
 }
 
-impl <I: Parse> Parse for Trailing<I> {
+impl <'a, R> TakeReader<'a, R> for PayloadParse<'a, R> {
+    fn take_reader(self) -> (R, &'a ParseOptions) {
+        (self.0, self.1)
+    }
+    fn borrow_reader(&mut self) -> &mut R {
+        &mut self.0
+    }
+}
+
+impl AsyncParse for Payload {
+    type Fut<'a, R: PollReader + Unpin> = PayloadParse<'a, R>;
+    fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+        PayloadParse(reader, options)
+    }
+}
+
+impl <I: Parse + Unpin> Parse for Trailing<I> {
     fn parse<T: Reader>(reader: &mut T, _: &ParseOptions) -> Result<Self, ParseError> {
         let offset = reader.offset();
         let size = reader.remaining_size();
@@ -710,15 +1747,36 @@ impl <I: Parse> Parse for Trailing<I> {
             _pd: core::marker::PhantomData
         })
     }
+}
 
-    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        let offset = reader.offset();
-        let size = reader.remaining_size();
-        Ok(Self {
+pub struct TrailingParse<'a, R, T>(R, &'a ParseOptions, core::marker::PhantomData<T>);
+
+impl <'a, R: PollReader, T: AsyncParse> Future for TrailingParse<'a, R, T> {
+    type Output = Result<Trailing<T>, ParseError>;
+    fn poll(self: core::pin::Pin<&mut Self>, _: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        let offset = self.0.offset();
+        let size = self.0.remaining_size();
+        core::task::Poll::Ready(Ok(Trailing {
             offset,
             size,
-            _pd: core::marker::PhantomData
-        })
+            _pd: core::marker::PhantomData,
+        }))
+    }
+}
+
+impl <'a, R, T: AsyncParse> TakeReader<'a, R> for TrailingParse<'a, R, T> {
+    fn take_reader(self) -> (R, &'a ParseOptions) {
+        (self.0, self.1)
+    }
+    fn borrow_reader(&mut self) -> &mut R {
+        &mut self.0
+    }
+}
+
+impl <T: AsyncParse + Unpin> AsyncParse for Trailing<T> {
+    type Fut<'a, R: PollReader + Unpin> = TrailingParse<'a, R, T>;
+    fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+        TrailingParse(reader, options, core::marker::PhantomData)
     }
 }
 
@@ -726,6 +1784,24 @@ pub struct TrailingIterator<'a, R: SwapOffsets, T> {
     reader: BacktrackReader<TrailingReader<&'a mut R>>,
     opts: &'a ParseOptions,
     _pd: core::marker::PhantomData<T>,
+}
+
+impl <'a, R: SwapOffsets + Reader, T> TrailingIterator<'a, R, T> {
+    pub fn from_trailing(trailing: &Trailing<T>, reader: &'a mut R, opts: &'a ParseOptions) -> Self {
+        let Trailing {
+            offset,
+            size,
+            ..
+        } = trailing;
+
+        let max_offset = offset + size;
+        let reader = BacktrackReader::new(TrailingReader::new(reader, max_offset), *offset);
+        Self {
+            reader,
+            opts,
+            _pd: core::marker::PhantomData,
+        }
+    }
 }
 
 impl <'a, T: Parse, R: Reader> Iterator for TrailingIterator<'a, R, T> {
@@ -740,6 +1816,75 @@ impl <'a, T: Parse, R: Reader> Iterator for TrailingIterator<'a, R, T> {
     }
 }
 
+pub struct AsyncTrailingIterator<'a, R: SwapOffsets + PollReader + Unpin, T: AsyncParse + Unpin> {
+    state: AsyncIterState<'a, BacktrackReader<TrailingReader<&'a mut R>>, T::Fut<'a, BacktrackReader<TrailingReader<&'a mut R>>>>,
+}
+
+impl <'a, R: SwapOffsets + PollReader + Unpin + Reader, T: AsyncParse + Unpin> AsyncTrailingIterator<'a, R, T> {
+    pub fn from_trailing(trailing: &Trailing<T>, reader: &'a mut R, opts: &'a ParseOptions) -> Self {
+        let Trailing {
+            offset,
+            size,
+            ..
+        } = trailing;
+
+        let max_offset = offset + size;
+        let reader = BacktrackReader::new(TrailingReader::new(reader, max_offset), *offset);
+
+        let state = if PollReader::remaining_size(&reader) == 0 {
+            AsyncIterState::Done(reader, opts)
+        } else {
+            AsyncIterState::Iterating(T::create_fut(reader, opts))
+        };
+        Self {
+            state
+        }
+    }
+}
+
+impl <'a, R: SwapOffsets + PollReader + Unpin, T: AsyncParse + Unpin> AsyncIterator for AsyncTrailingIterator<'a, R, T> {
+    type Item = Result<T, ParseError>;
+    fn poll_next(mut self: core::pin::Pin<&mut Self>, ctx: &mut core::task::Context<'_>) -> core::task::Poll<Option<Self::Item>> {
+        use core::pin::Pin;
+        use core::task::Poll;
+
+        let state = core::mem::replace(&mut *self, Self { state: AsyncIterState::Empty }).state;
+        match state {
+            AsyncIterState::Done(r, opts) => {
+                self.state = AsyncIterState::Done(r, opts);
+                return Poll::Ready(None)
+            }
+            AsyncIterState::Iterating(mut i) => {
+                match Pin::new(&mut i).poll(ctx) {
+                    Poll::Pending => {
+                        self.state = AsyncIterState::Iterating(i);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(res) => {
+                        let (reader, opts) = i.take_reader();
+                        self.state = if reader.remaining_size() == 0 {
+                            AsyncIterState::Done(reader, opts)
+                        } else {
+                            AsyncIterState::Iterating(T::create_fut(reader, opts))
+                        };
+                        return Poll::Ready(Some(res))
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl <'a, R: SwapOffsets + PollReader + Unpin, T: AsyncParse + Unpin> TakeReader<'a, BacktrackReader<TrailingReader<&'a mut R>>> for AsyncTrailingIterator<'a, R, T> {
+    fn take_reader(self) -> (BacktrackReader<TrailingReader<&'a mut R>>, &'a ParseOptions) {
+        self.state.take_reader()
+    }
+    fn borrow_reader(&mut self) -> &mut BacktrackReader<TrailingReader<&'a mut R>> {
+        self.state.borrow_reader()
+    }
+}
+
 #[derive(Debug)]
 pub struct DynamicArray<S, I, const ZERO_RELATIVE: bool> {
     size: S,
@@ -751,13 +1896,30 @@ pub struct DynamicArrayIter<'a, R: SwapOffsets, S, I, const ZERO_RELATIVE: bool>
     size: S,
     current: S,
     exhausted: bool,
-    //arr: &'a DynamicArray<S, I, ZERO_RELATIVE>,
     pub reader: BacktrackReader<&'a mut R>,
     opts: &'a ParseOptions,
     _pd: core::marker::PhantomData<I>,
 }
 
-impl <'a, R: SwapOffsets, S: ArraySize, I, const ZERO_RELATIVE: bool> DynamicArrayIter<'a, R, S, I, ZERO_RELATIVE> {
+impl <'a, R: SwapOffsets, S: ArraySize + Copy, I, const ZERO_RELATIVE: bool> DynamicArrayIter<'a, R, S, I, ZERO_RELATIVE> {
+    pub fn from_dynamic_array(arr: &DynamicArray<S, I, ZERO_RELATIVE>, reader: &'a mut R, opts: &'a ParseOptions) -> Self {
+        let DynamicArray {
+            offset,
+            size,
+            ..
+        } = arr;
+        Self::new(*size, reader, *offset, opts)
+    }
+
+    pub fn from_sized_chidlren(children: &SizedChildren<S, I>, reader: &'a mut R, opts: &'a ParseOptions) -> Self {
+        let SizedChildren {
+            len,
+            offset,
+            ..
+        } = children;
+        Self::new(*len, reader, *offset, opts)
+    }
+
     fn new(size: S, reader: &'a mut R, offset: usize, opts: &'a ParseOptions) -> Self {
         Self {
             size,
@@ -807,6 +1969,100 @@ impl <'a, R: Reader, S: ArraySize, I: Parse, const ZERO_RELATIVE: bool> Iterator
     }
 }
 
+pub struct AsyncDynamicArrayIter<'a, R: SwapOffsets + PollReader + Unpin, S, I: AsyncParse, const ZERO_RELATIVE: bool> {
+    size: S,
+    current: S,
+    exhausted: bool,
+
+    state: AsyncIterState<'a, BacktrackReader<&'a mut R>, I::Fut<'a, BacktrackReader<&'a mut R>>>,
+}
+
+impl <'a, R: SwapOffsets + PollReader + Unpin, S: ArraySize + Copy, I: AsyncParse, const ZERO_RELATIVE: bool> AsyncDynamicArrayIter<'a, R, S, I, ZERO_RELATIVE> {
+    pub fn from_dynamic_array(arr: &DynamicArray<S, I, ZERO_RELATIVE>, reader: &'a mut R, opts: &'a ParseOptions) -> Self {
+        let DynamicArray {
+            offset,
+            size,
+            ..
+        } = arr;
+        Self::new(*size, reader, *offset, opts)
+    }
+
+    pub fn from_sized_chidlren(children: &SizedChildren<S, I>, reader: &'a mut R, opts: &'a ParseOptions) -> Self {
+        let SizedChildren {
+            len,
+            offset,
+            ..
+        } = children;
+        Self::new(*len, reader, *offset, opts)
+    }
+
+    fn new(size: S, reader: &'a mut R, offset: usize, opts: &'a ParseOptions) -> Self {
+        let reader = BacktrackReader::new(reader, offset);
+
+        let mut exhausted = false;
+        let mut current = S::ZERO;
+
+        let state = if dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(&mut current, &size, &mut exhausted) {
+            AsyncIterState::Iterating(I::create_fut(reader, opts))
+        } else {
+            AsyncIterState::Done(reader, opts)
+        };
+
+        Self {
+            size,
+            current,
+            exhausted,
+            state,
+        }
+    }
+}
+
+impl <'a, R: SwapOffsets + PollReader + Unpin, S: ArraySize + Unpin, I: AsyncParse + Unpin, const ZERO_RELATIVE: bool> AsyncIterator for AsyncDynamicArrayIter<'a, R, S, I, ZERO_RELATIVE> where <I as AsyncParse>::Fut<'a, R>: Unpin {
+    type Item = Result<I, ParseError>;
+    fn poll_next(mut self: core::pin::Pin<&mut Self>, ctx: &mut core::task::Context<'_>) -> core::task::Poll<Option<Self::Item>> {
+        use core::pin::Pin;
+        use core::task::Poll;
+        
+        let mut this = core::mem::replace(&mut *self, Self { size: S::ZERO, current: S::ZERO, exhausted: false, state: AsyncIterState::Empty });
+        match this.state {
+            AsyncIterState::Done(r, o) => {
+                this.state = AsyncIterState::Done(r, o);
+                core::mem::swap(&mut *self, &mut this);
+                return Poll::Ready(None)
+            }
+            AsyncIterState::Iterating(mut i) => {
+                match Pin::new(&mut i).poll(ctx) {
+                    Poll::Pending => {
+                        this.state = AsyncIterState::Iterating(i);
+                        core::mem::swap(&mut *self, &mut this);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(res) => {
+                        let (reader, opts) = i.take_reader();
+                        this.state = if dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(&mut this.current, &this.size, &mut this.exhausted) {
+                            AsyncIterState::Iterating(I::create_fut(reader, opts))
+                        } else {
+                            AsyncIterState::Done(reader, opts)
+                        };
+                        core::mem::swap(&mut *self, &mut this);
+                        return Poll::Ready(Some(res))
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl <'a, R: SwapOffsets + PollReader + Unpin, S: ArraySize + Unpin, I: AsyncParse + Unpin, const ZERO_RELATIVE: bool> TakeReader<'a, BacktrackReader<&'a mut R>> for AsyncDynamicArrayIter<'a, R, S, I, ZERO_RELATIVE> where <I as AsyncParse>::Fut<'a, R>: Unpin {
+    fn take_reader(self) -> (BacktrackReader<&'a mut R>, &'a ParseOptions) {
+        self.state.take_reader()
+    }
+    fn borrow_reader(&mut self) -> &mut BacktrackReader<&'a mut R> {
+        self.state.borrow_reader()
+    }
+}
+
 pub trait ArraySize: Clone + Copy + core::ops::AddAssign + core::cmp::Ord {
     const ZERO: Self;
     const ONE: Self;
@@ -827,7 +2083,7 @@ impl_array_size!{
     u16, u32,
 }
 
-impl <I: Parse, S: Parse + ArraySize, const ZERO_RELATIVE: bool> Parse for DynamicArray<S, I, ZERO_RELATIVE> {
+impl <I: Parse + Unpin, S: Parse + ArraySize + Unpin, const ZERO_RELATIVE: bool> Parse for DynamicArray<S, I, ZERO_RELATIVE> {
     fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
         let size = S::parse(reader, options)?;
         let offset = reader.offset();
@@ -844,22 +2100,114 @@ impl <I: Parse, S: Parse + ArraySize, const ZERO_RELATIVE: bool> Parse for Dynam
             _pd: core::marker::PhantomData,
         })
     }
+}
 
-    async fn parse_async<T: AsyncReader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        let size = S::parse_async(reader, options).await?;
-        let offset = reader.offset();
-        let mut current = S::ZERO;
-        let mut exhausted = false;
+pub enum DynamicArrayParse<'a, R: PollReader + Unpin, S: AsyncParse + ArraySize, I: AsyncParse, const ZERO_RELATIVE: bool> {
+    Waiting(usize, <S as AsyncParse>::Fut<'a, R>),
+    Iterating {
+        offset: usize,
+        exhausted: bool,
+        len: S,
+        idx: S,
+        fut: <I as AsyncParse>::Fut<'a, R>,
+    },
+    Done(R, &'a ParseOptions),
+    Empty,
+}
 
-        while dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(&mut current, &size, &mut exhausted) {
-            let _ = I::parse_async(reader, options).await?;
+impl <'a, R: PollReader + Unpin, S: AsyncParse + ArraySize + Unpin, I: AsyncParse + Unpin, const ZERO_RELATIVE: bool> Future for DynamicArrayParse<'a, R, S, I, ZERO_RELATIVE> {
+    type Output = Result<DynamicArray<S, I, ZERO_RELATIVE>, ParseError>;
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        use core::task::Poll;
+        use core::pin::Pin;
+        loop {
+            let this = core::mem::replace(&mut *self, Self::Empty);
+            match this {
+                Self::Waiting(offset, mut fut) => {
+                    match Pin::new(&mut fut).poll(cx) {
+                        Poll::Pending => {
+                            *self = Self::Waiting(offset, fut);
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(s) => {
+                            let (reader, options) = fut.take_reader();
+                            *self = Self::Iterating {
+                                offset,
+                                len: s?,
+                                idx: S::ZERO,
+                                exhausted: false,
+                                fut: I::create_fut(reader, options)
+                            }
+                        }
+                    }
+                }
+                Self::Iterating {
+                    offset,
+                    mut exhausted,
+                    len,
+                    mut idx,
+                    mut fut,
+                } => {
+                    match Pin::new(&mut fut).poll(cx) {
+                        Poll::Pending => {
+                            *self = Self::Iterating {
+                                offset,
+                                exhausted,
+                                len,
+                                idx,
+                                fut,
+                            }
+                        }
+                        Poll::Ready(i) => {
+                            let _ = i?;
+                            let has_next = dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(&mut idx, &len, &mut exhausted);
+                            let (reader, opts) = fut.take_reader();
+                            if has_next {
+                                *self = Self::Iterating {
+                                    offset,
+                                    exhausted,
+                                    len,
+                                    idx,
+                                    fut: I::create_fut(reader, opts)
+                                };
+                                continue;
+                            }
+                            *self = Self::Done(reader, opts);
+                            return Poll::Ready(Ok(DynamicArray {
+                                offset,
+                                size: len,
+                                _pd: core::marker::PhantomData,
+                            }))
+                        }
+                    }
+                }
+                Self::Done(..) => panic!("polled after completion"),
+                Self::Empty => unreachable!(),
+            }
         }
+    }
+}
 
-        Ok(Self {
-            size,
-            offset,
-            _pd: core::marker::PhantomData,
-        })
+impl <'a, R: PollReader + Unpin, S: AsyncParse + ArraySize, I: AsyncParse, const ZERO_RELATIVE: bool> TakeReader<'a, R> for DynamicArrayParse<'a, R, S, I, ZERO_RELATIVE> {
+    impl_take_reader!{}
+    fn borrow_reader(&mut self) -> &mut R {
+        match self {
+            Self::Waiting(_, f) => f.borrow_reader(),
+            Self::Iterating {
+                fut,
+                ..
+            } => fut.borrow_reader(),
+            Self::Done(r, _) => r,
+            Self::Empty => unreachable!(),
+        }
+    }
+}
+
+impl <S: AsyncParse + ArraySize + Unpin, I: AsyncParse + Unpin, const ZERO_RELATIVE: bool> AsyncParse for DynamicArray<S, I, ZERO_RELATIVE> {
+    type Fut<'a, R: PollReader + Unpin> = DynamicArrayParse<'a, R, S, I, ZERO_RELATIVE>;
+    fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+        let offset = reader.offset();
+        DynamicArrayParse::Waiting(offset, S::create_fut(reader, options))
     }
 }
 
@@ -872,14 +2220,11 @@ pub trait Flags<B> {
     fn to_bits(self) -> B;
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
     use atom_parser_derive::make_atom;
     make_atom! {
-        // TODO: support for multiple versions in the specified version
-        //  so like #[version(0, 1, 2)]
-        //  - this is _only_ for when its a part of a #[versions] field
-        // 
         // TODO
         //  - better module resolution for parser
         //      - e.g, either use ::mod_name:: or self::mod_name so types cannot get confused.
@@ -888,6 +2233,7 @@ mod test {
     }
 }
 
+/*
 mod atoms {
     use super::*;
     use atom_parser_derive::make_atom;
@@ -2040,106 +3386,5 @@ mod atoms {
         }
         panic!()
     }
-
-    make_atom! {
-        struct A {
-            #[version]
-            a: u8,
-            #[versions]
-            enum Version {
-                #[version(0)]
-                V1 {
-                    num: u16,
-                },
-                #[version(1)]
-                V2 {
-                    num: u32,
-                },
-            }
-        }
-    }
-
-    //want to replace something like
-    // struct SomeAtom {
-    //      version: u8,
-    //      flags: u32,
-    //      version_dependent: u32,
-    //      other_version_dependent: u16,
-    //      after_item: u8,
-    // }
-    //
-    // and turn it into something like
-    //
-    // struct SomeAtom {
-    //  enum SomeAtomVersion {
-    //      Version1 {
-    //          flags: u32,
-    //          version_dependent: u32,
-    //          after_item: u8,
-    //      }
-    //      Version2 {
-    //          flags: u32,
-    //          other_version_dependent: u16,
-    //          after_item: u8,
-    //      }
-    //  }
-    // }
-    //  so if there is 1+ versions definitions in the atom (e.g if it exists in the atomdefinition)
-    //  then everything needs to be grouped and collected based on versions
-    //  and the only field available in the atom is the version
-    //  - this is because the version changes the understanding of what is in the fields and how to
-    //  interact with them
-    //
-    //
-    //  - TODO
-    //      - if version identifier is specified (through #[version] or #[full_box])
-    //          - either
-    //              - group all #[versions] which version match
-    //                  - all other fields keep the same order
-    //                      - so like the only thing versions does is create a copy of all
-    //                      compatible fields
-    //                      - like 
-    //                          a: u8
-    //                          #[versions]
-    //                          enum Version {
-    //                              #[version(0)]
-    //                              V1 {
-    //                                  b: u16
-    //                              }
-    //                              #[version(1)]
-    //                              V2 {
-    //                                  c: u32
-    //                              }
-    //                          }
-    //                          d: u64
-    //
-    //                          would turn into
-    //                          enum Version {
-    //                              V1 {
-    //                                  a: u8,
-    //                                  b: u16,
-    //                                  d: u64
-    //                              }
-    //                              V2 {
-    //                                  a: u8,
-    //                                  c: u32,
-    //                                  d: u64,
-    //                              }
-    //                              Unknown(uint)
-    //                          }
-    //              - if a top level #[version(num)] is specified, then that it is assumed that
-    //              *only* that version is supported, and all other versions are unknown
-
-    // there should be a fn to definition to do something like expand_versions(self) -> Result<ExpandedSelf, Self> { }
-    // that expands the current definition into one that has all of its expansions
-    // so itd be like 
-    // struct Versioned<T> {
-    //  version: LitInt,
-    //  item: T,
-    // }
-    //
-    // struct ExpandedDefinition<T> {
-    //      
-    // }
-
 }
+*/
