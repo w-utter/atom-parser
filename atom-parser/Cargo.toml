@@ -12,3 +12,7 @@ thiserror = "2.0"
 futures-core = "0.3"
 pin-project = "1.1"
 atom-parser-derive = {path = "../atom-parser-derive"}
+
+# only for async runtime and for `StreamExt`
+tokio = {version = "1.53", features = ["rt", "macros"]}
+tokio-stream = "0.1"

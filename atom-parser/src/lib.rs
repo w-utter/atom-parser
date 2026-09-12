@@ -19,10 +19,10 @@ pub enum AsyncIterState<'a, R, T> {
 
 impl <'a, R, T: TakeReader<'a, R>> TakeReader<'a, R> for AsyncIterState<'a, R, T> {
     impl_take_reader!{}
-    fn borrow_reader(&mut self) -> &mut R {
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
         match self {
             Self::Iterating(t) => t.borrow_reader(),
-            Self::Done(r, _) => r,
+            Self::Done(r, opts) => (r, opts),
             Self::Empty => unreachable!(),
         }
     }
@@ -125,6 +125,7 @@ impl <'a, R: PollReader + Unpin> Future for AtomSizeParse<'a, R> {
                     if size != 0 && size < AtomSize::MIN_ATOM_SIZE_32 {
                         return std::task::Poll::Ready(Err(ParseError::AtomSizeTooSmall))
                     }
+                    let size = size - AtomSize::MIN_ATOM_SIZE_32;
                     return core::task::Poll::Ready(Ok(AtomSize {
                         #[cfg(feature = "extended_sized_atoms")]
                         size: u64::from(size),
@@ -166,12 +167,12 @@ impl <'a, R: PollReader + Unpin> Future for AtomSizeParse<'a, R> {
 impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for AtomSizeParse<'a, R> {
     impl_take_reader!{}
 
-    fn borrow_reader(&mut self) -> &mut R {
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
         match self {
-            Self::Waiting(_, r, _) => r,
+            Self::Waiting(_, r, opts) => (r, opts),
             #[cfg(feature = "extended_sized_atoms")]
             Self::ExtendedSize(s) => s.borrow_reader(),
-            Self::Done(r, ..) => r,
+            Self::Done(r, opts) => (r, opts),
             _ => unreachable!(),
         }
     }
@@ -261,10 +262,10 @@ pub enum IntegerParse<'a, R, T, const N: usize> {
 impl <'a, R, T, const N: usize> TakeReader<'a, R> for IntegerParse<'a, R, T, N> {
     impl_take_reader!{}
 
-    fn borrow_reader(&mut self) -> &mut R {
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
         match self {
-            Self::Waiting(r, ..) => r,
-            Self::Done(r, ..) => r,
+            Self::Waiting(r, opts, ..) => (r, opts),
+            Self::Done(r, opts) => (r, opts),
             _ => unreachable!(),
         }
     }
@@ -284,7 +285,7 @@ pub trait Parse: Sized + AsyncParse {
 
 pub trait TakeReader<'a, R> {
     fn take_reader(self) -> (R, &'a ParseOptions);
-    fn borrow_reader(&mut self) -> &mut R;
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions);
 }
 
 pub trait AsyncParse: Sized {
@@ -425,7 +426,7 @@ impl <'a, R: PollReader + Unpin, I: AsyncParse + Unpin, const N: usize> Future f
                         ArrayGuard::initialize([const {core::mem::MaybeUninit::uninit()}; N])
                     }))
                 }
-                _ => panic!("invalid state"),
+                _ => panic!("AsyncIterState invalid state"),
             }
         }
     }
@@ -436,7 +437,7 @@ impl <'a, R: PollReader + Unpin, I: AsyncParse + Unpin, const N: usize> TakeRead
         let state = core::mem::replace(&mut self.state, AsyncIterState::Empty);
         state.take_reader()
     }
-    fn borrow_reader(&mut self) -> &mut R {
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
         self.state.borrow_reader()
     }
 }
@@ -501,7 +502,7 @@ impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for FourCCParse<'a, R> {
     fn take_reader(self) -> (R, &'a ParseOptions) { 
         self.inner.take_reader()
     }
-    fn borrow_reader(&mut self) -> &mut R {
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
         self.inner.borrow_reader()
     }
 }
@@ -587,7 +588,7 @@ impl <'a, R: PollReader + Unpin> Future for AtomHeaderParse<'a, R> {
                         Poll::Ready(fcc) => {
                             let fcc = fcc?;
                             let IntegerParse::Done(reader, opts) = fourcc.inner else {
-                                unreachable!("invalid state");
+                                unreachable!("IntegerParse invalid state");
                             };
                             *self = Self::AtomSize{
                                 fourcc: fcc, 
@@ -607,7 +608,7 @@ impl <'a, R: PollReader + Unpin> Future for AtomHeaderParse<'a, R> {
                         }
                         Poll::Ready(atom_size) => {
                             let AtomSizeParse::Done(reader, opts) = size else {
-                                unreachable!("invalid state");
+                                unreachable!("AtomSizeParse invalid state");
                             };
                             *self = Self::Done(reader, opts);
                             return Poll::Ready(atom_size.map(|size| {
@@ -629,12 +630,12 @@ impl <'a, R: PollReader + Unpin> Future for AtomHeaderParse<'a, R> {
 impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for AtomHeaderParse<'a, R> {
     impl_take_reader!{}
 
-    fn borrow_reader(&mut self) -> &mut R {
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
         match self {
             Self::Waiting(r) => r.borrow_reader(),
             Self::Fourcc { fourcc, .. } => fourcc.borrow_reader(),
             Self::AtomSize { size, ..} => size.borrow_reader(),
-            Self::Done(r, ..) => r,
+            Self::Done(r, opts) => (r, opts),
             _ => unreachable!(),
         }
     }
@@ -978,23 +979,7 @@ pub trait AsyncReader: SwapOffsets + PollReader + Unpin {
     }
 }
 
-impl <'r, R: AsyncReader> AsyncReader for &'r mut R {
-    fn async_read<'a>(&'a mut self, bytes: &'a mut [u8]) -> AsyncRead<'a, Self> {
-        async_impl::read(self, bytes)
-    }
-    fn async_seek(&mut self, amt: usize) -> AsyncSeek<&mut Self> {
-        async_impl::seek(self, amt)
-    }
-
-    // reads a cstr and returns its length (including nul)
-    fn async_read_cstr(&mut self) -> AsyncReadCstr<&mut Self> {
-        async_impl::read_cstr(self)
-    }
-
-    fn seek_remaining(&mut self) -> AsyncSeek<&mut Self> {
-        self.async_seek(self.remaining_size())
-    }
-}
+impl <R: PollReader + SwapOffsets + Unpin> AsyncReader for R {}
 
 #[derive(Debug, PartialEq, Eq, Default)]
 pub enum Endianess {
@@ -1168,15 +1153,20 @@ impl <'a, R: SwapOffsets + PollReader + Unpin + Reader, C: AsyncParse> AsyncChil
         let reader = BacktrackReader::new(TrailingReader::new(reader, max_offset), children.offset);
         let remaining = PollReader::remaining_size(&reader);
 
-        let state = if remaining == 0 {
-            AsyncIterState::Done(reader, opts)
-        } else {
+        let state = if remaining > 0 {
             AsyncIterState::Iterating(C::create_fut(reader, opts))
+        } else {
+            AsyncIterState::Done(reader, opts)
         };
 
         Self {
             state
         }
+    }
+
+    pub fn reader(&mut self) -> &mut BacktrackReader<TrailingReader<&'a mut R>> {
+        let (reader, _) = self.state.borrow_reader();
+        reader
     }
 }
 
@@ -1212,10 +1202,10 @@ impl <'a, R: SwapOffsets + PollReader + Unpin, C: AsyncParse + Unpin> AsyncItera
                     }
                     Poll::Ready(res) => {
                         let (reader, opts) = i.take_reader();
-                        self.state = if reader.remaining_size() == 0 {
-                            AsyncIterState::Done(reader, opts)
-                        } else {
+                        self.state = if reader.remaining_size() > 0 {
                             AsyncIterState::Iterating(C::create_fut(reader, opts))
+                        } else {
+                            AsyncIterState::Done(reader, opts)
                         };
                         return Poll::Ready(Some(res))
                     }
@@ -1230,7 +1220,7 @@ impl <'a, R: SwapOffsets + PollReader + Unpin, C: AsyncParse + Unpin> TakeReader
     fn take_reader(self) -> (BacktrackReader<TrailingReader<&'a mut R>>, &'a ParseOptions) {
         self.state.take_reader()
     }
-    fn borrow_reader(&mut self) -> &mut BacktrackReader<TrailingReader<&'a mut R>> {
+    fn borrow_reader(&mut self) -> (&mut BacktrackReader<TrailingReader<&'a mut R>>, &'a ParseOptions) {
         self.state.borrow_reader()
     }
 }
@@ -1363,14 +1353,15 @@ impl <'a, R: PollReader + Unpin, S: AsyncParse + TryInto<usize> + Unpin + Copy> 
 
 impl <'a, R: PollReader + Unpin, S: AsyncParse + TryInto<usize> + Unpin> TakeReader<'a, R> for PascalStringParse<'a, R, S> where <S as AsyncParse>::Fut<'a, R>: Unpin {
     impl_take_reader!{}
-    fn borrow_reader(&mut self) -> &mut R {
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
         match self {
             Self::Waiting(w) => w.borrow_reader(),
             Self::Seeking {
                 fut,
+                opts,
                 ..
-            } => &mut fut.reader,
-            Self::Done(r, ..) => r,
+            } => (&mut fut.reader, opts),
+            Self::Done(r, opts) => (r, opts),
             _ => unreachable!(),
         }
     }
@@ -1383,6 +1374,7 @@ impl <S: AsyncParse + TryInto<usize> + Unpin + Copy> AsyncParse for PascalString
     }
 }
 
+#[derive(Debug)]
 pub struct NullTerminatedString {
     len: usize,
     offset: usize,
@@ -1433,8 +1425,8 @@ impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for NullTerminatedStringParse
     fn take_reader(self) -> (R, &'a ParseOptions) {
         (self.1.reader, self.2)
     }
-    fn borrow_reader(&mut self) -> &mut R {
-        &mut self.1.reader
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+        (&mut self.1.reader, &self.2)
     }
 }
 
@@ -1460,7 +1452,6 @@ impl <S: Parse + Unpin, I: Parse + Unpin> Parse for SizedChildren<S, I> {
 
 pub enum SizedChildrenParse<'a, R: PollReader + Unpin, S: AsyncParse + Unpin, C> where <S as AsyncParse>::Fut<'a, R>: Unpin {
     Size {
-        offset: usize,
         fut: <S as AsyncParse>::Fut<'a, R>, 
         _pd: core::marker::PhantomData<C>
     },
@@ -1476,17 +1467,17 @@ impl <'a, R: PollReader + Unpin, S: AsyncParse + Unpin, C: AsyncParse + Unpin> F
         let this = core::mem::replace(&mut *self, Self::Empty);
         match this {
             Self::Size {
-                offset,
                 mut fut, 
                 ..
             } => {
                 match Pin::new(&mut fut).poll(cx) {
                     Poll::Pending => {
-                        *self = Self::Size{fut, offset, _pd: core::marker::PhantomData};
+                        *self = Self::Size{fut, _pd: core::marker::PhantomData};
                         return Poll::Pending;
                     }
                     Poll::Ready(size) => {
                         let (reader, options) = fut.take_reader();
+                        let offset = reader.offset();
                         *self = Self::Done(reader, options);
                         return Poll::Ready(size.map(|len| {
                             SizedChildren {
@@ -1506,13 +1497,13 @@ impl <'a, R: PollReader + Unpin, S: AsyncParse + Unpin, C: AsyncParse + Unpin> F
 
 impl <'a, R: PollReader + Unpin, S: AsyncParse + Unpin, C: AsyncParse> TakeReader<'a, R> for SizedChildrenParse<'a, R, S, C> {
     impl_take_reader!{}
-    fn borrow_reader(&mut self) -> &mut R {
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
         match self {
             Self::Size {
                 fut,
                 ..
             } => fut.borrow_reader(),
-            Self::Done(r, _) => r,
+            Self::Done(r, opts) => (r, opts),
             Self::Empty => unreachable!(),
         }
     }
@@ -1521,8 +1512,7 @@ impl <'a, R: PollReader + Unpin, S: AsyncParse + Unpin, C: AsyncParse> TakeReade
 impl <S: AsyncParse + Unpin, C: AsyncParse + Unpin> AsyncParse for SizedChildren<S, C> {
     type Fut<'a, R: PollReader + Unpin> = SizedChildrenParse<'a, R, S, C>;
     fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
-        let offset = reader.offset();
-        SizedChildrenParse::Size { offset, fut: S::create_fut(reader, options), _pd: core::marker::PhantomData }
+        SizedChildrenParse::Size { fut: S::create_fut(reader, options), _pd: core::marker::PhantomData }
     }
 }
 
@@ -1556,8 +1546,8 @@ impl <'a, R: PollReader + Unpin, C: AsyncParse> TakeReader<'a, R> for ChildrenPa
     fn take_reader(self) -> (R, &'a ParseOptions) {
         (self.0, self.1)
     }
-    fn borrow_reader(&mut self) -> &mut R {
-        &mut self.0
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+        (&mut self.0, self.1)
     }
 }
 
@@ -1621,7 +1611,7 @@ pub struct TrailingReader<R> {
     max_offset: usize,
 }
 
-impl <R: Reader> TrailingReader<R> {
+impl <R> TrailingReader<R> {
     pub fn new(reader: R, max_offset: usize) -> Self {
         Self {
             reader,
@@ -1725,8 +1715,8 @@ impl <'a, R> TakeReader<'a, R> for PayloadParse<'a, R> {
     fn take_reader(self) -> (R, &'a ParseOptions) {
         (self.0, self.1)
     }
-    fn borrow_reader(&mut self) -> &mut R {
-        &mut self.0
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+        (&mut self.0, self.1)
     }
 }
 
@@ -1768,8 +1758,8 @@ impl <'a, R, T: AsyncParse> TakeReader<'a, R> for TrailingParse<'a, R, T> {
     fn take_reader(self) -> (R, &'a ParseOptions) {
         (self.0, self.1)
     }
-    fn borrow_reader(&mut self) -> &mut R {
-        &mut self.0
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+        (&mut self.0, self.1)
     }
 }
 
@@ -1801,6 +1791,10 @@ impl <'a, R: SwapOffsets + Reader, T> TrailingIterator<'a, R, T> {
             opts,
             _pd: core::marker::PhantomData,
         }
+    }
+
+    pub fn reader(&mut self) -> &mut BacktrackReader<TrailingReader<&'a mut R>> {
+        &mut self.reader
     }
 }
 
@@ -1880,7 +1874,7 @@ impl <'a, R: SwapOffsets + PollReader + Unpin, T: AsyncParse + Unpin> TakeReader
     fn take_reader(self) -> (BacktrackReader<TrailingReader<&'a mut R>>, &'a ParseOptions) {
         self.state.take_reader()
     }
-    fn borrow_reader(&mut self) -> &mut BacktrackReader<TrailingReader<&'a mut R>> {
+    fn borrow_reader(&mut self) -> (&mut BacktrackReader<TrailingReader<&'a mut R>>, &'a ParseOptions) {
         self.state.borrow_reader()
     }
 }
@@ -1911,7 +1905,7 @@ impl <'a, R: SwapOffsets, S: ArraySize + Copy, I, const ZERO_RELATIVE: bool> Dyn
         Self::new(*size, reader, *offset, opts)
     }
 
-    pub fn from_sized_chidlren(children: &SizedChildren<S, I>, reader: &'a mut R, opts: &'a ParseOptions) -> Self {
+    pub fn from_sized_children(children: &SizedChildren<S, I>, reader: &'a mut R, opts: &'a ParseOptions) -> Self {
         let SizedChildren {
             len,
             offset,
@@ -1929,6 +1923,10 @@ impl <'a, R: SwapOffsets, S: ArraySize + Copy, I, const ZERO_RELATIVE: bool> Dyn
             opts,
             _pd: core::marker::PhantomData,
         }
+    }
+
+    pub fn reader(&mut self) -> &mut BacktrackReader<&'a mut R> {
+        &mut self.reader
     }
 }
 
@@ -1987,7 +1985,7 @@ impl <'a, R: SwapOffsets + PollReader + Unpin, S: ArraySize + Copy, I: AsyncPars
         Self::new(*size, reader, *offset, opts)
     }
 
-    pub fn from_sized_chidlren(children: &SizedChildren<S, I>, reader: &'a mut R, opts: &'a ParseOptions) -> Self {
+    pub fn from_sized_children(children: &SizedChildren<S, I>, reader: &'a mut R, opts: &'a ParseOptions) -> Self {
         let SizedChildren {
             len,
             offset,
@@ -2014,6 +2012,11 @@ impl <'a, R: SwapOffsets + PollReader + Unpin, S: ArraySize + Copy, I: AsyncPars
             exhausted,
             state,
         }
+    }
+    
+    pub fn reader(&mut self) -> &mut BacktrackReader<&'a mut R> {
+        let (reader, _) = self.state.borrow_reader();
+        reader
     }
 }
 
@@ -2058,7 +2061,7 @@ impl <'a, R: SwapOffsets + PollReader + Unpin, S: ArraySize + Unpin, I: AsyncPar
     fn take_reader(self) -> (BacktrackReader<&'a mut R>, &'a ParseOptions) {
         self.state.take_reader()
     }
-    fn borrow_reader(&mut self) -> &mut BacktrackReader<&'a mut R> {
+    fn borrow_reader(&mut self) -> (&mut BacktrackReader<&'a mut R>, &'a ParseOptions) {
         self.state.borrow_reader()
     }
 }
@@ -2103,7 +2106,7 @@ impl <I: Parse + Unpin, S: Parse + ArraySize + Unpin, const ZERO_RELATIVE: bool>
 }
 
 pub enum DynamicArrayParse<'a, R: PollReader + Unpin, S: AsyncParse + ArraySize, I: AsyncParse, const ZERO_RELATIVE: bool> {
-    Waiting(usize, <S as AsyncParse>::Fut<'a, R>),
+    Waiting(<S as AsyncParse>::Fut<'a, R>),
     Iterating {
         offset: usize,
         exhausted: bool,
@@ -2123,20 +2126,35 @@ impl <'a, R: PollReader + Unpin, S: AsyncParse + ArraySize + Unpin, I: AsyncPars
         loop {
             let this = core::mem::replace(&mut *self, Self::Empty);
             match this {
-                Self::Waiting(offset, mut fut) => {
+                Self::Waiting(mut fut) => {
                     match Pin::new(&mut fut).poll(cx) {
                         Poll::Pending => {
-                            *self = Self::Waiting(offset, fut);
+                            *self = Self::Waiting(fut);
                             return Poll::Pending;
                         }
                         Poll::Ready(s) => {
                             let (reader, options) = fut.take_reader();
-                            *self = Self::Iterating {
-                                offset,
-                                len: s?,
-                                idx: S::ZERO,
-                                exhausted: false,
-                                fut: I::create_fut(reader, options)
+                            let offset = reader.offset();
+
+                            let len = s?;
+                            let mut idx = S::ZERO;
+                            let mut exhausted = false;
+
+                            if dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(&mut idx, &len, &mut exhausted) {
+                                *self = Self::Iterating {
+                                    offset,
+                                    len,
+                                    idx,
+                                    exhausted,
+                                    fut: I::create_fut(reader, options)
+                                }
+                            } else {
+                                *self = Self::Done(reader, options);
+                                return Poll::Ready(Ok(DynamicArray {
+                                    offset,
+                                    size: len,
+                                    _pd: core::marker::PhantomData,
+                                }));
                             }
                         }
                     }
@@ -2190,14 +2208,14 @@ impl <'a, R: PollReader + Unpin, S: AsyncParse + ArraySize + Unpin, I: AsyncPars
 
 impl <'a, R: PollReader + Unpin, S: AsyncParse + ArraySize, I: AsyncParse, const ZERO_RELATIVE: bool> TakeReader<'a, R> for DynamicArrayParse<'a, R, S, I, ZERO_RELATIVE> {
     impl_take_reader!{}
-    fn borrow_reader(&mut self) -> &mut R {
+    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
         match self {
-            Self::Waiting(_, f) => f.borrow_reader(),
+            Self::Waiting(f) => f.borrow_reader(),
             Self::Iterating {
                 fut,
                 ..
             } => fut.borrow_reader(),
-            Self::Done(r, _) => r,
+            Self::Done(r, opts) => (r, opts),
             Self::Empty => unreachable!(),
         }
     }
@@ -2206,8 +2224,7 @@ impl <'a, R: PollReader + Unpin, S: AsyncParse + ArraySize, I: AsyncParse, const
 impl <S: AsyncParse + ArraySize + Unpin, I: AsyncParse + Unpin, const ZERO_RELATIVE: bool> AsyncParse for DynamicArray<S, I, ZERO_RELATIVE> {
     type Fut<'a, R: PollReader + Unpin> = DynamicArrayParse<'a, R, S, I, ZERO_RELATIVE>;
     fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
-        let offset = reader.offset();
-        DynamicArrayParse::Waiting(offset, S::create_fut(reader, options))
+        DynamicArrayParse::Waiting(S::create_fut(reader, options))
     }
 }
 
@@ -2233,7 +2250,6 @@ mod test {
     }
 }
 
-/*
 mod atoms {
     use super::*;
     use atom_parser_derive::make_atom;
@@ -3293,7 +3309,7 @@ mod atoms {
                                                                                         println!("{desc:?}");
                                                                                         let mut child_iter = desc.children(r, &opts);
                                                                                         while let Some(child) = child_iter.next() {
-                                                                                            let r = &mut child_iter.reader;
+                                                                                            let _r = &mut child_iter.reader;
                                                                                             println!("sample desc: {child:?}");
                                                                                         }
                                                                                     }
@@ -3386,5 +3402,213 @@ mod atoms {
         }
         panic!()
     }
+
+    #[tokio::test]
+    async fn ftyp_async() {
+        let mut r = InMemoryReader::from_path("../file_example_MOV_480_700kB.mov").unwrap();
+        let opts = Default::default();
+
+        let root = Root::parse_async(&mut r, &opts).await.unwrap();
+        println!("{root:?}");
+        let mut root_iter = root.children_async(&mut r, &opts);
+        use tokio_stream::StreamExt;
+        while let Some(child) = root_iter.next().await {
+            let r = root_iter.reader();
+            match child.unwrap() {
+                root::Child::FileType(ftyp) => println!("file type: {ftyp:?}"),
+                root::Child::Movie(movie) => {
+                    println!("moov: {movie:?}");
+                    let mut child_iter = movie.children_async(r, &opts);
+
+                    while let Some(child) = child_iter.next().await {
+                        let r = child_iter.reader();
+                        match child.unwrap() {
+                            moov::Child::MovieHeader(hd) => {
+                                println!("header: {hd:?}");
+                            }
+                            moov::Child::Clipping(clip) => {
+                                println!("clip: {clip:?}");
+                            }
+                            moov::Child::Track(track) => {
+                                println!("track: {track:?}");
+                                let mut child_iter = track.children_async(r, &opts);
+                                while let Some(child) = child_iter.next().await {
+                                    let r = child_iter.reader();
+                                    match child.unwrap() {
+                                        trak::Child::TrackHeader(hdr) => println!("track header: {hdr:?}"),
+                                        trak::Child::Clipping(c) => println!("clipping: {c:?}"),
+                                        trak::Child::TrackMatte(tm) => println!("track matte: {tm:?}"),
+                                        trak::Child::Edit(e) => {
+                                            println!("edit: {e:?}");
+                                            let mut child_iter = e.children_async(r, &opts);
+                                            while let Some(child) = child_iter.next().await {
+                                                let r = child_iter.reader();
+                                                match child.unwrap() {
+                                                    edts::Child::EditList(el) => {
+                                                        match el.version {
+                                                            elst::EditListVersions::V0(el) => {
+                                                                println!("edit list: {el:?}");
+                                                                let list_entires = el.table_entries_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
+                                                                println!("edit list entries: {list_entires:?}");
+                                                            }
+                                                            elst::EditListVersions::Unknown(v) => println!("unknown elst: {v}"),
+                                                        }
+                                                    }
+                                                    _ => (),
+                                                }
+                                            }
+                                        }
+                                        trak::Child::TrackReference(tref) => println!("track ref: {tref:?}"),
+                                        trak::Child::TrackLoadingSettings(tls) => println!("track loading: {tls:?}"),
+                                        trak::Child::TrackInputMap(tim) => println!("track input map: {tim:?}"),
+                                        trak::Child::Media(m) => {
+                                            let mut child_iter = m.children_async(r, &opts);
+                                            while let Some(child) = child_iter.next().await {
+                                                let r = child_iter.reader();
+                                                match child.unwrap() {
+                                                    mdia::Child::MediaHeader(h) => println!("media heaader: {h:?}"),
+                                                    mdia::Child::HandlerReference(r) => println!("href: {r:?}"),
+                                                    mdia::Child::MediaInformation(info) => {
+                                                        println!("info: {info:?}");
+                                                        let mut child_iter = info.children_async(r, &opts);
+                                                        while let Some(child) = child_iter.next().await {
+                                                            let r = child_iter.reader();
+                                                            match child.unwrap() {
+                                                                minf::Child::VideoMediaInformationHeader(vid) => println!("vid: {vid:?}"),
+                                                                minf::Child::SoundMediaInformationHeader(snd) => println!("snd: {snd:?}"),
+                                                                minf::Child::TimecodeMediaInformation(info) => println!("timecode: {info:?}"),
+                                                                minf::Child::BaseMediaInformationHeader(base) => println!("base: {base:?}"),
+                                                                minf::Child::BaseMediaInformation(base) => println!("base info: {base:?}"),
+                                                                minf::Child::HandlerReference(href) => println!("href: {href:?}"),
+                                                                minf::Child::DataInformation(dinfo) => {
+                                                                    println!("dinfo: {dinfo:?}");
+                                                                    let mut child_iter = dinfo.children_async(r, &opts);
+                                                                    while let Some(child) = child_iter.next().await {
+                                                                        let r = child_iter.reader();
+                                                                        match child.unwrap() {
+                                                                            dinf::Child::DataReference(dref) => {
+                                                                                match dref.version {
+                                                                                    dref::DataReferenceVersions::V0(dref) => {
+                                                                                        let mut child_iter = dref.children_async(r, &opts);
+                                                                                        while let Some(child) = child_iter.next().await {
+                                                                                            match child.unwrap() {
+                                                                                                dref::v0::Child::MacAlias(alis) => println!("alias: {alis:?}"),
+                                                                                                dref::v0::Child::MacResource(rsrc) => println!("r: {rsrc:?}"),
+                                                                                                dref::v0::Child::Url(url) => println!("url: {url:?}"),
+                                                                                                _ => (),
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                    dref::DataReferenceVersions::Unknown(v) => println!("unknown dref: {v}"),
+                                                                                }
+                                                                            }
+                                                                            _ => (),
+                                                                        }
+                                                                    }
+                                                                }
+                                                                minf::Child::SampleTable(stable) => {
+                                                                    println!("stable: {stable:?}");
+                                                                    let mut child_iter = stable.children_async(r, &opts);
+                                                                    while let Some(child) = child_iter.next().await {
+                                                                        let r = child_iter.reader();
+                                                                        match child.unwrap() {
+                                                                            stbl::Child::SampleDescription(desc) => {
+                                                                                match desc.version {
+                                                                                    stsd::SampleDescriptionVersions::V0(desc) => {
+                                                                                        println!("{desc:?}");
+                                                                                        let mut child_iter = desc.children_async(r, &opts);
+                                                                                        while let Some(child) = child_iter.next().await {
+                                                                                            let _r = child_iter.reader();
+                                                                                            println!("sample desc: {child:?}");
+                                                                                        }
+                                                                                    }
+                                                                                    stsd::SampleDescriptionVersions::Unknown(v) => println!("unknown stsd: {v}"),
+                                                                                }
+                                                                            }
+                                                                            stbl::Child::TimeToSample(tts) => {
+                                                                                match tts.version {
+                                                                                    stts::TimeToSampleVersions::V0(tts) => {
+                                                                                        println!("tts: {tts:?}");
+                                                                                        let time_to_sample = tts.time_to_sample_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
+                                                                                        println!("tts entries: {time_to_sample:?}");
+                                                                                    }
+                                                                                    stts::TimeToSampleVersions::Unknown(v) => println!("unknown stts: {v}"),
+                                                                                }
+                                                                            }
+                                                                            stbl::Child::SyncSample(sync) => {
+                                                                                match sync.version {
+                                                                                    stss::SyncSampleVersions::V0(sync) => {
+                                                                                        println!("sync sample: {sync:?}");
+                                                                                        let sync_samples = sync.sync_sample_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
+                                                                                        println!("sync sample entries: {sync_samples:?}");
+                                                                                    }
+                                                                                    stss::SyncSampleVersions::Unknown(v) => println!("unknown stts: {v}"),
+                                                                                }
+                                                                            }
+                                                                            stbl::Child::SampleToChunk(stc) => {
+                                                                                match stc.version {
+                                                                                    stsc::SampleToChunkVersions::V0(stc) => {
+                                                                                        println!("stc: {stc:?}");
+                                                                                        let sample_to_chunk = stc.sample_to_chunk_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
+                                                                                        println!("stc entries: {sample_to_chunk:?}");
+                                                                                    }
+                                                                                    stsc::SampleToChunkVersions::Unknown(v) => println!("unknown stsc: {v}"),
+                                                                                }
+                                                                            }
+                                                                            stbl::Child::SampleSize(ss) => {
+                                                                                match ss.version {
+                                                                                    stsz::SampleSizeVersions::V0(ss) => {
+                                                                                        println!("ss: {ss:?}");
+                                                                                        let sample_sizes = ss.sample_size_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
+                                                                                        println!("ss entries: {sample_sizes:?}");
+                                                                                    }
+                                                                                    stsz::SampleSizeVersions::Unknown(v) => println!("unknown stsz: {v}"),
+                                                                                }
+                                                                            }
+                                                                            stbl::Child::ChunkOffset(co) => {
+                                                                                match co.version {
+                                                                                    stco::ChunkOffsetVersions::V0(co) => {
+                                                                                        println!("co32: {co:?}");
+                                                                                        let offsets = co.chunk_offset_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
+                                                                                        println!("co32 entries: {offsets:?}")
+                                                                                    }
+                                                                                    stco::ChunkOffsetVersions::Unknown(v) => println!("unknown stco: {v}"),
+                                                                                }
+                                                                            }
+                                                                            stbl::Child::Unsupported(u) => println!("unsupported stbl entry: {u:?}"),
+                                                                        }
+                                                                    }
+                                                                }
+                                                                minf::Child::Unsupported(_) => (),
+                                                            }
+                                                        }
+                                                    }
+                                                    mdia::Child::Userdata(u) => println!("udata: {u:?}"),
+                                                    mdia::Child::Unsupported(_) => (),
+                                                }
+                                            }
+                                        }
+                                        trak::Child::Userdata(udata) => println!("udata: {udata:?}"),
+                                        trak::Child::Unsupported(fcc) => println!("unsupported in trak: {fcc:?}"),
+                                    }
+                                }
+                            }
+                            moov::Child::Userdata(udta) => {
+                                println!("udata: {udta:?}");
+                            }
+                            moov::Child::ColorTable(ctb) => {
+                                println!("color table: {ctb:?}");
+                            }
+                            moov::Child::Unsupported(missed) => {
+                                println!("skipped: {missed:?}");
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+                root::Child::Unsupported(a) => println!("unsupported {a:?}"),
+            }
+        }
+        panic!()
+    }
 }
-*/
