@@ -1582,7 +1582,8 @@ impl syn::parse::Parse for AtomField {
 
 enum DefinitionKind {
     Struct(StructDefinition),
-    Atom(AtomDefinition)
+    Atom(AtomDefinition),
+    Enum(EnumDefinition),
 }
 
 struct AtomFields {
@@ -1808,22 +1809,39 @@ impl syn::parse::Parse for Definition {
         let version = version.next().map(|(pos, _)| pos).map(|pos| attrs.swap_remove(pos)).map(|attr| attr.parse_args::<syn::LitInt>()).transpose()?;
 
         let _: syn::Visibility = input.parse()?;
-        let _: syn::Token![struct] = input.parse()?;
-        let name = input.parse()?;
 
-        let kind = match fcc {
-            Some(fcc) => {
-                DefinitionKind::Atom (AtomDefinition::parse_from_syn(input, fcc, attrs, name)?)
-            }
-            None => {
-                DefinitionKind::Struct(StructDefinition::parse_from_syn(input, attrs, name)?)
-            }
-        };
+        let lookahead = input.lookahead1();
+        if lookahead.peek(syn::Token![struct]) {
+            let _: syn::Token![struct] = input.parse()?;
+            let name = input.parse()?;
 
-        Ok(Self {
-            version,
-            kind,
-        })
+            let kind = match fcc {
+                Some(fcc) => {
+                    DefinitionKind::Atom (AtomDefinition::parse_from_syn(input, fcc, attrs, name)?)
+                }
+                None => {
+                    DefinitionKind::Struct(StructDefinition::parse_from_syn(input, attrs, name)?)
+                }
+            };
+
+            Ok(Self {
+                version,
+                kind,
+            })
+        } else if lookahead.peek(syn::Token![enum]) {
+            let _: syn::Token![enum] = input.parse()?;
+            if version.is_some() || fcc.is_some() {
+                panic!("veresion/atom attr is not supported for enums");
+            }
+
+            let kind = EnumDefinition::parse_from_syn(input, attrs)?;
+            Ok(Self {
+                version: None,
+                kind: DefinitionKind::Enum(kind),
+            })
+        } else {
+            panic!("unknown layout")
+        }
     }
 }
 
@@ -2120,6 +2138,68 @@ impl syn::parse::Parse for DefinitionList {
     }
 }
 
+struct EnumDefinition {
+    attrs: Vec<syn::Attribute>,
+    name: syn::Ident,
+    variants: Vec<EnumVariant>,
+    repr: syn::Type,
+}
+
+impl EnumDefinition {
+    fn parse_from_syn(input: syn::parse::ParseStream, mut attrs: Vec<syn::Attribute>) -> syn::Result<Self> {
+        let mut repr = attrs.iter().enumerate().filter(|(_, attr)| attr.path().is_ident("enum_repr"));
+
+        if repr.clone().count() > 1 {
+            panic!("more than 1 repr attr specified");
+        }
+
+        let repr = repr.next().map(|(pos, _)| pos).map(|pos| attrs.swap_remove(pos)).map(|attr| attr.parse_args::<syn::Type>()).transpose()?.expect("no size attr specified for enum");
+
+        let name = input.parse()?;
+        let variants = input.parse::<EnumVariantList>()?.variants;
+        Ok(Self {
+            repr,
+            name,
+            variants,
+            attrs,
+        })
+    }
+}
+
+struct EnumVariantList {
+    variants: Vec<EnumVariant>,
+}
+
+impl syn::parse::Parse for EnumVariantList {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let content;
+        syn::braced!(content in input);
+        let content = content.parse_terminated(EnumVariant::parse, syn::Token![,])?;
+        let variants = content.into_iter().collect::<Vec<_>>();
+        Ok(Self {
+            variants,
+        })
+    }
+}
+
+struct EnumVariant {
+    name: syn::Ident,
+    val: syn::Expr,
+}
+
+impl syn::parse::Parse for EnumVariant {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let name = input.parse()?;
+        let _: syn::Token![=] = input.parse()?;
+        let val = input.parse()?;
+
+        Ok(Self {
+            name,
+            val,
+        })
+    }
+}
+
 #[proc_macro]
 pub fn make_atom(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DefinitionList);
@@ -2405,6 +2485,100 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         }
                     }
                     Err(e) => todo!()
+                }
+            }
+            DefinitionKind::Enum(e) => {
+                let EnumDefinition {
+                    attrs,
+                    name,
+                    variants,
+                    repr,
+                } = e;
+
+                let enum_variants = variants.iter().map(|v| &v.name);
+
+                let try_from_impl = variants.iter().map(|v| {
+                    let val = &v.val;
+                    let name = &v.name;
+                    quote!{
+                        #val => Self::#name
+                    }
+                });
+
+                let async_parse_name = quote::format_ident!("Async{}Parse", name);
+
+                quote! {
+                    #(#attrs)*
+                    #[derive(Debug)]
+                    pub enum #name {
+                        #(#enum_variants,)*
+                        Unknown(#repr),
+                    }
+
+                    impl #name {
+                        pub fn try_from_bits(bits: #repr) -> Self {
+                            match bits {
+                                #(#try_from_impl,)*
+                                u => Self::Unknown(u),
+                            }
+                        }
+                    }
+
+                    impl Parse for #name {
+                        fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+                            let repr = <#repr>::parse(reader, options)?;
+                            Ok(Self::try_from_bits(repr))
+                        }
+                    }
+
+                    pub enum #async_parse_name<'a, R: PollReader + Unpin> {
+                        Repr(<#repr as AsyncParse>::Fut<'a, R>),
+                        Done(R, &'a ParseOptions),
+                        Empty,
+                    }
+
+                    impl AsyncParse for #name {
+                        type Fut<'a, R: PollReader + Unpin> = #async_parse_name<'a, R>;
+                        fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+                           #async_parse_name::Repr(<#repr>::create_fut(reader, options))
+                        }
+                    }
+
+                    impl <'a, R: PollReader + Unpin> Future for #async_parse_name<'a, R> {
+                        type Output = Result<#name, ParseError>;
+                        fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+                            let mut this = core::mem::replace(&mut *self, Self::Empty);
+                            match this {
+                                Self::Repr(mut fut) => {
+                                    match core::pin::Pin::new(&mut fut).poll(cx) {
+                                        core::task::Poll::Pending => {
+                                            *self = Self::Repr(fut);
+                                            return core::task::Poll::Pending;
+                                        }
+                                        core::task::Poll::Ready(res) => {
+                                            let repr = res?;
+                                            let (reader, opts) = fut.take_reader();
+                                            *self = Self::Done(reader, opts);
+                                            return core::task::Poll::Ready(Ok(#name::try_from_bits(repr)));
+                                        }
+                                    }
+                                }
+                                Self::Done(..) => panic!("poll after completion"),
+                                Self::Empty => unreachable!(),
+                            }
+                        }
+                    }
+
+                    impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for #async_parse_name<'a, R> {
+                        impl_take_reader!{}
+                        fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+                            match self {
+                                Self::Repr(r) => r.borrow_reader(),
+                                Self::Done(reader, opts) => (reader, opts),
+                                Self::Empty => unreachable!(),
+                            }
+                        }
+                    }
                 }
             }
         }
