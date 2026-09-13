@@ -195,7 +195,13 @@ pub enum ParseError {
     #[error("io error")]
     Io(#[from] IoError),
     #[error("could not convert between integers")]
-    IntegerConversion(#[from] TryFromIntError)
+    IntegerConversion(#[from] TryFromIntError),
+    #[error("unknown flags")]
+    UnknownFlags,
+    #[error("missing expected flags")]
+    MissingFlags,
+    #[error("reserved field had nonzero bits")]
+    UsedReservedField,
 }
 
 macro_rules! parse_integers {
@@ -990,7 +996,10 @@ pub enum Endianess {
 
 #[derive(Default)]
 pub struct ParseOptions {
-    endianess: Endianess,
+    pub endianess: Endianess,
+    pub error_on_used_reserved_fields: bool,
+    pub error_on_missing_flags: bool,
+    pub error_on_unknown_flags: bool,
 }
 
 pub struct InMemoryReader {
@@ -2239,7 +2248,6 @@ pub trait Flags<B> {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use atom_parser_derive::make_atom;
     make_atom! {
         // TODO
@@ -2250,7 +2258,7 @@ mod test {
     }
 }
 
-mod atoms {
+pub mod atoms {
     use super::*;
     use atom_parser_derive::make_atom;
 
@@ -3106,16 +3114,16 @@ mod atoms {
         }
     }
 
-    type VideoSampleDescription = SampleDescriptionEntry<sample_description::Video>;
-    type SoundSampleDescription = SampleDescriptionEntry<sample_description::Sound>;
-    type TimecodeSampleDescription = SampleDescriptionEntry<sample_description::Timecode>;
-    type TextSampleDescription = SampleDescriptionEntry<sample_description::Text>;
-    type MusicSampleDescription = SampleDescriptionEntry<sample_description::Music>;
-    type MpegSampleDescription = SampleDescriptionEntry<sample_description::Mpeg>;
-    type SpriteSampleDescription = SampleDescriptionEntry<sample_description::Sprite>;
-    type TweenSampleDescription = SampleDescriptionEntry<sample_description::Sprite>;
-    type Q3DSampleDescription = SampleDescriptionEntry<sample_description::Q3D>;
-    type StreamingSampleDescription = SampleDescriptionEntry<sample_description::Streaming>;
+    pub type VideoSampleDescription = SampleDescriptionEntry<sample_description::Video>;
+    pub type SoundSampleDescription = SampleDescriptionEntry<sample_description::Sound>;
+    pub type TimecodeSampleDescription = SampleDescriptionEntry<sample_description::Timecode>;
+    pub type TextSampleDescription = SampleDescriptionEntry<sample_description::Text>;
+    pub type MusicSampleDescription = SampleDescriptionEntry<sample_description::Music>;
+    pub type MpegSampleDescription = SampleDescriptionEntry<sample_description::Mpeg>;
+    pub type SpriteSampleDescription = SampleDescriptionEntry<sample_description::Sprite>;
+    pub type TweenSampleDescription = SampleDescriptionEntry<sample_description::Sprite>;
+    pub type Q3DSampleDescription = SampleDescriptionEntry<sample_description::Q3D>;
+    pub type StreamingSampleDescription = SampleDescriptionEntry<sample_description::Streaming>;
 
 
     // hints

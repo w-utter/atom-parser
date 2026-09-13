@@ -154,7 +154,9 @@ impl StructFieldAttr {
             Self::Reserved => {
                 quote! {
                     let _reserved = <#ty>::parse(reader, options)?;
-                    // TODO: check reserved fields
+                    if options.error_on_used_reserved_fields && (_reserved != unsafe { core::mem::zeroed::<#ty>() }) {
+                        return Err(ParseError::UsedReservedField);
+                    }
                 }.into()
             },
             Self::DynamicArray {
@@ -215,7 +217,7 @@ impl StructFieldAttr {
             Self::Reserved | Self::VersionIdentifier => return None,
             Self::Normal => {
                 quote! {
-                    #field
+                    pub #name: #ty
                 }
             }
             Self::DynamicArray {
@@ -223,29 +225,29 @@ impl StructFieldAttr {
                 length_ty,
             } => {
                 quote! {
-                    #name: DynamicArray<#length_ty, #ty, #zero_relative>
+                    pub #name: DynamicArray<#length_ty, #ty, #zero_relative>
                 }
             }
             Self::TrailingArray => {
                 quote! {
-                    #name: Trailing<#ty>
+                    pub #name: Trailing<#ty>
                 }
             }
             Self::Payload => {
                 quote! {
-                    #name: Payload
+                    pub #name: Payload
                 }
             }
             Self::PascalString {
                 length_ty,
             } => {
                 quote! {
-                    #name: PascalString<#length_ty>
+                    pub #name: PascalString<#length_ty>
                 }
             }
             Self::NullTerminatedString => {
                 quote! {
-                    #name: NullTerminatedString
+                    pub #name: NullTerminatedString
                 }
             }
         })
@@ -288,7 +290,6 @@ impl StructFieldAttr {
                     }
                 }
             }
-            // TODO
             Self::Payload => return None,
             Self::PascalString { .. } => return None,
             Self::NullTerminatedString => return None,
@@ -350,8 +351,17 @@ struct FlagList {
 }
 
 impl FlagList {
-    fn can_elide_flag_storage(flags: &[Flag]) -> bool {
-        if flags.iter().any(|flag| !flag.expected) {
+    fn can_elide_flag_storage(flags: &[Flag], version: Option<&syn::LitInt>) -> bool {
+        if flags.iter().filter(|flag| {
+            if let Some(v) = version {
+                if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
+                    return false;
+                }
+            } else if !flag.version_num.is_empty() {
+                panic!("version specified for flags but no version identifier")
+            }
+            true
+        }).any(|flag| !flag.expected) {
             return false
         }
         true
@@ -369,21 +379,27 @@ impl FlagList {
 
             let flag_name = &flag.name;
             let flag_val = &flag.val;
-            Some(quote::quote!(const #flag_name: #name = Self::from_bits_(#flag_val as #repr);))
+            Some(quote::quote!(pub const #flag_name: #name = Self::from_bits_(#flag_val as #repr);))
         })
     }
 
-    fn flags_trait_impl(name: &syn::Ident, flags: &[Flag], parse_repr: &syn::Type) -> proc_macro2::TokenStream {
-        // TODO: check flags if being annoying about it in parse options 
+    fn flags_trait_impl(name: &syn::Ident, flags: &[Flag], parse_repr: &syn::Type, version: Option<&syn::LitInt>, can_elide_flags: bool) -> proc_macro2::TokenStream {
+        use quote::quote;
+        let flags_check = Self::flags_parse_check(flags, version);
 
-        let flags_check = Self::flags_parse_check(flags);
+        let storage_attr = if can_elide_flags {
+            Some(quote!(#[cfg(feature = "store_unknown_fields")]))
+        } else {
+            None
+        };
 
-        quote::quote! {
+        quote! {
             impl FlagsParse<#parse_repr> for #name {
                 fn try_from_bits(bits: #parse_repr, options: &ParseOptions) -> Result<Self, ParseError> {
-                    #(#flags_check)*
+                    #flags_check
 
                     Ok(Self {
+                        #storage_attr
                         inner: bits,
                     })
                 }
@@ -427,34 +443,115 @@ impl FlagList {
         }
     }
 
-    fn flags_parse_check(flags: &[Flag]) -> impl Iterator<Item = proc_macro2::TokenStream> {
-        flags.iter().map(|flag| {
-            quote::quote! {
-
+    fn flags_parse_check(flags: &[Flag], version: Option<&syn::LitInt>) -> proc_macro2::TokenStream {
+        use quote::quote;
+        let current_flags = flags.iter().filter(|flag| {
+            if let Some(v) = version {
+                if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
+                    return false;
+                }
+            } else if !flag.version_num.is_empty() {
+                panic!("version specified for flags but no version identifier")
             }
-        })
+
+            true
+        }).collect::<Vec<_>>();
+
+        let expected_check = if current_flags.iter().filter(|flag| flag.expected).count() > 0 {
+            let expected_flags = current_flags.iter().filter_map(|flag| {
+                if flag.expected {
+                    Some(&flag.val)
+                } else {
+                    None
+                }
+            }).collect::<Vec<_>>();
+
+            Some(quote! {
+                if options.error_on_missing_flags && ((bits & (#((#expected_flags))|*)) != (#((#expected_flags))|*)) {
+                    return Err(ParseError::MissingFlags);
+                }
+            })
+        } else {
+            None
+        };
+
+        let check = if !current_flags.is_empty() {
+            let flags = current_flags.iter().map(|flag| &flag.val);
+            Some(quote! {
+                if (options.error_on_unknown_flags && ((bits & (#((#flags))|*))) != 0) {
+                    return Err(ParseError::UnknownFlags);
+                }
+            })
+        } else {
+            None
+        };
+
+        quote! {
+            #expected_check
+            #check
+        }
     }
 
-    fn debug_impl(flags: &[Flag], name: &syn::Ident) -> proc_macro2::TokenStream {
+    fn debug_impl(flags: &[Flag], name: &syn::Ident, version: Option<&syn::LitInt>, can_be_elided: bool) -> proc_macro2::TokenStream {
         use quote::quote;
 
-        let flags_debug_nonelided = flags.iter().map(|flag| {
-            // TODO
+        let flags_debug_elided = flags.iter().filter_map(|flag| {
+            if let Some(v) = version {
+                if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
+                    return None;
+                }
+            } else if !flag.version_num.is_empty() {
+                panic!("version specified for flags but no version identifier")
+            }
+
+            let name = &flag.name;
+            Some(quote! {
+                if !first {
+                    write!(f, " | ")?;
+                }
+                write!(f, "{}", stringify!(#name))?;
+                first = false;
+            })
         });
 
-        let flags_debug = flags.iter().map(|flag| {
+        let flags_debug = flags.iter().filter_map(|flag| {
+            if let Some(v) = version {
+                if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
+                    return None;
+                }
+            } else if !flag.version_num.is_empty() {
+                panic!("version specified for flags but no version identifier")
+            }
+
             let flag_val = &flag.val;
             let name = &flag.name;
-            quote! {
-                if (val & #flag_val == #flag_val) {
+            Some(quote! {
+                if val & (#flag_val) == (#flag_val) {
                     if !first {
                         write!(f, " | ")?;
                     }
                     write!(f, "{}", stringify!(#name))?;
                     first = false;
                 }
-            }
+            })
         });
+
+        let debug_impl = if can_be_elided {
+            quote! {
+                #[cfg(feature = "store_unknown_fields")]
+                {
+                    #(#flags_debug_elided)*
+                }
+                #[cfg(not(feature = "store_unknown_fields"))]
+                {
+                    #(#flags_debug)*
+                }
+            }
+        } else {
+            quote! {
+                #(#flags_debug)*
+            }
+        };
 
         quote! {
             impl core::fmt::Debug for #name {
@@ -463,15 +560,7 @@ impl FlagList {
                     let val = self.to_bits();
                     let mut first = true;
                     write!(f, "{}(", stringify!(#name))?;
-                    #[cfg(feature = "store_unknown_fields")]
-                    {
-                        // TODO
-                        //todo!()
-                    }
-                    #[cfg(not(feature = "store_unknown_fields"))]
-                    {
-                        #(#flags_debug)*
-                    }
+                    #debug_impl
                     write!(f, ")")?;
                     Ok(())
                 }
@@ -756,6 +845,16 @@ fn format_async_statemachine(fields: &[AtomField], struct_name: &syn::Ident, mut
             }
         };
 
+        let check_reserved = if !in_progress.2 {
+            let ty = &in_progress.1;
+            Some(quote! {
+                if opts.error_on_used_reserved_fields && (#name != unsafe { core::mem::zeroed::<#ty>() }) {
+                    return core::task::Poll::Ready(Err(ParseError::UsedReservedField));
+                }
+            })
+        } else {
+            None
+        };
 
         let match_fields = completed.iter().filter_map(|(name, _, display)| {
             if !display {
@@ -781,6 +880,7 @@ fn format_async_statemachine(fields: &[AtomField], struct_name: &syn::Ident, mut
                     core::task::Poll::Ready(r) => {
                         let (reader, opts) = #name.take_reader();
                         let #name = r?;
+                        #check_reserved
                         #on_poll_ready
                     }
                 }
@@ -872,7 +972,7 @@ fn format_async_statemachine(fields: &[AtomField], struct_name: &syn::Ident, mut
 }
 
 impl AtomField {
-    fn parse_from_syn(input: syn::parse::ParseStream, atom_field_attr: &syn::Attribute, attrs: Vec<syn::Attribute>) -> syn::parse::Result<Self> {
+    fn parse_from_syn(input: syn::parse::ParseStream, atom_field_attr: &syn::Attribute) -> syn::parse::Result<Self> {
         let _: syn::Visibility = input.parse()?;
         let path = atom_field_attr.path();
         Ok(if path.is_ident("full_box") {
@@ -1256,33 +1356,67 @@ impl AtomField {
                 name,
                 flags,
             } => {
-                let elide_flags = FlagList::can_elide_flag_storage(&flags);
-                let flags_debug = FlagList::debug_impl(flags, name);
+                let can_elide_flags = FlagList::can_elide_flag_storage(&flags, version);
+                let flags_debug = FlagList::debug_impl(flags, name, version, can_elide_flags);
 
                 let repr = syn::parse_quote!(u32);
-                let flags_check = FlagList::flags_parse_check(flags);
-                //let flags_impl = FlagList::flags_trait_impl(name, flags, &repr);
-                let flags = FlagList::flags_impl(name, flags, &repr, version);
-                let flag_storage_elision = elide_flags.then(|| quote! { #[cfg(feature = "store_unknown_fields")] });
+                let flags_check = FlagList::flags_parse_check(flags, version);
+                //let flags_impl = FlagList::flags_trait_impl(name, flags, &repr, version);
+                let flags_impl = FlagList::flags_impl(name, flags, &repr, version);
+                let flag_storage_elision = can_elide_flags.then(|| quote! { #[cfg(feature = "store_unknown_fields")] });
 
                 let bitops_impl = FlagList::flags_bitops_impl(name);
                 let async_parse_repr = syn::parse_quote!([u8; 3]);
                 let async_parse_impl = FlagList::async_parse_impl(name, &async_parse_repr);
 
-                // TODO: bit ops
+                let to_bits_impl = if can_elide_flags {
+                    let expected_vals = flags.iter().filter_map(|flag| {
+                        if let Some(v) = version {
+                            if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
+                                return None;
+                            }
+                        } else if !flag.version_num.is_empty() {
+                            panic!("version specified for flags but no version identifier")
+                        }
+                        Some(&flag.val)
+                    });
+
+                    let flag_bits = if expected_vals.clone().count() == 0 {
+                        quote!(0)
+                    } else {
+                        quote!(#((#expected_vals))|*)
+                    };
+
+                    quote! {
+                        #[cfg(not(feature = "store_unknown_fields"))]
+                        {
+                            #flag_bits
+                        }
+                        #[cfg(feature = "store_unknown_fields")]
+                        {
+                            let [b0, b1, b2] = self.inner;
+                            u32::from_be_bytes([b0, b1, b2, 0])
+                        }
+                    }
+                } else {
+                    quote!{
+                        let [b0, b1, b2] = self.inner;
+                        u32::from_be_bytes([b0, b1, b2, 0])
+                    }
+                };
 
                 quote! {
                     #[derive(Clone, Copy, PartialEq, Eq)]
                     pub struct #name {
-                        //#flag_storage_elision
+                        #flag_storage_elision
                         inner: [u8; 3],
                     }
 
                     impl #name {
-                        #(#flags)*
+                        #(#flags_impl)*
                         pub fn from_bytes(bytes: [u8; 3]) -> Self {
                             Self {
-                                //#flag_storage_elision
+                                #flag_storage_elision
                                 inner: bytes,
                             }
                         }
@@ -1290,12 +1424,12 @@ impl AtomField {
                         const fn from_bits_(bits: u32) -> Self {
                             let [b0, b1, b2, _] = bits.to_be_bytes();
                             Self {
+                                #flag_storage_elision
                                 inner: [b0, b1, b2]
                             }
                         }
                         const fn to_bits_(self) -> u32 {
-                            let [b0, b1, b2] = self.inner;
-                            u32::from_be_bytes([b0, b1, b2, 0])
+                            #to_bits_impl
                         }
                     }
 
@@ -1304,10 +1438,11 @@ impl AtomField {
                             {
                                 let [b0, b1, b2] = bits;
                                 let bits = u32::from_be_bytes([b0, b1, b2, 0]);
-                                #(#flags_check)*
+                                #flags_check
                             }
 
                             Ok(Self {
+                                #flag_storage_elision
                                 inner: bits,
                             })
                         }
@@ -1335,36 +1470,67 @@ impl AtomField {
                 flags,
                 ..
             } => {
-                let elide_flags = FlagList::can_elide_flag_storage(&flags);
-                let flags_debug = FlagList::debug_impl(flags, name);
-                let flags_trait_impl = FlagList::flags_trait_impl(name, flags, parse_repr);
+                let can_elide_flags = FlagList::can_elide_flag_storage(&flags, version);
+                let flags_debug = FlagList::debug_impl(flags, name, version, can_elide_flags);
+                let flags_trait_impl = FlagList::flags_trait_impl(name, flags, parse_repr, version, can_elide_flags);
+
                 let bitops_impl = FlagList::flags_bitops_impl(name);
                 let async_parse_impl = FlagList::async_parse_impl(name, parse_repr);
 
-                let flags = FlagList::flags_impl(name, flags, parse_repr, version);
-                let flag_storage_elision = elide_flags.then(|| quote! { #[cfg(feature = "store_unknown_fields")] });
+                let flags_impl = FlagList::flags_impl(name, flags, parse_repr, version);
+                let flag_storage_elision = can_elide_flags.then(|| quote! { #[cfg(feature = "store_unknown_fields")] });
 
-                // TODO: bit ops
+                let to_bits_impl = if can_elide_flags {
+                    let expected_vals = flags.iter().filter_map(|flag| {
+                        if let Some(v) = version {
+                            if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
+                                return None;
+                            }
+                        } else if !flag.version_num.is_empty() {
+                            panic!("version specified for flags but no version identifier")
+                        }
+                        Some(&flag.val)
+                    });
+
+                    let flag_bits = if expected_vals.clone().count() == 0 {
+                        quote!(0)
+                    } else {
+                        quote!(#((#expected_vals))|*)
+                    };
+
+                    quote! {
+                        #[cfg(not(feature = "store_unknown_fields"))]
+                        {
+                            #flag_bits
+                        }
+                        #[cfg(feature = "store_unknown_fields")]
+                        {
+                            self.inner
+                        }
+                    }
+                } else {
+                    quote!(self.inner)
+                };
 
                 quote! {
                     #[derive(Clone, Copy, PartialEq, Eq)]
                     pub struct #name {
-                        //#flag_storage_elision
+                        #flag_storage_elision
                         inner: #parse_repr,
                     }
 
                     impl #name {
-                        #(#flags)*
+                        #(#flags_impl)*
 
                         const fn from_bits_(bits: #parse_repr) -> Self {
                             Self {
-                                //#flag_storage_elision
+                                #flag_storage_elision
                                 inner: bits,
                             }
                         }
 
                         const fn to_bits_(self) -> #parse_repr {
-                            self.inner
+                            #to_bits_impl
                         }
                     }
 
@@ -1441,7 +1607,7 @@ impl syn::parse::Parse for ChildList {
 #[derive(Clone)]
 struct Version {
     version_num: HashSet<syn::LitInt>,
-    version_name: syn::Ident,
+    _version_name: syn::Ident,
     fields: Vec<AtomField>,
 }
 
@@ -1470,7 +1636,7 @@ impl syn::parse::Parse for Version {
 
         Ok(Self {
             version_num,
-            version_name,
+            _version_name: version_name,
             fields,
         })
     }
@@ -1568,7 +1734,7 @@ impl syn::parse::Parse for AtomField {
 
         Ok(match atom_attr {
             Some((attr, AttrKind::Atom)) => {
-                Self::parse_from_syn(input, &attr, attrs)?
+                Self::parse_from_syn(input, &attr)?
             }
             Some((attr, AttrKind::Struct)) => {
                 Self::Struct(parse_normal_field(input, attrs)?, StructFieldAttr::parse_from_syn(&attr)?)
@@ -1600,7 +1766,7 @@ impl AtomFields {
         }
 
         Some(quote! {
-            mod #mod_name {
+            pub mod #mod_name {
                 use super::*;
                 #(#inline_definitions)*
             }
@@ -1775,16 +1941,6 @@ impl StructDefinition {
             }
         }
         syn::Ident::new(&snake, proc_macro2::Span::call_site())
-    }
-}
-
-impl AtomDefinition {
-    fn verify_definition(&self) -> syn::parse::Result<()> {
-        // TODO: 
-        // make sure that 
-        // - 1 or less trailing field
-        // - #[version] identifier must have a matching #[version] implementation
-        Ok(())
     }
 }
 
@@ -2364,7 +2520,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         }
                     }
                     Err(e) => {
-                        todo!()
+                        panic!("{e}")
                     }
                 }
             }
@@ -2484,7 +2640,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                             #mod_specific
                         }
                     }
-                    Err(e) => todo!()
+                    Err(e) => panic!("{e}"),
                 }
             }
             DefinitionKind::Enum(e) => {
