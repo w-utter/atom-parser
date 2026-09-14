@@ -1,0 +1,14 @@
+[package]
+name = "quicktime_2001"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+store_unknown_fields = []
+
+[dependencies]
+atom-parser = { path = "../atom-parser" }
+
+# only for async runtime and for `StreamExt`
+tokio = {version = "1.53", features = ["rt", "macros"]}
+tokio-stream = "0.1"

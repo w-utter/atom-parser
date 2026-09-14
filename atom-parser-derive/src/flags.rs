@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use crate::VersionList;
+use crate::{VersionList, KRATE};
 
 #[derive(Clone)]
 pub struct Flag {
@@ -98,8 +98,8 @@ impl FlagList {
         };
 
         quote! {
-            impl FlagsParse<#parse_repr> for #name {
-                fn try_from_bits(bits: #parse_repr, options: &ParseOptions) -> Result<Self, ParseError> {
+            impl ::#KRATE::flags::FlagsParse<#parse_repr> for #name {
+                fn try_from_bits(bits: #parse_repr, options: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<Self, ::#KRATE::error::ParseError> {
                     #flags_check
 
                     Ok(Self {
@@ -113,35 +113,31 @@ impl FlagList {
 
     pub fn flags_bitops_impl(name: &syn::Ident) -> proc_macro2::TokenStream {
         quote::quote! {
-            impl std::ops::BitAnd<#name> for #name {
+            impl ::core::ops::BitAnd<#name> for #name {
                 type Output = #name;
                 fn bitand(self, rhs: #name) -> Self::Output {
-                    use crate::Flags;
-                    Self::from_bits(self.to_bits() & rhs.to_bits())
+                    ::#KRATE::flags::Flags::from_bits(::#KRATE::flags::Flags::to_bits(self) & ::#KRATE::flags::Flags::to_bits(rhs))
                 }
             }
 
-            impl std::ops::BitOr<#name> for #name {
+            impl ::core::ops::BitOr<#name> for #name {
                 type Output = #name;
                 fn bitor(self, rhs: #name) -> Self::Output {
-                    use crate::Flags;
-                    Self::from_bits(self.to_bits() | rhs.to_bits())
+                    ::#KRATE::flags::Flags::from_bits(::#KRATE::flags::Flags::to_bits(self) | ::#KRATE::flags::Flags::to_bits(rhs))
                 }
             }
 
-            impl std::ops::BitXor<#name> for #name {
+            impl ::core::ops::BitXor<#name> for #name {
                 type Output = #name;
                 fn bitxor(self, rhs: #name) -> Self::Output {
-                    use crate::Flags;
-                    Self::from_bits(self.to_bits() ^ rhs.to_bits())
+                    ::#KRATE::flags::Flags::from_bits(::#KRATE::flags::Flags::to_bits(self) ^ ::#KRATE::flags::Flags::to_bits(rhs))
                 }
             }
 
-            impl core::ops::Not for #name {
+            impl ::core::ops::Not for #name {
                 type Output = #name;
                 fn not(self) -> Self::Output {
-                    use crate::Flags;
-                    Self::from_bits(!self.to_bits())
+                    ::#KRATE::flags::Flags::from_bits(!::#KRATE::flags::Flags::to_bits(self))
                 }
             }
         }
@@ -172,7 +168,7 @@ impl FlagList {
 
             Some(quote! {
                 if options.error_on_missing_flags && ((bits & (#((#expected_flags))|*)) != (#((#expected_flags))|*)) {
-                    return Err(ParseError::MissingFlags);
+                    return Err(::#KRATE::error::ParseError::MissingFlags);
                 }
             })
         } else {
@@ -183,7 +179,7 @@ impl FlagList {
             let flags = current_flags.iter().map(|flag| &flag.val);
             Some(quote! {
                 if (options.error_on_unknown_flags && ((bits & (#((#flags))|*))) != 0) {
-                    return Err(ParseError::UnknownFlags);
+                    return Err(::#KRATE::error::ParseError::UnknownFlags);
                 }
             })
         } else {
@@ -258,10 +254,9 @@ impl FlagList {
         };
 
         quote! {
-            impl core::fmt::Debug for #name {
-                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                    use crate::Flags;
-                    let val = self.to_bits();
+            impl ::core::fmt::Debug for #name {
+                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                    let val = ::#KRATE::flags::Flags::to_bits(*self);
                     let mut first = true;
                     write!(f, "{}(", stringify!(#name))?;
                     #debug_impl
@@ -275,34 +270,34 @@ impl FlagList {
     pub fn async_parse_impl(name: &syn::Ident, parse_repr: &syn::Type) -> proc_macro2::TokenStream {
         let parse_name = quote::format_ident!("Async{}Parse", name);
         quote::quote! {
-            pub struct #parse_name<'a, R: PollReader + Unpin> {
-                inner: <#parse_repr as AsyncParse>::Fut<'a, R>,
+            pub struct #parse_name<'a, R: ::#KRATE::reader::PollReader + Unpin> {
+                inner: <#parse_repr as ::#KRATE::parse::AsyncParse>::Fut<'a, R>,
             }
 
-            impl <'a, R: PollReader + Unpin> Future for #parse_name <'a, R> {
-                type Output = Result<#name, ParseError>;
-                fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
-                    let bits = core::task::ready!(core::pin::Pin::new(&mut self.inner).poll(cx))?;
-                    let (_, opts) = self.borrow_reader();
-                    let flags = #name::try_from_bits(bits, opts)?;
-                    core::task::Poll::Ready(Ok(flags))
+            impl <'a, R: ::#KRATE::reader::PollReader + Unpin> Future for #parse_name <'a, R> {
+                type Output = ::core::result::Result<#name, ::#KRATE::error::ParseError>;
+                fn poll(mut self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
+                    let bits = ::core::task::ready!(::core::pin::Pin::new(&mut self.inner).poll(cx))?;
+                    let (_, opts) = ::#KRATE::reader::TakeReader::borrow_reader(&mut*self);
+                    let flags = <#name as ::#KRATE::flags::FlagsParse<#parse_repr>>::try_from_bits(bits, opts)?;
+                    ::core::task::Poll::Ready(Ok(flags))
                 }
             }
 
-            impl AsyncParse for #name {
-                type Fut<'a, R: PollReader + Unpin> = #parse_name<'a, R>;
-                fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+            impl ::#KRATE::parse::AsyncParse for #name {
+                type Fut<'a, R: ::#KRATE::reader::PollReader + Unpin> = #parse_name<'a, R>;
+                fn create_fut<'a, R: ::#KRATE::reader::PollReader + Unpin>(reader: R, options: &'a ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'a, R> {
                     #parse_name {
                         inner: <#parse_repr>::create_fut(reader, options)
                     }
                 }
             }
 
-            impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for #parse_name<'a, R> {
-                fn take_reader(self) -> (R, &'a ParseOptions) {
+            impl <'a, R: ::#KRATE::reader::PollReader + Unpin> ::#KRATE::reader::TakeReader<'a, R> for #parse_name<'a, R> {
+                fn take_reader(self) -> (R, &'a ::#KRATE::parse_options::ParseOptions) {
                     self.inner.take_reader()
                 }
-                fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+                fn borrow_reader(&mut self) -> (&mut R, &'a ::#KRATE::parse_options::ParseOptions) {
                     self.inner.borrow_reader()
                 }
             }

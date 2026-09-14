@@ -17,9 +17,18 @@ use fourcc::FourCC;
 // used to format the base path of the module
 // e.g ::atom_parse::trailing::TrailingIterator
 // can be used by quote with `::#KRATE::trailing::` etc
-const KRATE: std::cell::LazyCell<syn::Ident> = std::cell::LazyCell::new(|| {
-    quote::format_ident!("atom_parse")
-});
+struct CrateName(std::cell::LazyCell<syn::Ident>);
+
+const KRATE: CrateName = CrateName(std::cell::LazyCell::new(|| {
+    quote::format_ident!("atom_parser")
+}));
+
+impl quote::ToTokens for CrateName {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        let this = &*self.0;
+        this.to_tokens(tokens)
+    }
+}
 
 #[proc_macro]
 pub fn make_atom(input: TokenStream) -> TokenStream {
@@ -32,8 +41,8 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
             DefinitionKind::Struct(mut item) => {
                 for param in &mut item.generics.params {
                     if let syn::GenericParam::Type(type_param) = param {
-                        type_param.bounds.push(syn::parse_quote!(Parse));
-                        type_param.bounds.push(syn::parse_quote!(Unpin));
+                        type_param.bounds.push(syn::parse_quote!(::#KRATE::parse::Parse));
+                        type_param.bounds.push(syn::parse_quote!(::core::marker::Unpin));
                     }
                 }
 
@@ -82,8 +91,8 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
                                 let items = quote!(#(#lts,)*#(#rest,)*);
                                 (
-                                    Some(quote!(_pd: core::marker::PhantomData< (( #items )) >)),
-                                    Some(quote!(_pd: core::marker::PhantomData,))
+                                    Some(quote!(_pd: ::core::marker::PhantomData< (( #items )) >)),
+                                    Some(quote!(_pd: ::core::marker::PhantomData,))
                                 )
                             };
 
@@ -137,9 +146,9 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                                 pub version: #atom_mod::#enum_name #ty_generics,
                             }
 
-                            impl #impl_generics Parse for #name #ty_generics #where_clause {
-                                fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-                                    let version = #atom_mod::#enum_name::parse(reader, options)?;
+                            impl #impl_generics ::#KRATE::parse::Parse for #name #ty_generics #where_clause {
+                                fn parse<T: ::#KRATE::reader::Reader>(reader: &mut T, options: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<Self, ::#KRATE::error::ParseError> {
+                                    let version = <#atom_mod::#enum_name as ::#KRATE::parse::Parse>::parse(reader, options)?;
                                     Ok(Self {
                                         version,
                                     })
@@ -252,9 +261,9 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                                 pub version: #atom_mod::#enum_name,
                             }
 
-                            impl Parse for #name {
-                                fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-                                    let version = #atom_mod::#enum_name::parse(reader, options)?;
+                            impl ::#KRATE::parse::Parse for #name {
+                                fn parse<T: ::#KRATE::reader::Reader>(reader: &mut T, options: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<Self, ::#KRATE::error::ParseError> {
+                                    let version = <#atom_mod::#enum_name as ::#KRATE::parse::Parse>::parse(reader, options)?;
                                     Ok(Self {
                                         version,
                                     })
@@ -263,8 +272,8 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
                             #async_parse_impl
 
-                            impl Atom for #name {
-                                const FCC: FourCC = FourCC::new([#fcc_0, #fcc_1, #fcc_2, #fcc_3]);
+                            impl ::#KRATE::Atom for #name {
+                                const FCC: ::#KRATE::fourcc::FourCC = ::#KRATE::fourcc::FourCC::new([#fcc_0, #fcc_1, #fcc_2, #fcc_3]);
                             }
                         }
                     }
@@ -295,8 +304,8 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                                 #(#helper_fns)*
                             }
 
-                            impl Atom for #name {
-                                const FCC: FourCC = FourCC::new([#fcc_0, #fcc_1, #fcc_2, #fcc_3]);
+                            impl ::#KRATE::Atom for #name {
+                                const FCC: ::#KRATE::fourcc::FourCC = ::#KRATE::fourcc::FourCC::new([#fcc_0, #fcc_1, #fcc_2, #fcc_3]);
                             }
 
                             #parse_impl
@@ -345,42 +354,42 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         }
                     }
 
-                    impl Parse for #name {
-                        fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-                            let repr = <#repr>::parse(reader, options)?;
+                    impl ::#KRATE::parse::Parse for #name {
+                        fn parse<T: ::#KRATE::reader::Reader>(reader: &mut T, options: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<Self, ::#KRATE::error::ParseError> {
+                            let repr = <#repr as ::#KRATE::parse::Parse>::parse(reader, options)?;
                             Ok(Self::try_from_bits(repr))
                         }
                     }
 
                     pub enum #async_parse_name<'a, R: PollReader + Unpin> {
-                        Repr(<#repr as AsyncParse>::Fut<'a, R>),
+                        Repr(<#repr as ::#KRATE::parse::AsyncParse>::Fut<'a, R>),
                         Done(R, &'a ParseOptions),
                         Empty,
                     }
 
                     impl AsyncParse for #name {
-                        type Fut<'a, R: PollReader + Unpin> = #async_parse_name<'a, R>;
-                        fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
-                           #async_parse_name::Repr(<#repr>::create_fut(reader, options))
+                        type Fut<'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin> = #async_parse_name<'a, R>;
+                        fn create_fut<'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin>(reader: R, options: &'a ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'a, R> {
+                           #async_parse_name::Repr(<#repr as ::#KRATE::parse::AsyncParse>::create_fut(reader, options))
                         }
                     }
 
-                    impl <'a, R: PollReader + Unpin> Future for #async_parse_name<'a, R> {
-                        type Output = Result<#name, ParseError>;
-                        fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
-                            let mut this = core::mem::replace(&mut *self, Self::Empty);
+                    impl <'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin> Future for #async_parse_name<'a, R> {
+                        type Output = ::core::result::Result<#name, ::#KRATE::error::ParseError>;
+                        fn poll(mut self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
+                            let mut this = ::core::mem::replace(&mut *self, Self::Empty);
                             match this {
                                 Self::Repr(mut fut) => {
-                                    match core::pin::Pin::new(&mut fut).poll(cx) {
-                                        core::task::Poll::Pending => {
+                                    match ::core::pin::Pin::new(&mut fut).poll(cx) {
+                                        ::core::task::Poll::Pending => {
                                             *self = Self::Repr(fut);
-                                            return core::task::Poll::Pending;
+                                            return ::core::task::Poll::Pending;
                                         }
-                                        core::task::Poll::Ready(res) => {
+                                        ::core::task::Poll::Ready(res) => {
                                             let repr = res?;
-                                            let (reader, opts) = fut.take_reader();
+                                            let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(fut);
                                             *self = Self::Done(reader, opts);
-                                            return core::task::Poll::Ready(Ok(#name::try_from_bits(repr)));
+                                            return ::core::task::Poll::Ready(Ok(#name::try_from_bits(repr)));
                                         }
                                     }
                                 }
@@ -390,9 +399,15 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         }
                     }
 
-                    impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for #async_parse_name<'a, R> {
-                        impl_take_reader!{}
-                        fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+                    impl <'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'a, R> for #async_parse_name<'a, R> {
+                        fn take_reader(self) -> (R, &'a ::#KRATE::parse_options::ParseOptions) {
+                            match self {
+                                Self::Done(reader, opts) => return (reader, opts),
+                                _ => unreachable!("invalid state"),
+                            }
+                        }
+
+                        fn borrow_reader(&mut self) -> (&mut R, &'a ::#KRATE::parse_options::ParseOptions) {
                             match self {
                                 Self::Repr(r) => r.borrow_reader(),
                                 Self::Done(reader, opts) => (reader, opts),
