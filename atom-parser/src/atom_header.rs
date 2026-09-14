@@ -1,6 +1,6 @@
 use crate::{
-    AsyncParse, AtomSize, AtomSizeParse, FourCC, IntegerParse, Parse, ParseError, ParseOptions,
-    PollReader, Reader, TakeReader, impl_take_reader,
+    AsyncParse, AtomSize, AtomSizeParse, FourCC, Parse, ParseError, ParseOptions, PollReader,
+    Reader, TakeReader, impl_take_reader,
 };
 
 #[derive(Debug)]
@@ -50,13 +50,17 @@ impl<'a, R: PollReader + Unpin> Future for AtomHeaderParse<'a, R> {
                         return Poll::Pending;
                     }
                     Poll::Ready(size) => {
-                        let size = size?;
-                        let IntegerParse::Done(reader, options) = fut else {
-                            unreachable!("bad future state");
+                        let (reader, opts) = fut.take_reader();
+                        let size = match size {
+                            Ok(s) => s,
+                            Err(e) => {
+                                *self = Self::Done(reader, opts);
+                                return Poll::Ready(Err(e));
+                            }
                         };
                         *self = AtomHeaderParse::Fourcc {
                             size,
-                            fourcc: FourCC::create_fut(reader, options),
+                            fourcc: FourCC::create_fut(reader, opts),
                         }
                     }
                 },
@@ -66,10 +70,15 @@ impl<'a, R: PollReader + Unpin> Future for AtomHeaderParse<'a, R> {
                         return Poll::Pending;
                     }
                     Poll::Ready(fcc) => {
-                        let fcc = fcc?;
-                        let IntegerParse::Done(reader, opts) = fourcc.inner else {
-                            unreachable!("IntegerParse invalid state");
+                        let (reader, opts) = fourcc.take_reader();
+                        let fcc = match fcc {
+                            Ok(fcc) => fcc,
+                            Err(e) => {
+                                *self = Self::Done(reader, opts);
+                                return Poll::Ready(Err(e));
+                            }
                         };
+
                         *self = Self::AtomSize {
                             fourcc: fcc,
                             size: AtomSize::create_fut(size, reader, opts),
@@ -82,9 +91,7 @@ impl<'a, R: PollReader + Unpin> Future for AtomHeaderParse<'a, R> {
                         return Poll::Pending;
                     }
                     Poll::Ready(atom_size) => {
-                        let AtomSizeParse::Done(reader, opts) = size else {
-                            unreachable!("AtomSizeParse invalid state");
-                        };
+                        let (reader, opts) = size.take_reader();
                         *self = Self::Done(reader, opts);
                         return Poll::Ready(atom_size.map(|size| AtomHeader { size, fcc: fourcc }));
                     }

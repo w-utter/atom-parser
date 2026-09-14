@@ -104,7 +104,14 @@ impl<'a, R: PollReader + Unpin, I: AsyncParse + Unpin, const N: usize> Future
                             return Poll::Pending;
                         }
                         Poll::Ready(i) => {
-                            let i = i?;
+                            let (reader, opts) = fut.take_reader();
+                            let i = match i {
+                                Ok(i) => i,
+                                Err(e) => {
+                                    self.state = AsyncIterState::Done(reader, opts);
+                                    return Poll::Ready(Err(e));
+                                }
+                            };
                             debug_assert!(self.initialized < N, "trying to write past array");
                             let idx = self.initialized;
                             unsafe {
@@ -113,7 +120,6 @@ impl<'a, R: PollReader + Unpin, I: AsyncParse + Unpin, const N: usize> Future
                             }
                             self.initialized += 1;
                             if self.initialized == N {
-                                let (reader, opts) = fut.take_reader();
                                 self.state = AsyncIterState::Done(reader, opts);
                                 let finished = core::mem::replace(
                                     &mut self.storage,
@@ -124,7 +130,6 @@ impl<'a, R: PollReader + Unpin, I: AsyncParse + Unpin, const N: usize> Future
                                 let arr = unsafe { ArrayGuard::initialize(finished) };
                                 return Poll::Ready(Ok(arr));
                             }
-                            let (reader, opts) = fut.take_reader();
                             self.state = AsyncIterState::Iterating(I::create_fut(reader, opts));
                             continue;
                         }

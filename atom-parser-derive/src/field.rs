@@ -456,11 +456,28 @@ impl AtomField {
                                             ::core::task::Poll::Ready(res) => {
                                                 let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(header);
 
-                                                let atom = res?;
-                                                let atom_size = atom.size.size()
+                                                let atom = match res {
+                                                    Ok(atom) => atom,
+                                                    Err(e) => {
+                                                        let max_offset = reader.offset();
+                                                        let reader = ::#KRATE::TrailingReader::new(reader, max_offset);
+                                                        *self = Self::Done(reader, opts);
+                                                        return ::core::task::Poll::Ready(Err(e));
+                                                    }
+                                                };
+
+                                                let atom_size = match atom.size.size()
                                                     .map(|size| size.try_into())
                                                     .transpose()
-                                                    .map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError))?
+                                                    .map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError)) {
+                                                        Ok(size) => size,
+                                                        Err(e) => {
+                                                            let max_offset = reader.offset();
+                                                            let reader = ::#KRATE::TrailingReader::new(reader, max_offset);
+                                                            *self = Self::Done(reader, opts);
+                                                            return ::core::task::Poll::Ready(Err(e));
+                                                        }
+                                                    }
                                                     .unwrap_or(reader.remaining_size());
 
                                                 let max_offset = reader.offset() + atom_size;
@@ -488,8 +505,15 @@ impl AtomField {
                                                     return ::core::task::Poll::Pending;
                                                 }
                                                 ::core::task::Poll::Ready(res) => {
-                                                    let child = Child::#variants(res?);
                                                     let (reader, opts) = ::#krate::reader::TakeReader::take_reader(fut);
+                                                    let child = match res {
+                                                        Ok(child) => child,
+                                                        Err(e) => {
+                                                            *self = Self::Done(reader, opts);
+                                                            return ::core::task::Poll::Ready(Err(e));
+                                                        }
+                                                    };
+                                                    let child = Child::#variants(child);
                                                     let rest = ::#krate::reader::PollReader::remaining_size(&reader);
                                                     *self = Self::Seek(child, ::#krate::reader::AsyncSeek::seek(reader, rest), opts);
                                                 }
@@ -503,9 +527,9 @@ impl AtomField {
                                                 return ::core::task::Poll::Pending;
                                             }
                                             ::core::task::Poll::Ready(res) => {
-                                                let _ = res?;
                                                 let reader = fut.reader;
                                                 *self = Self::Done(reader, opts);
+                                                let _ = res?;
                                                 return ::core::task::Poll::Ready(Ok(child))
                                             }
                                         }
@@ -1236,7 +1260,13 @@ pub fn format_async_statemachine(
                     }
                     ::core::task::Poll::Ready(r) => {
                         let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(#name);
-                        let #name = r?;
+                        let #name = match r {
+                            Ok(#name) => #name,
+                            Err(e) => {
+                                *self = Self::Done(reader, opts);
+                                return ::core::task::Poll::Ready(Err(e));
+                            }
+                        };
                         #check_reserved
                         #on_poll_ready
                     }

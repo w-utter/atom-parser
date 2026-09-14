@@ -335,7 +335,13 @@ impl<
                         let (reader, options) = fut.take_reader();
                         let offset = reader.offset();
 
-                        let len = s?;
+                        let len = match s {
+                            Ok(s) => s,
+                            Err(e) => {
+                                *self = Self::Done(reader, options);
+                                return Poll::Ready(Err(e));
+                            }
+                        };
                         let mut idx = S::ZERO;
                         let mut exhausted = false;
 
@@ -378,13 +384,17 @@ impl<
                         }
                     }
                     Poll::Ready(i) => {
-                        let _ = i?;
+                        let (reader, opts) = fut.take_reader();
+                        if let Err(e) = i {
+                            *self = Self::Done(reader, opts);
+                            return Poll::Ready(Err(e));
+                        }
+
                         let has_next = dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(
                             &mut idx,
                             &len,
                             &mut exhausted,
                         );
-                        let (reader, opts) = fut.take_reader();
                         if has_next {
                             *self = Self::Iterating {
                                 offset,

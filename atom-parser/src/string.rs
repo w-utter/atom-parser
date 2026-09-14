@@ -69,8 +69,15 @@ mod pascal {
                             return Poll::Pending;
                         }
                         Poll::Ready(res) => {
-                            let res = res?;
                             let (reader, opts) = s.take_reader();
+                            let res = match res {
+                                Ok(res) => res,
+                                Err(e) => {
+                                    *self = Self::Done(reader, opts);
+                                    return Poll::Ready(Err(e));
+                                }
+                            };
+
                             let len = res
                                 .try_into()
                                 .map_err(|_| ParseError::IntegerConversion(TryFromIntError))?;
