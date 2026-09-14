@@ -1,4 +1,4 @@
-use crate::{FourCC, AtomField, AtomFields};
+use crate::{AtomField, AtomFields, FourCC};
 
 pub struct AtomDefinition {
     pub fcc: FourCC,
@@ -8,7 +8,12 @@ pub struct AtomDefinition {
 }
 
 impl AtomDefinition {
-    pub fn parse_from_syn(input: syn::parse::ParseStream, fcc: FourCC, attrs: Vec<syn::Attribute>, name: syn::Ident) -> syn::Result<Self> {
+    pub fn parse_from_syn(
+        input: syn::parse::ParseStream,
+        fcc: FourCC,
+        attrs: Vec<syn::Attribute>,
+        name: syn::Ident,
+    ) -> syn::Result<Self> {
         let fields = input.parse::<AtomFields>()?.inner;
         Ok(Self {
             fcc,
@@ -27,7 +32,11 @@ pub struct StructDefinition {
 }
 
 impl StructDefinition {
-    pub fn parse_from_syn(input: syn::parse::ParseStream, attrs: Vec<syn::Attribute>, name: syn::Ident) -> syn::Result<Self> {
+    pub fn parse_from_syn(
+        input: syn::parse::ParseStream,
+        attrs: Vec<syn::Attribute>,
+        name: syn::Ident,
+    ) -> syn::Result<Self> {
         let mut generics = input.parse::<syn::Generics>()?;
         let lookahead = input.lookahead1();
         if lookahead.peek(syn::Token![where]) {
@@ -35,7 +44,12 @@ impl StructDefinition {
         }
         let fields = input.parse::<AtomFields>()?.inner;
 
-        if fields.iter().any(|field| matches!(field, AtomField::FullBox {..} | AtomField::Children { .. })) {
+        if fields.iter().any(|field| {
+            matches!(
+                field,
+                AtomField::FullBox { .. } | AtomField::Children { .. }
+            )
+        }) {
             panic!("unsupported field in non-atom definition");
         }
 

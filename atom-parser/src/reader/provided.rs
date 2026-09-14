@@ -1,4 +1,4 @@
-use crate::{IoError, SwapOffsets, PollReader, Reader};
+use crate::{IoError, PollReader, Reader, SwapOffsets};
 
 pub struct InMemoryReader {
     bytes: Vec<u8>,
@@ -8,10 +8,7 @@ pub struct InMemoryReader {
 impl InMemoryReader {
     pub fn from_path<P: AsRef<std::path::Path>>(p: P) -> Result<Self, IoError> {
         let bytes = std::fs::read(p)?;
-        Ok(Self {
-            bytes,
-            offset: 0,
-        })
+        Ok(Self { bytes, offset: 0 })
     }
 }
 
@@ -23,7 +20,10 @@ impl SwapOffsets for InMemoryReader {
 
 impl Reader for InMemoryReader {
     fn remaining_size(&self) -> usize {
-        self.bytes.len().checked_sub(self.offset).unwrap_or_default()
+        self.bytes
+            .len()
+            .checked_sub(self.offset)
+            .unwrap_or_default()
     }
 
     fn offset(&self) -> usize {
@@ -35,7 +35,7 @@ impl Reader for InMemoryReader {
         if remaining < bytes.len() {
             return Err(IoError::other("not enough spc"));
         }
-        bytes.copy_from_slice(&self.bytes[self.offset..self.offset+bytes.len()]);
+        bytes.copy_from_slice(&self.bytes[self.offset..self.offset + bytes.len()]);
         self.offset += bytes.len();
         Ok(())
     }
@@ -44,7 +44,8 @@ impl Reader for InMemoryReader {
         let bytes = &self.bytes[self.offset..];
         let len = bytes
             .iter()
-            .position(|&byte| byte == b'\0').ok_or(IoError::other("not enough spc"))?;
+            .position(|&byte| byte == b'\0')
+            .ok_or(IoError::other("not enough spc"))?;
         self.offset += len + 1;
         Ok(len)
     }
@@ -70,7 +71,7 @@ impl PollReader for InMemoryReader {
             return core::task::Poll::Ready(Err(IoError::other("not enough spc")));
         }
 
-        buf.copy_from_slice(&self.bytes[self.offset..self.offset+buf.len()]);
+        buf.copy_from_slice(&self.bytes[self.offset..self.offset + buf.len()]);
         self.offset += buf.len();
 
         core::task::Poll::Ready(Ok(()))
@@ -83,7 +84,8 @@ impl PollReader for InMemoryReader {
         let bytes = &self.bytes[self.offset..];
         let len = bytes
             .iter()
-            .position(|&byte| byte == b'\0').ok_or(IoError::other("not enough spc"))?;
+            .position(|&byte| byte == b'\0')
+            .ok_or(IoError::other("not enough spc"))?;
         self.offset += len + 1;
         core::task::Poll::Ready(Ok(len))
     }
@@ -113,6 +115,9 @@ impl PollReader for InMemoryReader {
         core::cmp::min(self.offset, self.bytes.len())
     }
     fn remaining_size(&self) -> usize {
-        self.bytes.len().checked_sub(self.offset).unwrap_or_default()
+        self.bytes
+            .len()
+            .checked_sub(self.offset)
+            .unwrap_or_default()
     }
 }

@@ -4,7 +4,7 @@ pub trait Reader: SwapOffsets {
     fn remaining_size(&self) -> usize;
     fn offset(&self) -> usize;
     fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError>;
-    // reads a cstr and returns its length (not including nul) 
+    // reads a cstr and returns its length (not including nul)
     // and advances the cursor after the string
     fn read_cstr(&mut self) -> Result<usize, IoError>;
     fn seek(&mut self, amt: usize) -> Result<(), IoError>;
@@ -14,7 +14,7 @@ pub trait Reader: SwapOffsets {
     }
 }
 
-impl <'a, R: Reader> Reader for &'a mut R {
+impl<'a, R: Reader> Reader for &'a mut R {
     fn remaining_size(&self) -> usize {
         R::remaining_size(self)
     }

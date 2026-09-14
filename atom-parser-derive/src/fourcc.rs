@@ -28,7 +28,10 @@ impl FourCC {
     pub fn try_as_mod(&self) -> Option<&str> {
         let str = str::from_utf8(&self.0).ok()?;
 
-        if !str.chars().all(|char| char.is_ascii_lowercase() || char.is_ascii_digit()) {
+        if !str
+            .chars()
+            .all(|char| char.is_ascii_lowercase() || char.is_ascii_digit())
+        {
             return None;
         }
         Some(str)
@@ -48,4 +51,3 @@ impl FourCC {
         self.0
     }
 }
-

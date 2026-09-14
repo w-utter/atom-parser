@@ -1,5 +1,5 @@
+use crate::VersionList;
 use std::collections::HashSet;
-use crate::{VersionList};
 
 #[derive(Clone)]
 pub struct Child {
@@ -26,10 +26,7 @@ impl syn::parse::Parse for Child {
         let version_num = version_num.unwrap_or_default();
 
         let name = input.parse()?;
-        Ok(Self {
-            name,
-            version_num,
-        })
+        Ok(Self { name, version_num })
     }
 }
 
@@ -44,8 +41,6 @@ impl syn::parse::Parse for ChildList {
 
         let content = content.parse_terminated(Child::parse, syn::Token![,])?;
         let inner = content.into_iter().collect::<Vec<_>>();
-        Ok(Self {
-            inner,
-        })
+        Ok(Self { inner })
     }
 }

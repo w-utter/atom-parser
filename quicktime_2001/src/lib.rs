@@ -1,5 +1,5 @@
-use atom_parser::make_atom;
 use atom_parser::FourCC;
+use atom_parser::make_atom;
 
 make_atom! {
     #[atom("root")]
@@ -82,7 +82,6 @@ make_atom! {
         compressed_movie_data: Vec<u8>,
     }
 }
-
 
 // reference movies
 make_atom! {
@@ -827,7 +826,7 @@ pub mod sample_description {
         struct Sprite {
             // empty
         }
-        
+
         struct Tween {
             // empty
         }
@@ -863,7 +862,6 @@ pub type SpriteSampleDescription = SampleDescriptionEntry<sample_description::Sp
 pub type TweenSampleDescription = SampleDescriptionEntry<sample_description::Sprite>;
 pub type Q3DSampleDescription = SampleDescriptionEntry<sample_description::Q3D>;
 pub type StreamingSampleDescription = SampleDescriptionEntry<sample_description::Streaming>;
-
 
 // hints
 make_atom! {
@@ -942,7 +940,8 @@ make_atom! {
 
 #[test]
 fn ftyp() {
-    let mut r = atom_parser::InMemoryReader::from_path("../file_example_MOV_480_700kB.mov").unwrap();
+    let mut r =
+        atom_parser::InMemoryReader::from_path("../file_example_MOV_480_700kB.mov").unwrap();
     let opts = Default::default();
 
     use atom_parser::Parse;
@@ -973,7 +972,9 @@ fn ftyp() {
                             while let Some(child) = child_iter.next() {
                                 let r = &mut child_iter.reader;
                                 match child.unwrap() {
-                                    trak::Child::TrackHeader(hdr) => println!("track header: {hdr:?}"),
+                                    trak::Child::TrackHeader(hdr) => {
+                                        println!("track header: {hdr:?}")
+                                    }
                                     trak::Child::Clipping(c) => println!("clipping: {c:?}"),
                                     trak::Child::TrackMatte(tm) => println!("track matte: {tm:?}"),
                                     trak::Child::Edit(e) => {
@@ -982,30 +983,45 @@ fn ftyp() {
                                         while let Some(child) = child_iter.next() {
                                             let r = &mut child_iter.reader;
                                             match child.unwrap() {
-                                                edts::Child::EditList(el) => {
-                                                    match el.version {
-                                                        elst::EditListVersions::V0(el) => {
-                                                            println!("edit list: {el:?}");
-                                                            let list_entires = el.table_entries(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
-                                                            println!("edit list entries: {list_entires:?}");
-                                                        }
-                                                        elst::EditListVersions::Unknown(v) => println!("unknown elst: {v}"),
+                                                edts::Child::EditList(el) => match el.version {
+                                                    elst::EditListVersions::V0(el) => {
+                                                        println!("edit list: {el:?}");
+                                                        let list_entires = el
+                                                            .table_entries(r, &opts)
+                                                            .collect::<Result<Vec<_>, _>>()
+                                                            .unwrap();
+                                                        println!(
+                                                            "edit list entries: {list_entires:?}"
+                                                        );
                                                     }
-                                                }
+                                                    elst::EditListVersions::Unknown(v) => {
+                                                        println!("unknown elst: {v}")
+                                                    }
+                                                },
                                                 _ => (),
                                             }
                                         }
                                     }
-                                    trak::Child::TrackReference(tref) => println!("track ref: {tref:?}"),
-                                    trak::Child::TrackLoadingSettings(tls) => println!("track loading: {tls:?}"),
-                                    trak::Child::TrackInputMap(tim) => println!("track input map: {tim:?}"),
+                                    trak::Child::TrackReference(tref) => {
+                                        println!("track ref: {tref:?}")
+                                    }
+                                    trak::Child::TrackLoadingSettings(tls) => {
+                                        println!("track loading: {tls:?}")
+                                    }
+                                    trak::Child::TrackInputMap(tim) => {
+                                        println!("track input map: {tim:?}")
+                                    }
                                     trak::Child::Media(m) => {
                                         let mut child_iter = m.children(r, &opts);
                                         while let Some(child) = child_iter.next() {
                                             let r = &mut child_iter.reader;
                                             match child.unwrap() {
-                                                mdia::Child::MediaHeader(h) => println!("media heaader: {h:?}"),
-                                                mdia::Child::HandlerReference(r) => println!("href: {r:?}"),
+                                                mdia::Child::MediaHeader(h) => {
+                                                    println!("media heaader: {h:?}")
+                                                }
+                                                mdia::Child::HandlerReference(r) => {
+                                                    println!("href: {r:?}")
+                                                }
                                                 mdia::Child::MediaInformation(info) => {
                                                     println!("info: {info:?}");
                                                     let mut child_iter = info.children(r, &opts);
@@ -1121,13 +1137,17 @@ fn ftyp() {
                                                         }
                                                     }
                                                 }
-                                                mdia::Child::Userdata(u) => println!("udata: {u:?}"),
+                                                mdia::Child::Userdata(u) => {
+                                                    println!("udata: {u:?}")
+                                                }
                                                 mdia::Child::Unsupported(_) => (),
                                             }
                                         }
                                     }
                                     trak::Child::Userdata(udata) => println!("udata: {udata:?}"),
-                                    trak::Child::Unsupported(fcc) => println!("unsupported in trak: {fcc:?}"),
+                                    trak::Child::Unsupported(fcc) => {
+                                        println!("unsupported in trak: {fcc:?}")
+                                    }
                                 }
                             }
                         }
@@ -1152,7 +1172,8 @@ fn ftyp() {
 
 #[tokio::test]
 async fn ftyp_async() {
-    let mut r = atom_parser::InMemoryReader::from_path("../file_example_MOV_480_700kB.mov").unwrap();
+    let mut r =
+        atom_parser::InMemoryReader::from_path("../file_example_MOV_480_700kB.mov").unwrap();
     let opts = Default::default();
 
     use atom_parser::AsyncParse;
@@ -1184,7 +1205,9 @@ async fn ftyp_async() {
                             while let Some(child) = child_iter.next().await {
                                 let r = child_iter.reader();
                                 match child.unwrap() {
-                                    trak::Child::TrackHeader(hdr) => println!("track header: {hdr:?}"),
+                                    trak::Child::TrackHeader(hdr) => {
+                                        println!("track header: {hdr:?}")
+                                    }
                                     trak::Child::Clipping(c) => println!("clipping: {c:?}"),
                                     trak::Child::TrackMatte(tm) => println!("track matte: {tm:?}"),
                                     trak::Child::Edit(e) => {
@@ -1193,34 +1216,52 @@ async fn ftyp_async() {
                                         while let Some(child) = child_iter.next().await {
                                             let r = child_iter.reader();
                                             match child.unwrap() {
-                                                edts::Child::EditList(el) => {
-                                                    match el.version {
-                                                        elst::EditListVersions::V0(el) => {
-                                                            println!("edit list: {el:?}");
-                                                            let list_entires = el.table_entries_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
-                                                            println!("edit list entries: {list_entires:?}");
-                                                        }
-                                                        elst::EditListVersions::Unknown(v) => println!("unknown elst: {v}"),
+                                                edts::Child::EditList(el) => match el.version {
+                                                    elst::EditListVersions::V0(el) => {
+                                                        println!("edit list: {el:?}");
+                                                        let list_entires = el
+                                                            .table_entries_async(r, &opts)
+                                                            .collect::<Result<Vec<_>, _>>()
+                                                            .await
+                                                            .unwrap();
+                                                        println!(
+                                                            "edit list entries: {list_entires:?}"
+                                                        );
                                                     }
-                                                }
+                                                    elst::EditListVersions::Unknown(v) => {
+                                                        println!("unknown elst: {v}")
+                                                    }
+                                                },
                                                 _ => (),
                                             }
                                         }
                                     }
-                                    trak::Child::TrackReference(tref) => println!("track ref: {tref:?}"),
-                                    trak::Child::TrackLoadingSettings(tls) => println!("track loading: {tls:?}"),
-                                    trak::Child::TrackInputMap(tim) => println!("track input map: {tim:?}"),
+                                    trak::Child::TrackReference(tref) => {
+                                        println!("track ref: {tref:?}")
+                                    }
+                                    trak::Child::TrackLoadingSettings(tls) => {
+                                        println!("track loading: {tls:?}")
+                                    }
+                                    trak::Child::TrackInputMap(tim) => {
+                                        println!("track input map: {tim:?}")
+                                    }
                                     trak::Child::Media(m) => {
                                         let mut child_iter = m.children_async(r, &opts);
                                         while let Some(child) = child_iter.next().await {
                                             let r = child_iter.reader();
                                             match child.unwrap() {
-                                                mdia::Child::MediaHeader(h) => println!("media heaader: {h:?}"),
-                                                mdia::Child::HandlerReference(r) => println!("href: {r:?}"),
+                                                mdia::Child::MediaHeader(h) => {
+                                                    println!("media heaader: {h:?}")
+                                                }
+                                                mdia::Child::HandlerReference(r) => {
+                                                    println!("href: {r:?}")
+                                                }
                                                 mdia::Child::MediaInformation(info) => {
                                                     println!("info: {info:?}");
-                                                    let mut child_iter = info.children_async(r, &opts);
-                                                    while let Some(child) = child_iter.next().await {
+                                                    let mut child_iter =
+                                                        info.children_async(r, &opts);
+                                                    while let Some(child) = child_iter.next().await
+                                                    {
                                                         let r = child_iter.reader();
                                                         match child.unwrap() {
                                                             minf::Child::VideoMediaInformationHeader(vid) => println!("vid: {vid:?}"),
@@ -1332,13 +1373,17 @@ async fn ftyp_async() {
                                                         }
                                                     }
                                                 }
-                                                mdia::Child::Userdata(u) => println!("udata: {u:?}"),
+                                                mdia::Child::Userdata(u) => {
+                                                    println!("udata: {u:?}")
+                                                }
                                                 mdia::Child::Unsupported(_) => (),
                                             }
                                         }
                                     }
                                     trak::Child::Userdata(udata) => println!("udata: {udata:?}"),
-                                    trak::Child::Unsupported(fcc) => println!("unsupported in trak: {fcc:?}"),
+                                    trak::Child::Unsupported(fcc) => {
+                                        println!("unsupported in trak: {fcc:?}")
+                                    }
                                 }
                             }
                         }

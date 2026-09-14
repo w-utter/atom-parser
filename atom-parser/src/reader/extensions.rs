@@ -1,6 +1,6 @@
-use crate::{SwapOffsets, Reader, IoError, PollReader};
-use core::task::{Poll, Context};
+use crate::{IoError, PollReader, Reader, SwapOffsets};
 use core::pin::Pin;
+use core::task::{Context, Poll};
 
 // reader that backtracks to known offsets
 // for things like iterating over collections
@@ -11,7 +11,7 @@ mod backtrack_reader {
         stored_offset: usize,
     }
 
-    impl <R: SwapOffsets> BacktrackReader<R> {
+    impl<R: SwapOffsets> BacktrackReader<R> {
         pub fn new(mut reader: R, mut backtrack_to: usize) -> Self {
             reader.swap_offsets(&mut backtrack_to);
             Self {
@@ -21,19 +21,19 @@ mod backtrack_reader {
         }
     }
 
-    impl <R: SwapOffsets> Drop for BacktrackReader<R> {
+    impl<R: SwapOffsets> Drop for BacktrackReader<R> {
         fn drop(&mut self) {
             self.reader.swap_offsets(&mut self.stored_offset)
         }
     }
 
-    impl <S: SwapOffsets> SwapOffsets for BacktrackReader<S> {
+    impl<S: SwapOffsets> SwapOffsets for BacktrackReader<S> {
         fn swap_offsets(&mut self, offset: &mut usize) {
             self.reader.swap_offsets(offset)
         }
     }
 
-    impl <R: Reader> Reader for BacktrackReader<R> {
+    impl<R: Reader> Reader for BacktrackReader<R> {
         fn remaining_size(&self) -> usize {
             self.reader.remaining_size()
         }
@@ -54,7 +54,7 @@ mod backtrack_reader {
         }
     }
 
-    impl <R: PollReader + SwapOffsets + Unpin> PollReader for BacktrackReader<R> {
+    impl<R: PollReader + SwapOffsets + Unpin> PollReader for BacktrackReader<R> {
         fn poll_read(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -106,24 +106,23 @@ mod trailing_reader {
         max_offset: usize,
     }
 
-    impl <R> TrailingReader<R> {
+    impl<R> TrailingReader<R> {
         pub fn new(reader: R, max_offset: usize) -> Self {
-            Self {
-                reader,
-                max_offset,
-            }
+            Self { reader, max_offset }
         }
     }
 
-    impl <S: SwapOffsets> SwapOffsets for TrailingReader<S> {
+    impl<S: SwapOffsets> SwapOffsets for TrailingReader<S> {
         fn swap_offsets(&mut self, offset: &mut usize) {
             self.reader.swap_offsets(offset)
         }
     }
 
-    impl <R: Reader> Reader for TrailingReader<R> {
+    impl<R: Reader> Reader for TrailingReader<R> {
         fn remaining_size(&self) -> usize {
-            self.max_offset.checked_sub(self.reader.offset()).unwrap_or_default()
+            self.max_offset
+                .checked_sub(self.reader.offset())
+                .unwrap_or_default()
         }
 
         fn offset(&self) -> usize {
@@ -155,7 +154,7 @@ mod trailing_reader {
         }
     }
 
-    impl <R: PollReader + Unpin> PollReader for TrailingReader<R> {
+    impl<R: PollReader + Unpin> PollReader for TrailingReader<R> {
         fn poll_read(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -199,7 +198,9 @@ mod trailing_reader {
         }
 
         fn remaining_size(&self) -> usize {
-            self.max_offset.checked_sub(self.reader.offset()).unwrap_or_default()
+            self.max_offset
+                .checked_sub(self.reader.offset())
+                .unwrap_or_default()
         }
     }
 }

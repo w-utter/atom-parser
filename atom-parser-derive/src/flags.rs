@@ -1,5 +1,5 @@
+use crate::{KRATE, VersionList};
 use std::collections::HashSet;
-use crate::{VersionList, KRATE};
 
 #[derive(Clone)]
 pub struct Flag {
@@ -56,22 +56,31 @@ pub struct FlagList {
 
 impl FlagList {
     pub fn can_elide_flag_storage(flags: &[Flag], version: Option<&syn::LitInt>) -> bool {
-        if flags.iter().filter(|flag| {
-            if let Some(v) = version {
-                if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
-                    return false;
+        if flags
+            .iter()
+            .filter(|flag| {
+                if let Some(v) = version {
+                    if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
+                        return false;
+                    }
+                } else if !flag.version_num.is_empty() {
+                    panic!("version specified for flags but no version identifier")
                 }
-            } else if !flag.version_num.is_empty() {
-                panic!("version specified for flags but no version identifier")
-            }
-            true
-        }).any(|flag| !flag.expected) {
-            return false
+                true
+            })
+            .any(|flag| !flag.expected)
+        {
+            return false;
         }
         true
     }
 
-    pub fn flags_impl<'a>(name: &'a syn::Ident, flags: &'a [Flag], repr: &'a syn::Type, version: Option<&'a syn::LitInt>) -> impl Iterator<Item = proc_macro2::TokenStream> + 'a {
+    pub fn flags_impl<'a>(
+        name: &'a syn::Ident,
+        flags: &'a [Flag],
+        repr: &'a syn::Type,
+        version: Option<&'a syn::LitInt>,
+    ) -> impl Iterator<Item = proc_macro2::TokenStream> + 'a {
         flags.iter().filter_map(move |flag| {
             if let Some(v) = version {
                 if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
@@ -87,7 +96,13 @@ impl FlagList {
         })
     }
 
-    pub fn flags_trait_impl(name: &syn::Ident, flags: &[Flag], parse_repr: &syn::Type, version: Option<&syn::LitInt>, can_elide_flags: bool) -> proc_macro2::TokenStream {
+    pub fn flags_trait_impl(
+        name: &syn::Ident,
+        flags: &[Flag],
+        parse_repr: &syn::Type,
+        version: Option<&syn::LitInt>,
+        can_elide_flags: bool,
+    ) -> proc_macro2::TokenStream {
         use quote::quote;
         let flags_check = Self::flags_parse_check(flags, version);
 
@@ -143,28 +158,31 @@ impl FlagList {
         }
     }
 
-    pub fn flags_parse_check(flags: &[Flag], version: Option<&syn::LitInt>) -> proc_macro2::TokenStream {
+    pub fn flags_parse_check(
+        flags: &[Flag],
+        version: Option<&syn::LitInt>,
+    ) -> proc_macro2::TokenStream {
         use quote::quote;
-        let current_flags = flags.iter().filter(|flag| {
-            if let Some(v) = version {
-                if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
-                    return false;
+        let current_flags = flags
+            .iter()
+            .filter(|flag| {
+                if let Some(v) = version {
+                    if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
+                        return false;
+                    }
+                } else if !flag.version_num.is_empty() {
+                    panic!("version specified for flags but no version identifier")
                 }
-            } else if !flag.version_num.is_empty() {
-                panic!("version specified for flags but no version identifier")
-            }
 
-            true
-        }).collect::<Vec<_>>();
+                true
+            })
+            .collect::<Vec<_>>();
 
         let expected_check = if current_flags.iter().filter(|flag| flag.expected).count() > 0 {
-            let expected_flags = current_flags.iter().filter_map(|flag| {
-                if flag.expected {
-                    Some(&flag.val)
-                } else {
-                    None
-                }
-            }).collect::<Vec<_>>();
+            let expected_flags = current_flags
+                .iter()
+                .filter_map(|flag| if flag.expected { Some(&flag.val) } else { None })
+                .collect::<Vec<_>>();
 
             Some(quote! {
                 if options.error_on_missing_flags && ((bits & (#((#expected_flags))|*)) != (#((#expected_flags))|*)) {
@@ -192,7 +210,12 @@ impl FlagList {
         }
     }
 
-    pub fn debug_impl(flags: &[Flag], name: &syn::Ident, version: Option<&syn::LitInt>, can_be_elided: bool) -> proc_macro2::TokenStream {
+    pub fn debug_impl(
+        flags: &[Flag],
+        name: &syn::Ident,
+        version: Option<&syn::LitInt>,
+        can_be_elided: bool,
+    ) -> proc_macro2::TokenStream {
         use quote::quote;
 
         let flags_debug_elided = flags.iter().filter_map(|flag| {
@@ -311,9 +334,6 @@ impl syn::parse::Parse for FlagList {
         syn::braced!(content in input);
         let content = content.parse_terminated(Flag::parse, syn::Token![;])?;
         let flags = content.into_iter().collect::<Vec<_>>();
-        Ok(Self {
-            flags,
-        })
+        Ok(Self { flags })
     }
 }
-

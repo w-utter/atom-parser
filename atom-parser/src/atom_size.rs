@@ -1,4 +1,4 @@
-use crate::{Reader, PollReader, TakeReader, ParseError, ParseOptions, impl_take_reader};
+use crate::{ParseError, ParseOptions, PollReader, Reader, TakeReader, impl_take_reader};
 
 #[cfg(feature = "extended_sized_atoms")]
 use crate::{AsyncParse, IntegerParse, Parse};
@@ -45,17 +45,21 @@ impl AtomSize {
     #[cfg(feature = "extended_sized_atoms")]
     const MIN_ATOM_SIZE_64: u64 = 16;
 
-    pub fn parse<T: Reader>(size: u32, reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+    pub fn parse<T: Reader>(
+        size: u32,
+        reader: &mut T,
+        options: &ParseOptions,
+    ) -> Result<Self, ParseError> {
         #[cfg(feature = "extended_sized_atoms")]
         {
             if !matches!(size, 0 | 1) && size < Self::MIN_ATOM_SIZE_32 {
-                return Err(ParseError::AtomSizeTooSmall)
+                return Err(ParseError::AtomSizeTooSmall);
             }
 
             let size = if size == 1 {
                 let extended_size = u64::parse(reader, options)?;
                 if extended_size < Self::MIN_ATOM_SIZE_64 {
-                    return Err(ParseError::AtomSizeTooSmall)
+                    return Err(ParseError::AtomSizeTooSmall);
                 }
                 extended_size - Self::MIN_ATOM_SIZE_64
             } else {
@@ -66,9 +70,7 @@ impl AtomSize {
                 }
             };
 
-            Ok(Self {
-                size
-            })
+            Ok(Self { size })
         }
         #[cfg(not(feature = "extended_sized_atoms"))]
         {
@@ -79,7 +81,7 @@ impl AtomSize {
             }
 
             if size != 0 && size < Self::MIN_ATOM_SIZE_32 {
-                return Err(ParseError::AtomSizeTooSmall)
+                return Err(ParseError::AtomSizeTooSmall);
             }
 
             let size = if size == 0 {
@@ -88,13 +90,15 @@ impl AtomSize {
                 size - Self::MIN_ATOM_SIZE_32
             };
 
-            Ok(Self {
-                size,
-            })
+            Ok(Self { size })
         }
     }
 
-    pub fn create_fut<'a, R: PollReader + Unpin>(size: u32, reader: R, options: &'a ParseOptions) -> AtomSizeParse<'a, R> {
+    pub fn create_fut<'a, R: PollReader + Unpin>(
+        size: u32,
+        reader: R,
+        options: &'a ParseOptions,
+    ) -> AtomSizeParse<'a, R> {
         #[cfg(feature = "extended_sized_atoms")]
         {
             if size == 1 {
@@ -118,9 +122,12 @@ pub enum AtomSizeParse<'a, R: PollReader + Unpin> {
     Empty,
 }
 
-impl <'a, R: PollReader + Unpin> Future for AtomSizeParse<'a, R> {
+impl<'a, R: PollReader + Unpin> Future for AtomSizeParse<'a, R> {
     type Output = Result<AtomSize, ParseError>;
-    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+    fn poll(
+        mut self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
         loop {
             let this = core::mem::replace(&mut *self, AtomSizeParse::Empty);
             match this {
@@ -133,14 +140,18 @@ impl <'a, R: PollReader + Unpin> Future for AtomSizeParse<'a, R> {
                     }
 
                     if size != 0 && size < AtomSize::MIN_ATOM_SIZE_32 {
-                        return std::task::Poll::Ready(Err(ParseError::AtomSizeTooSmall))
+                        return std::task::Poll::Ready(Err(ParseError::AtomSizeTooSmall));
                     }
 
                     let size = if size == 0 {
                         #[cfg(feature = "extended_sized_atoms")]
-                        { u64::MAX }
+                        {
+                            u64::MAX
+                        }
                         #[cfg(not(feature = "extended_sized_atoms"))]
-                        { u32::MAX }
+                        {
+                            u32::MAX
+                        }
                     } else {
                         #[cfg(feature = "extended_sized_atoms")]
                         {
@@ -152,9 +163,7 @@ impl <'a, R: PollReader + Unpin> Future for AtomSizeParse<'a, R> {
                         }
                     };
 
-                    return core::task::Poll::Ready(Ok(AtomSize {
-                        size
-                    }))
+                    return core::task::Poll::Ready(Ok(AtomSize { size }));
                 }
                 #[cfg(feature = "extended_sized_atoms")]
                 AtomSizeParse::ExtendedSize(mut fut) => {
@@ -173,10 +182,10 @@ impl <'a, R: PollReader + Unpin> Future for AtomSizeParse<'a, R> {
                                     Err(ParseError::AtomSizeTooSmall)
                                 } else {
                                     Ok(AtomSize {
-                                        size: extended_size - AtomSize::MIN_ATOM_SIZE_64
+                                        size: extended_size - AtomSize::MIN_ATOM_SIZE_64,
                                     })
                                 }
-                            }))
+                            }));
                         }
                     }
                 }
@@ -187,8 +196,8 @@ impl <'a, R: PollReader + Unpin> Future for AtomSizeParse<'a, R> {
     }
 }
 
-impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for AtomSizeParse<'a, R> {
-    impl_take_reader!{}
+impl<'a, R: PollReader + Unpin> TakeReader<'a, R> for AtomSizeParse<'a, R> {
+    impl_take_reader! {}
 
     fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
         match self {
@@ -200,4 +209,3 @@ impl <'a, R: PollReader + Unpin> TakeReader<'a, R> for AtomSizeParse<'a, R> {
         }
     }
 }
-

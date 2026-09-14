@@ -1,5 +1,5 @@
-use std::collections::{HashSet, HashMap};
-use crate::{AtomField, StructFieldAttr, KRATE};
+use crate::{AtomField, KRATE, StructFieldAttr};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 pub struct Version {
@@ -15,10 +15,7 @@ impl syn::parse::Parse for Version {
             panic!("incorrect # of attrs (only need #[version(0)])")
         }
 
-        let version_attr = attrs
-            .into_iter()
-            .next()
-            .unwrap();
+        let version_attr = attrs.into_iter().next().unwrap();
 
         if !version_attr.path().is_ident("version") {
             panic!("unknown attr")
@@ -44,8 +41,15 @@ pub struct VersionList {
 }
 
 impl VersionList {
-    pub fn parse_version_num_from_attr(attr: syn::Attribute) -> syn::parse::Result<HashSet<syn::LitInt>> {
-        Ok(attr.parse_args_with(syn::punctuated::Punctuated::<syn::LitInt, syn::Token![,]>::parse_terminated)?.into_iter().collect::<HashSet<_>>())
+    pub fn parse_version_num_from_attr(
+        attr: syn::Attribute,
+    ) -> syn::parse::Result<HashSet<syn::LitInt>> {
+        Ok(attr
+            .parse_args_with(
+                syn::punctuated::Punctuated::<syn::LitInt, syn::Token![,]>::parse_terminated,
+            )?
+            .into_iter()
+            .collect::<HashSet<_>>())
     }
 }
 
@@ -56,16 +60,23 @@ impl syn::parse::Parse for VersionList {
 
         let content = content.parse_terminated(Version::parse, syn::Token![,])?;
         let inner = content.into_iter().collect::<Vec<_>>();
-        Ok(Self {
-            inner,
-        })
-
+        Ok(Self { inner })
     }
 }
 
-pub fn try_expand_into_versioned_fields(fields: Vec<AtomField>, version: Option<syn::LitInt>) -> syn::Result<Result<Versioned, Vec<AtomField>>> {
-    let versions = fields.iter().filter(|field| matches!(field, AtomField::Version { .. }));
-    let mut version_identifier = fields.iter().enumerate().filter(|(_, field)| matches!(field, AtomField::FullBox { .. } | AtomField::Struct(_, StructFieldAttr::VersionIdentifier)));
+pub fn try_expand_into_versioned_fields(
+    fields: Vec<AtomField>,
+    version: Option<syn::LitInt>,
+) -> syn::Result<Result<Versioned, Vec<AtomField>>> {
+    let versions = fields
+        .iter()
+        .filter(|field| matches!(field, AtomField::Version { .. }));
+    let mut version_identifier = fields.iter().enumerate().filter(|(_, field)| {
+        matches!(
+            field,
+            AtomField::FullBox { .. } | AtomField::Struct(_, StructFieldAttr::VersionIdentifier)
+        )
+    });
 
     if version_identifier.clone().count() > 1 {
         panic!("more than 1 version identifier")
@@ -76,7 +87,9 @@ pub fn try_expand_into_versioned_fields(fields: Vec<AtomField>, version: Option<
         (None, _, vs) if vs > 0 => panic!("verions present but no version identifier"),
         (Some(_), None, v) if v == 0 => panic!("version identifier but no verisons"),
         (_, Some(_), v) if v > 0 => panic!("version attr and versions present"),
-        (Some((i, _)), _, _) if i > 0 => panic!("version identifier needs to be declared as the first field"),
+        (Some((i, _)), _, _) if i > 0 => {
+            panic!("version identifier needs to be declared as the first field")
+        }
         (None, _, _) => return Ok(Err(fields)),
         (_, Some(version_num), _) => {
             let mut map = HashMap::new();
@@ -103,7 +116,7 @@ pub fn try_expand_into_versioned_fields(fields: Vec<AtomField>, version: Option<
             map.insert(version_num.clone(), out_fields);
             Ok(Ok(Versioned {
                 versions: map,
-                version_repr: version_repr.unwrap()
+                version_repr: version_repr.unwrap(),
             }))
         }
         _ => {
@@ -117,9 +130,7 @@ pub fn try_expand_into_versioned_fields(fields: Vec<AtomField>, version: Option<
                     AtomField::Struct(field, StructFieldAttr::VersionIdentifier) => {
                         version_repr = Some(field.ty.clone());
                     }
-                    AtomField::Version {
-                        versions,
-                    } => {
+                    AtomField::Version { versions } => {
                         for version in versions {
                             for v in &version.version_num {
                                 if !map.contains_key(v) {
@@ -173,7 +184,12 @@ impl Versioned {
         quote::format_ident!("{name}Versions")
     }
 
-    pub fn format_versioned_struct(&self, name: &syn::Ident, attrs: &[syn::Attribute], generics: &syn::Generics) -> proc_macro2::TokenStream {
+    pub fn format_versioned_struct(
+        &self,
+        name: &syn::Ident,
+        attrs: &[syn::Attribute],
+        generics: &syn::Generics,
+    ) -> proc_macro2::TokenStream {
         use quote::quote;
 
         let mut generics = generics.clone();
@@ -246,9 +262,12 @@ impl Versioned {
 
         let mut async_parse_generics = generics.clone();
         async_parse_generics.params.push(syn::parse_quote!('a));
-        async_parse_generics.params.push(syn::parse_quote!(R: ::#KRATE::reader::PollReader + ::core::marker::Unpin));
+        async_parse_generics
+            .params
+            .push(syn::parse_quote!(R: ::#KRATE::reader::PollReader + ::core::marker::Unpin));
 
-        let (async_impl_generics, async_ty_generics, async_where_clause) = async_parse_generics.split_for_impl();
+        let (async_impl_generics, async_ty_generics, async_where_clause) =
+            async_parse_generics.split_for_impl();
 
         quote! {
             #(#attrs)*
@@ -344,14 +363,22 @@ impl Versioned {
         }
     }
 
-    pub fn format_async_parse(&self, name: &syn::Ident, generics: &syn::Generics, atom_mod: &syn::Ident) -> proc_macro2::TokenStream {
+    pub fn format_async_parse(
+        &self,
+        name: &syn::Ident,
+        generics: &syn::Generics,
+        atom_mod: &syn::Ident,
+    ) -> proc_macro2::TokenStream {
         use quote::quote;
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
         let mut async_parse_generics = generics.clone();
         async_parse_generics.params.push(syn::parse_quote!('a));
-        async_parse_generics.params.push(syn::parse_quote!(R: ::#KRATE::reader::PollReader + ::core::marker::Unpin));
-        let (async_impl_generics, async_ty_generics, async_where_clause) = async_parse_generics.split_for_impl();
+        async_parse_generics
+            .params
+            .push(syn::parse_quote!(R: ::#KRATE::reader::PollReader + ::core::marker::Unpin));
+        let (async_impl_generics, async_ty_generics, async_where_clause) =
+            async_parse_generics.split_for_impl();
 
         let enum_name = Self::format_enum_name_from_versioned_struct(name);
         let async_parse_enum_name = quote::format_ident!("Asnyc{}Parse", name);

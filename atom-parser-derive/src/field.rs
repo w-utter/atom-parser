@@ -1,4 +1,4 @@
-use crate::{Flag, FlagList, Version, VersionList, Child, ChildList, KRATE};
+use crate::{Child, ChildList, Flag, FlagList, KRATE, Version, VersionList};
 
 #[derive(Clone)]
 pub enum AtomField {
@@ -11,7 +11,7 @@ pub enum AtomField {
     //      B = 1 << 1,
     // }
     //
-    // expands into an equivalent 
+    // expands into an equivalent
     //
     // #[version]
     // version: u8,
@@ -37,7 +37,7 @@ pub enum AtomField {
         field_name: Option<syn::Ident>,
         name: syn::Ident,
         parse_repr: syn::Type,
-        flags: Vec<Flag>
+        flags: Vec<Flag>,
     },
     // inline definitions of different versions
     //
@@ -62,11 +62,14 @@ pub enum AtomField {
         size_ty: Option<syn::Type>,
         children: Vec<Child>,
     },
-    // attrs that can be shared with both structs and 
+    // attrs that can be shared with both structs and
     Struct(syn::Field, StructFieldAttr),
 }
 
-fn parse_normal_field(input: syn::parse::ParseStream, attrs: Vec<syn::Attribute>) -> syn::parse::Result<syn::Field> {
+fn parse_normal_field(
+    input: syn::parse::ParseStream,
+    attrs: Vec<syn::Attribute>,
+) -> syn::parse::Result<syn::Field> {
     Ok(syn::Field {
         attrs,
         ..syn::Field::parse_named(input)?
@@ -75,19 +78,19 @@ fn parse_normal_field(input: syn::parse::ParseStream, attrs: Vec<syn::Attribute>
 
 fn is_atom_attr(path: &syn::Path) -> bool {
     path.is_ident("full_box")
-    || path.is_ident("flags")
-    || path.is_ident("versions")
-    || path.is_ident("children")
+        || path.is_ident("flags")
+        || path.is_ident("versions")
+        || path.is_ident("children")
 }
 
 fn is_struct_attr(path: &syn::Path) -> bool {
     path.is_ident("dynamic_array")
-    || path.is_ident("reserved")
-    || path.is_ident("pascal_string")
-    || path.is_ident("null_terminated_string")
-    || path.is_ident("trailing_array")
-    || path.is_ident("payload")
-    || path.is_ident("version")
+        || path.is_ident("reserved")
+        || path.is_ident("pascal_string")
+        || path.is_ident("null_terminated_string")
+        || path.is_ident("trailing_array")
+        || path.is_ident("payload")
+        || path.is_ident("version")
 }
 
 impl syn::parse::Parse for AtomField {
@@ -107,7 +110,7 @@ impl syn::parse::Parse for AtomField {
             } else if is_struct_attr(path) {
                 (i, AttrKind::Struct)
             } else {
-                return None
+                return None;
             })
         });
 
@@ -115,18 +118,17 @@ impl syn::parse::Parse for AtomField {
             panic!("more than 1 attribute specifying fields")
         }
 
-        let atom_attr = atom_attrs.next().map(|(idx, kind)| (attrs.swap_remove(idx), kind));
+        let atom_attr = atom_attrs
+            .next()
+            .map(|(idx, kind)| (attrs.swap_remove(idx), kind));
 
         Ok(match atom_attr {
-            Some((attr, AttrKind::Atom)) => {
-                Self::parse_from_syn(input, &attr)?
-            }
-            Some((attr, AttrKind::Struct)) => {
-                Self::Struct(parse_normal_field(input, attrs)?, StructFieldAttr::parse_from_syn(&attr)?)
-            }
-            None => {
-                Self::Struct(parse_normal_field(input, attrs)?, StructFieldAttr::Normal)
-            }
+            Some((attr, AttrKind::Atom)) => Self::parse_from_syn(input, &attr)?,
+            Some((attr, AttrKind::Struct)) => Self::Struct(
+                parse_normal_field(input, attrs)?,
+                StructFieldAttr::parse_from_syn(&attr)?,
+            ),
+            None => Self::Struct(parse_normal_field(input, attrs)?, StructFieldAttr::Normal),
         })
     }
 }
@@ -136,9 +138,15 @@ pub struct AtomFields {
 }
 
 impl AtomFields {
-    pub fn group_inline_definitions(fields: &[AtomField], mod_name: &syn::Ident, version: Option<&syn::LitInt>) -> Option<proc_macro2::TokenStream> {
+    pub fn group_inline_definitions(
+        fields: &[AtomField],
+        mod_name: &syn::Ident,
+        version: Option<&syn::LitInt>,
+    ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
-        let inline_definitions = fields.iter().filter_map(|field| field.as_inline_definition(version));
+        let inline_definitions = fields
+            .iter()
+            .filter_map(|field| field.as_inline_definition(version));
 
         if inline_definitions.clone().count() == 0 {
             return None;
@@ -161,25 +169,22 @@ impl syn::parse::Parse for AtomFields {
         let content = content.parse_terminated(AtomField::parse, syn::Token![,])?;
         let inner = content.into_iter().collect::<Vec<_>>();
 
-        Ok(Self {
-            inner,
-        })
+        Ok(Self { inner })
     }
 }
 
-
 impl AtomField {
-    pub fn parse_from_syn(input: syn::parse::ParseStream, atom_field_attr: &syn::Attribute) -> syn::parse::Result<Self> {
+    pub fn parse_from_syn(
+        input: syn::parse::ParseStream,
+        atom_field_attr: &syn::Attribute,
+    ) -> syn::parse::Result<Self> {
         let _: syn::Visibility = input.parse()?;
         let path = atom_field_attr.path();
         Ok(if path.is_ident("full_box") {
             let _: syn::Token![struct] = input.parse()?;
             let name = input.parse()?;
             let flags = input.parse::<FlagList>()?.flags;
-            Self::FullBox {
-                name,
-                flags,
-            }
+            Self::FullBox { name, flags }
         } else if path.is_ident("flags") {
             let field_name = input.parse()?;
             let _: syn::Token![:] = input.parse()?;
@@ -199,9 +204,7 @@ impl AtomField {
             let _: syn::Ident = input.parse()?;
 
             let versions = input.parse::<VersionList>()?.inner;
-            Self::Version {
-                versions,
-            }
+            Self::Version { versions }
         } else if path.is_ident("children") {
             let _: syn::Token![enum] = input.parse()?;
             let _: syn::Ident = input.parse()?;
@@ -209,10 +212,7 @@ impl AtomField {
             let size_ty = atom_field_attr.parse_args::<syn::Type>().ok();
 
             let children = input.parse::<ChildList>()?.inner;
-            Self::Children {
-                size_ty,
-                children,
-            }
+            Self::Children { size_ty, children }
         } else {
             unreachable!("unknown atom attr")
         })
@@ -225,10 +225,7 @@ impl AtomField {
 
         Some(match self {
             Self::Struct(f, attr) => return attr.as_field_decl(f),
-            Self::Children {
-                size_ty,
-                ..
-            } => {
+            Self::Children { size_ty, .. } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
                         pub children: ::#KRATE::children::SizedChildren<#size_ty, #mod_name Child>
@@ -239,20 +236,17 @@ impl AtomField {
                     }
                 }
             }
-            Self::FullBox {
-                name,
-                ..
-            } => {
+            Self::FullBox { name, .. } => {
                 quote! {
                     pub atom_flags: #mod_name #name
                 }
             }
             Self::Flags {
-                field_name,
-                name,
-                ..
+                field_name, name, ..
             } => {
-                let field_name = field_name.clone().unwrap_or(syn::Ident::new("flags", proc_macro2::Span::call_site()));
+                let field_name = field_name
+                    .clone()
+                    .unwrap_or(syn::Ident::new("flags", proc_macro2::Span::call_site()));
                 quote! {
                     pub #field_name: #mod_name #name
                 }
@@ -266,10 +260,7 @@ impl AtomField {
         let mod_name = atom_mod.map(|name| quote!(#name::));
         Some(match self {
             Self::Struct(f, attr) => return attr.as_helper_fn(f),
-            Self::Children {
-                size_ty,
-                ..
-            } => {
+            Self::Children { size_ty, .. } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
                         pub fn children<'a, R: ::#KRATE::reader::Reader>(&self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::DynamicArrayIter<'a, R, #size_ty, #mod_name Child, false> {
@@ -292,25 +283,26 @@ impl AtomField {
                     }
                 }
             }
-            Self::FullBox{ .. } | Self::Flags{ .. } => return None,
-            Self::Version{ .. } => unreachable!(),
+            Self::FullBox { .. } | Self::Flags { .. } => return None,
+            Self::Version { .. } => unreachable!(),
         })
     }
 
-    pub fn as_sync_parse(&self, atom_mod: &syn::Ident, version_mod: Option<&syn::Ident>) -> Option<proc_macro2::TokenStream> {
+    pub fn as_sync_parse(
+        &self,
+        atom_mod: &syn::Ident,
+        version_mod: Option<&syn::Ident>,
+    ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
 
         let mod_name = match version_mod {
             Some(v) => quote!(#atom_mod::#v),
-            None => quote!(#atom_mod)
+            None => quote!(#atom_mod),
         };
 
         Some(match self {
             Self::Struct(field, attr) => return attr.as_sync_parse(field),
-            Self::Children {
-                size_ty,
-                ..
-            } => {
+            Self::Children { size_ty, .. } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
                         let children = <::#KRATE::children::SizedChildren<#size_ty, #mod_name::Child>>::parse(reader, options)?;
@@ -321,10 +313,7 @@ impl AtomField {
                     }
                 }
             }
-            Self::FullBox {
-                name,
-                ..
-            } => {
+            Self::FullBox { name, .. } => {
                 quote! {
                     let atom_flags = {
                         let bytes = <[u8; 3]>::parse(reader, options)?;
@@ -346,7 +335,7 @@ impl AtomField {
                     };
                 }
             }
-            Self::Version{..} => unreachable!(),
+            Self::Version { .. } => unreachable!(),
         })
     }
 
@@ -354,52 +343,50 @@ impl AtomField {
         use quote::quote;
         Some(match self {
             Self::Struct(field, attr) => return attr.as_collection(field),
-            Self::Children {
-                ..
-            } => {
+            Self::Children { .. } => {
                 quote! {
                     children,
                 }
             }
-            Self::FullBox {
-                ..
-            } => {
+            Self::FullBox { .. } => {
                 quote! {
                     atom_flags,
                 }
             }
-            Self::Flags {
-                field_name,
-                ..
-            } => {
-                let field_name = field_name.clone().unwrap_or(syn::Ident::new("flags", proc_macro2::Span::call_site()));
+            Self::Flags { field_name, .. } => {
+                let field_name = field_name
+                    .clone()
+                    .unwrap_or(syn::Ident::new("flags", proc_macro2::Span::call_site()));
 
                 quote! {
                     #field_name,
                 }
             }
-            Self::Version{..} => return None,
+            Self::Version { .. } => return None,
         })
     }
 
-    pub fn as_inline_definition(&self, version: Option<&syn::LitInt>) -> Option<proc_macro2::TokenStream> {
+    pub fn as_inline_definition(
+        &self,
+        version: Option<&syn::LitInt>,
+    ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
         Some(match self {
             Self::Struct(_, _) => return None,
-            Self::Children {
-                children,
-                ..
-            } => {
-                let variants = children.iter().filter_map(|child| {
-                    if let Some(v) = version {
-                        if !child.version_num.is_empty() && !child.version_num.contains(v) {
-                            return None
+            Self::Children { children, .. } => {
+                let variants = children
+                    .iter()
+                    .filter_map(|child| {
+                        if let Some(v) = version {
+                            if !child.version_num.is_empty() && !child.version_num.contains(v) {
+                                return None;
+                            }
+                        } else if !child.version_num.is_empty() {
+                            panic!("child version but no version identifier");
                         }
-                    } else if !child.version_num.is_empty() {
-                        panic!("child version but no version identifier");
-                    }
-                    Some(&child.name)
-                }).collect::<Vec<_>>();
+                        Some(&child.name)
+                    })
+                    .collect::<Vec<_>>();
 
                 let krate = &KRATE;
                 quote! {
@@ -418,7 +405,7 @@ impl AtomField {
                                 .map(|size| size.try_into())
                                 .transpose().map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError))?
                                 .unwrap_or(reader.remaining_size());
-                            
+
                             let max_offset = reader.offset() + atom_size;
                             let mut r = ::#KRATE::reader::TrailingReader::new(&mut*reader, max_offset);
                             Ok(match atom.fcc {
@@ -561,10 +548,7 @@ impl AtomField {
                     }
                 }
             }
-            Self::FullBox {
-                name,
-                flags,
-            } => {
+            Self::FullBox { name, flags } => {
                 let can_elide_flags = FlagList::can_elide_flag_storage(&flags, version);
                 let flags_debug = FlagList::debug_impl(flags, name, version, can_elide_flags);
 
@@ -572,7 +556,8 @@ impl AtomField {
                 let flags_check = FlagList::flags_parse_check(flags, version);
                 //let flags_impl = FlagList::flags_trait_impl(name, flags, &repr, version);
                 let flags_impl = FlagList::flags_impl(name, flags, &repr, version);
-                let flag_storage_elision = can_elide_flags.then(|| quote! { #[cfg(feature = "store_unknown_fields")] });
+                let flag_storage_elision =
+                    can_elide_flags.then(|| quote! { #[cfg(feature = "store_unknown_fields")] });
 
                 let bitops_impl = FlagList::flags_bitops_impl(name);
                 let async_parse_repr = syn::parse_quote!([u8; 3]);
@@ -608,7 +593,7 @@ impl AtomField {
                         }
                     }
                 } else {
-                    quote!{
+                    quote! {
                         let [b0, b1, b2] = self.inner;
                         u32::from_be_bytes([b0, b1, b2, 0])
                     }
@@ -681,13 +666,15 @@ impl AtomField {
             } => {
                 let can_elide_flags = FlagList::can_elide_flag_storage(&flags, version);
                 let flags_debug = FlagList::debug_impl(flags, name, version, can_elide_flags);
-                let flags_trait_impl = FlagList::flags_trait_impl(name, flags, parse_repr, version, can_elide_flags);
+                let flags_trait_impl =
+                    FlagList::flags_trait_impl(name, flags, parse_repr, version, can_elide_flags);
 
                 let bitops_impl = FlagList::flags_bitops_impl(name);
                 let async_parse_impl = FlagList::async_parse_impl(name, parse_repr);
 
                 let flags_impl = FlagList::flags_impl(name, flags, parse_repr, version);
-                let flag_storage_elision = can_elide_flags.then(|| quote! { #[cfg(feature = "store_unknown_fields")] });
+                let flag_storage_elision =
+                    can_elide_flags.then(|| quote! { #[cfg(feature = "store_unknown_fields")] });
 
                 let to_bits_impl = if can_elide_flags {
                     let expected_vals = flags.iter().filter_map(|flag| {
@@ -759,7 +746,7 @@ impl AtomField {
                     }
                 }
             }
-            Self::Version{ .. } => return None,
+            Self::Version { .. } => return None,
         })
     }
 }
@@ -770,13 +757,13 @@ pub enum StructFieldAttr {
     //
     // #[dynamic_array(size_type = Size, zero_relative = false)]
     // some_field: Entry,
-    // 
+    //
     DynamicArray {
         zero_relative: syn::LitBool,
         length_ty: syn::Type,
     },
     // declaration of reserved field
-    //  
+    //
     // #[reserved]
     // reserved: [u8; 6],
     Reserved,
@@ -793,11 +780,11 @@ pub enum StructFieldAttr {
     // some_field: String,
     NullTerminatedString,
     // declaration of a trailing array
-    //  
+    //
     // #[trailing_array]
     // trailing: u32
     TrailingArray,
-    // definition of trailing payload at the end of the atom 
+    // definition of trailing payload at the end of the atom
     //
     // #[payload]
     // some_field: [u8],
@@ -821,10 +808,20 @@ impl StructFieldAttr {
             let mut zero_relative = None;
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("size_type") {
-                    size_ty = Some(meta.value().expect("no ty for size_type").parse::<syn::Type>().expect("could not parse type of size_type"));
+                    size_ty = Some(
+                        meta.value()
+                            .expect("no ty for size_type")
+                            .parse::<syn::Type>()
+                            .expect("could not parse type of size_type"),
+                    );
                     Ok(())
                 } else if meta.path.is_ident("zero_relative") {
-                    zero_relative = Some(meta.value().expect("no value for zero_relative").parse::<syn::LitBool>().expect("could not parse bool from zero_relative"));
+                    zero_relative = Some(
+                        meta.value()
+                            .expect("no value for zero_relative")
+                            .parse::<syn::LitBool>()
+                            .expect("could not parse bool from zero_relative"),
+                    );
                     Ok(())
                 } else {
                     Err(meta.error("unsupported"))
@@ -842,9 +839,7 @@ impl StructFieldAttr {
             Self::NullTerminatedString
         } else if path.is_ident("pascal_string") {
             let length_ty = attr.parse_args::<syn::Type>()?;
-            Self::PascalString {
-                length_ty,
-            }
+            Self::PascalString { length_ty }
         } else if path.is_ident("trailing_array") {
             Self::TrailingArray
         } else if path.is_ident("payload") {
@@ -910,11 +905,15 @@ impl StructFieldAttr {
         use quote::quote;
         Some(match self {
             Self::Reserved | Self::VersionIdentifier => return None,
-            Self::Normal | Self::DynamicArray { .. } | Self::TrailingArray | Self::Payload | Self::PascalString { .. } | Self::NullTerminatedString => {
-                quote! {
-                    #name,
-                }.into()
+            Self::Normal
+            | Self::DynamicArray { .. }
+            | Self::TrailingArray
+            | Self::Payload
+            | Self::PascalString { .. }
+            | Self::NullTerminatedString => quote! {
+                #name,
             }
+            .into(),
         })
     }
 
@@ -948,9 +947,7 @@ impl StructFieldAttr {
                     pub #name: ::#KRATE::payload::Payload
                 }
             }
-            Self::PascalString {
-                length_ty,
-            } => {
+            Self::PascalString { length_ty } => {
                 quote! {
                     pub #name: ::#KRATE::string::PascalString<#length_ty>
                 }
@@ -962,7 +959,7 @@ impl StructFieldAttr {
             }
         })
     }
-    
+
     pub fn as_helper_fn(&self, field: &syn::Field) -> Option<proc_macro2::TokenStream> {
         let name = &field.ident;
         let ty = &field.ty;
@@ -1007,7 +1004,13 @@ impl StructFieldAttr {
     }
 }
 
-pub fn format_parse_impl(name: &syn::Ident, sync_parsing: &[proc_macro2::TokenStream], field_collection: &[proc_macro2::TokenStream], generics: &syn::Generics, generic_collection: Option<&proc_macro2::TokenStream>) -> proc_macro2::TokenStream {
+pub fn format_parse_impl(
+    name: &syn::Ident,
+    sync_parsing: &[proc_macro2::TokenStream],
+    field_collection: &[proc_macro2::TokenStream],
+    generics: &syn::Generics,
+    generic_collection: Option<&proc_macro2::TokenStream>,
+) -> proc_macro2::TokenStream {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     quote::quote! {
         impl #impl_generics ::#KRATE::parse::Parse for #name #ty_generics #where_clause {
@@ -1022,29 +1025,37 @@ pub fn format_parse_impl(name: &syn::Ident, sync_parsing: &[proc_macro2::TokenSt
     }
 }
 
-pub fn format_async_statemachine(fields: &[AtomField], struct_name: &syn::Ident, mut generics: syn::Generics, atom_mod: Option<&syn::Ident>, generic_collection: Option<&proc_macro2::TokenStream>) -> proc_macro2::TokenStream {
+pub fn format_async_statemachine(
+    fields: &[AtomField],
+    struct_name: &syn::Ident,
+    mut generics: syn::Generics,
+    atom_mod: Option<&syn::Ident>,
+    generic_collection: Option<&proc_macro2::TokenStream>,
+) -> proc_macro2::TokenStream {
     use quote::quote;
     let mod_name = atom_mod.map(|name| quote!(#name::));
 
     let parse_name = quote::format_ident!("Async{}Parse", struct_name);
-    let typed_fields = fields.iter().enumerate().map(|(i, field)| {
-        match field {
-            AtomField::FullBox {name, ..} => {
+    let typed_fields = fields
+        .iter()
+        .enumerate()
+        .map(|(i, field)| match field {
+            AtomField::FullBox { name, .. } => {
                 let ty = quote!(#mod_name #name);
                 let name = syn::Ident::new("atom_flags", proc_macro2::Span::call_site());
                 (name, ty, true)
             }
             AtomField::Flags {
-                field_name,
-                name,
-                ..
+                field_name, name, ..
             } => {
                 let ty = quote!(#mod_name #name);
-                let name = field_name.clone().unwrap_or(syn::Ident::new("flags", proc_macro2::Span::call_site()));
+                let name = field_name
+                    .clone()
+                    .unwrap_or(syn::Ident::new("flags", proc_macro2::Span::call_site()));
                 (name, ty, true)
             }
-            AtomField::Version {..} => unreachable!(),
-            AtomField::Children { size_ty, ..} => {
+            AtomField::Version { .. } => unreachable!(),
+            AtomField::Children { size_ty, .. } => {
                 let name = syn::Ident::new("children", proc_macro2::Span::call_site());
 
                 let ty = if let Some(size_ty) = size_ty {
@@ -1054,51 +1065,55 @@ pub fn format_async_statemachine(fields: &[AtomField], struct_name: &syn::Ident,
                 };
                 (name, ty, true)
             }
-            AtomField::Struct(field, attr) => {
-                match attr {
-                    StructFieldAttr::Normal => {
-                        let name = field.ident.clone().unwrap();
-                        let ty = &field.ty;
-                        
-                        (name, quote!(#ty), true)
-                    }
-                    StructFieldAttr::VersionIdentifier => unreachable!(),
-                    StructFieldAttr::Payload => {
-                        let name = field.ident.clone().unwrap();
-                        (name, quote!(::#KRATE::payload::Payload), true)
-                    }
-                    StructFieldAttr::PascalString {
-                        length_ty
-                    } => {
-                        let name = field.ident.clone().unwrap();
-                        (name, quote!(::#KRATE::string::PascalString<#length_ty>), true)
-                    }
-                    StructFieldAttr::NullTerminatedString => {
-                        let name = field.ident.clone().unwrap();
-                        (name, quote!(::#KRATE::string::NullTerminatedString), true)
-                    }
-                    StructFieldAttr::Reserved => {
-                        let name = quote::format_ident!("__reserved_{i}");
-                        let ty = &field.ty;
-                        (name, quote!(#ty), false)
-                    }
-                    StructFieldAttr::DynamicArray {
-                        length_ty,
-                        zero_relative,
-                    } => {
-                        let ty = &field.ty;
-                        let name = field.ident.clone().unwrap();
-                        (name, quote!(::#KRATE::array::DynamicArray<#length_ty, #ty, #zero_relative>), true)
-                    }
-                    StructFieldAttr::TrailingArray => {
-                        let ty = &field.ty;
-                        let name = field.ident.clone().unwrap();
-                        (name, quote!(::#KRATE::trailing::Trailing<#ty>), true)
-                    }
+            AtomField::Struct(field, attr) => match attr {
+                StructFieldAttr::Normal => {
+                    let name = field.ident.clone().unwrap();
+                    let ty = &field.ty;
+
+                    (name, quote!(#ty), true)
                 }
-            }
-        }
-    }).collect::<Vec<_>>();
+                StructFieldAttr::VersionIdentifier => unreachable!(),
+                StructFieldAttr::Payload => {
+                    let name = field.ident.clone().unwrap();
+                    (name, quote!(::#KRATE::payload::Payload), true)
+                }
+                StructFieldAttr::PascalString { length_ty } => {
+                    let name = field.ident.clone().unwrap();
+                    (
+                        name,
+                        quote!(::#KRATE::string::PascalString<#length_ty>),
+                        true,
+                    )
+                }
+                StructFieldAttr::NullTerminatedString => {
+                    let name = field.ident.clone().unwrap();
+                    (name, quote!(::#KRATE::string::NullTerminatedString), true)
+                }
+                StructFieldAttr::Reserved => {
+                    let name = quote::format_ident!("__reserved_{i}");
+                    let ty = &field.ty;
+                    (name, quote!(#ty), false)
+                }
+                StructFieldAttr::DynamicArray {
+                    length_ty,
+                    zero_relative,
+                } => {
+                    let ty = &field.ty;
+                    let name = field.ident.clone().unwrap();
+                    (
+                        name,
+                        quote!(::#KRATE::array::DynamicArray<#length_ty, #ty, #zero_relative>),
+                        true,
+                    )
+                }
+                StructFieldAttr::TrailingArray => {
+                    let ty = &field.ty;
+                    let name = field.ident.clone().unwrap();
+                    (name, quote!(::#KRATE::trailing::Trailing<#ty>), true)
+                }
+            },
+        })
+        .collect::<Vec<_>>();
 
     let mut state_machine_variants = vec![];
     let mut state_machine_variant_parsing = vec![];
@@ -1119,7 +1134,6 @@ pub fn format_async_statemachine(fields: &[AtomField], struct_name: &syn::Ident,
             })
         });
 
-
         let in_progress_fut = {
             let (name, ty, _) = in_progress;
             quote! {
@@ -1134,12 +1148,15 @@ pub fn format_async_statemachine(fields: &[AtomField], struct_name: &syn::Ident,
             }
         };
 
-        let completed_names = completed.iter().filter_map(|(name, _, display)| {
-            if !display {
-                return None;
-            }
-            Some(name)
-        }).collect::<Vec<_>>();
+        let completed_names = completed
+            .iter()
+            .filter_map(|(name, _, display)| {
+                if !display {
+                    return None;
+                }
+                Some(name)
+            })
+            .collect::<Vec<_>>();
         let name = &in_progress.0;
 
         let borrow_reader = quote! {
@@ -1167,12 +1184,14 @@ pub fn format_async_statemachine(fields: &[AtomField], struct_name: &syn::Ident,
             let (next_name, next_ty, _) = &typed_fields[idx + 1];
             let next_state = quote::format_ident!("S{}", idx + 1);
 
-            let new_completed = typed_fields[..=idx].iter().filter_map(|(name, _, display)| {
-                if !display {
-                    return None;
-                }
-                Some(name)
-            });
+            let new_completed = typed_fields[..=idx]
+                .iter()
+                .filter_map(|(name, _, display)| {
+                    if !display {
+                        return None;
+                    }
+                    Some(name)
+                });
 
             quote! {
                 let #next_name = <#next_ty as ::#KRATE::parse::AsyncParse>::create_fut(reader, opts);
@@ -1237,31 +1256,45 @@ pub fn format_async_statemachine(fields: &[AtomField], struct_name: &syn::Ident,
     }
 
     let struct_generics = generics.clone();
-    let (struct_impl_generics, struct_ty_generics, struct_where_clause) = struct_generics.split_for_impl();
+    let (struct_impl_generics, struct_ty_generics, struct_where_clause) =
+        struct_generics.split_for_impl();
 
     generics.params.push(syn::parse_quote!('a));
-    generics.params.push(syn::parse_quote!(R: ::#KRATE::reader::PollReader + ::core::marker::Unpin));
+    generics
+        .params
+        .push(syn::parse_quote!(R: ::#KRATE::reader::PollReader + ::core::marker::Unpin));
 
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
 
-    let (start, nop_variant, nop_poll, nop_borrow) = if let Some((name, ty, _)) = typed_fields.get(0) {
-        (quote!{
-            #name: <#ty as ::#KRATE::parse::AsyncParse>::create_fut(reader, options)
-        }, None, None, None)
-    } else {
-        (quote! {
-            nop: (reader, options)
-        }, Some(quote!{
-            S0 { nop: (R, &'a ::#KRATE::parse_options::ParseOptions) },
-        }), Some(quote!{
-            Self::S0 { nop: (reader, opts) } => {
-                *self = Self::Done(reader, opts);
-                return ::core::task::Poll::Ready(Ok(#struct_name { }))
-            }
-        }), Some(quote! {
-            Self::S0 { nop: (reader, opts) } => (reader, opts),
-        }))
-    };
+    let (start, nop_variant, nop_poll, nop_borrow) =
+        if let Some((name, ty, _)) = typed_fields.get(0) {
+            (
+                quote! {
+                    #name: <#ty as ::#KRATE::parse::AsyncParse>::create_fut(reader, options)
+                },
+                None,
+                None,
+                None,
+            )
+        } else {
+            (
+                quote! {
+                    nop: (reader, options)
+                },
+                Some(quote! {
+                    S0 { nop: (R, &'a ::#KRATE::parse_options::ParseOptions) },
+                }),
+                Some(quote! {
+                    Self::S0 { nop: (reader, opts) } => {
+                        *self = Self::Done(reader, opts);
+                        return ::core::task::Poll::Ready(Ok(#struct_name { }))
+                    }
+                }),
+                Some(quote! {
+                    Self::S0 { nop: (reader, opts) } => (reader, opts),
+                }),
+            )
+        };
 
     quote! {
         pub enum #parse_name #generics {

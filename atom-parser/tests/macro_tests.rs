@@ -68,6 +68,4 @@ make_atom! {
 }
 
 #[test]
-fn test_compile() {
-
-}
+fn test_compile() {}

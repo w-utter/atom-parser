@@ -22,4 +22,3 @@ pub enum ParseError {
     #[error("reserved field had nonzero bits")]
     UsedReservedField,
 }
-

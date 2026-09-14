@@ -1,4 +1,4 @@
-use crate::{ParseOptions, impl_take_reader, TakeReader};
+use crate::{ParseOptions, TakeReader, impl_take_reader};
 
 pub enum AsyncIterState<'a, R, T> {
     Iterating(T),
@@ -6,8 +6,8 @@ pub enum AsyncIterState<'a, R, T> {
     Empty,
 }
 
-impl <'a, R, T: TakeReader<'a, R>> TakeReader<'a, R> for AsyncIterState<'a, R, T> {
-    impl_take_reader!{}
+impl<'a, R, T: TakeReader<'a, R>> TakeReader<'a, R> for AsyncIterState<'a, R, T> {
+    impl_take_reader! {}
     fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
         match self {
             Self::Iterating(t) => t.borrow_reader(),
@@ -16,4 +16,3 @@ impl <'a, R, T: TakeReader<'a, R>> TakeReader<'a, R> for AsyncIterState<'a, R, T
         }
     }
 }
-

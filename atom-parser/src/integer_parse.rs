@@ -1,13 +1,16 @@
-use crate::{ParseOptions, TakeReader, impl_take_reader, Parse, AsyncParse, Endianess, ParseError, PollReader, Reader};
+use crate::{
+    AsyncParse, Endianess, Parse, ParseError, ParseOptions, PollReader, Reader, TakeReader,
+    impl_take_reader,
+};
 
 pub enum IntegerParse<'a, R, T, const N: usize> {
     Waiting(R, &'a ParseOptions, [u8; N], core::marker::PhantomData<T>),
     Done(R, &'a ParseOptions),
-    Empty
+    Empty,
 }
 
-impl <'a, R, T, const N: usize> TakeReader<'a, R> for IntegerParse<'a, R, T, N> {
-    impl_take_reader!{}
+impl<'a, R, T, const N: usize> TakeReader<'a, R> for IntegerParse<'a, R, T, N> {
+    impl_take_reader! {}
 
     fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
         match self {
@@ -34,7 +37,7 @@ macro_rules! parse_integers {
                     })
                 }
             }
-            
+
             impl AsyncParse for $i {
                 type Fut<'a, R: PollReader + Unpin> = IntegerParse<'a, R, $i, { core::mem::size_of::<$i>() }>;
                 fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
@@ -73,7 +76,7 @@ macro_rules! parse_integers {
     }
 }
 
-parse_integers!{
+parse_integers! {
     u8, u16, u32, u64,
     i8, i16, i32, i64,
 }

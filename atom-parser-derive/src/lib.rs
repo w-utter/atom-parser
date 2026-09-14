@@ -2,7 +2,9 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 
 mod definition;
-use definition::{DefinitionKind, EnumDefinition, StructDefinition, AtomDefinition, DefinitionList};
+use definition::{
+    AtomDefinition, DefinitionKind, DefinitionList, EnumDefinition, StructDefinition,
+};
 mod field;
 use field::{AtomField, AtomFields, StructFieldAttr, format_async_statemachine, format_parse_impl};
 mod flags;

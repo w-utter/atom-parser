@@ -1,7 +1,7 @@
 use crate::{IoError, SwapOffsets};
-use core::task::{Poll, Context};
-use core::pin::Pin;
 use core::marker::PhantomPinned;
+use core::pin::Pin;
+use core::task::{Context, Poll};
 use pin_project::pin_project;
 
 /// the backing reader for an async reader
@@ -14,27 +14,17 @@ pub trait PollReader {
         buf: &mut [u8],
     ) -> Poll<Result<(), IoError>>;
 
-    fn poll_read_cstr(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<usize, IoError>>;
+    fn poll_read_cstr(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<usize, IoError>>;
 
-    fn seek_start(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        amt: usize,
-    ) -> Result<(), IoError>;
+    fn seek_start(self: Pin<&mut Self>, cx: &mut Context<'_>, amt: usize) -> Result<(), IoError>;
 
-    fn poll_seek_complete(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), IoError>>;
+    fn poll_seek_complete(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>>;
 
     fn offset(&self) -> usize;
     fn remaining_size(&self) -> usize;
 }
 
-impl <'a, R: ?Sized + Unpin + PollReader> PollReader for &'a mut R {
+impl<'a, R: ?Sized + Unpin + PollReader> PollReader for &'a mut R {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -92,8 +82,7 @@ pub trait AsyncReader: SwapOffsets + PollReader + Unpin {
     }
 }
 
-impl <R: PollReader + SwapOffsets + Unpin> AsyncReader for R {}
-
+impl<R: PollReader + SwapOffsets + Unpin> AsyncReader for R {}
 
 #[pin_project]
 pub struct AsyncRead<'a, R> {
@@ -103,7 +92,7 @@ pub struct AsyncRead<'a, R> {
     _pin: PhantomPinned,
 }
 
-impl <'a, R> AsyncRead<'a, R> {
+impl<'a, R> AsyncRead<'a, R> {
     pub fn read(reader: R, buf: &'a mut [u8]) -> Self {
         Self {
             reader,
@@ -120,7 +109,7 @@ pub struct AsyncReadCstr<R> {
     _pin: PhantomPinned,
 }
 
-impl <R: PollReader> AsyncReadCstr<R> {
+impl<R: PollReader> AsyncReadCstr<R> {
     pub fn read_cstr(reader: R) -> Self {
         Self {
             reader,
@@ -129,9 +118,9 @@ impl <R: PollReader> AsyncReadCstr<R> {
     }
 }
 
-unsafe impl <R: Unpin> pin_project::UnsafeUnpin for AsyncReadCstr<R> {}
+unsafe impl<R: Unpin> pin_project::UnsafeUnpin for AsyncReadCstr<R> {}
 
-impl <R: PollReader + Unpin> Future for AsyncReadCstr<R> {
+impl<R: PollReader + Unpin> Future for AsyncReadCstr<R> {
     type Output = Result<usize, IoError>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<usize, IoError>> {
         let me = self.project();
@@ -148,7 +137,7 @@ pub struct AsyncSeek<R> {
     _pin: PhantomPinned,
 }
 
-impl <R: PollReader> AsyncSeek<R> {
+impl<R: PollReader> AsyncSeek<R> {
     pub fn seek(reader: R, amt: usize) -> AsyncSeek<R> {
         Self {
             reader,
@@ -158,9 +147,9 @@ impl <R: PollReader> AsyncSeek<R> {
     }
 }
 
-unsafe impl <R: Unpin> pin_project::UnsafeUnpin for AsyncSeek<R> {}
+unsafe impl<R: Unpin> pin_project::UnsafeUnpin for AsyncSeek<R> {}
 
-impl <R: PollReader + Unpin> Future for AsyncSeek<R> {
+impl<R: PollReader + Unpin> Future for AsyncSeek<R> {
     type Output = Result<(), IoError>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
         let me = self.project();
@@ -172,12 +161,10 @@ impl <R: PollReader + Unpin> Future for AsyncSeek<R> {
                         *me.amt = None;
                         Pin::new(&mut *me.reader).poll_seek_complete(cx)
                     }
-                    Err(e) => Poll::Ready(Err(e))
+                    Err(e) => Poll::Ready(Err(e)),
                 }
             }
-            None => {
-                Pin::new(&mut *me.reader).poll_seek_complete(cx)
-            }
+            None => Pin::new(&mut *me.reader).poll_seek_complete(cx),
         }
     }
 }
