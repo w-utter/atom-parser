@@ -40,14 +40,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
     let defs = input.defs.into_iter().map(|def| {
         match def.kind {
-            DefinitionKind::Struct(mut item) => {
-                for param in &mut item.generics.params {
-                    if let syn::GenericParam::Type(type_param) = param {
-                        type_param.bounds.push(syn::parse_quote!(::#KRATE::parse::Parse));
-                        type_param.bounds.push(syn::parse_quote!(::core::marker::Unpin));
-                    }
-                }
-
+            DefinitionKind::Struct(item) => {
                 let atom_mod = item.module_name();
                 let StructDefinition {
                     attrs,
@@ -124,14 +117,6 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                                 }
                             }
                         });
-
-                        let mut generics = generics.clone();
-
-                        for param in &mut generics.params {
-                            if let syn::GenericParam::Type(ty) = param {
-                                ty.bounds.push(syn::parse_quote!(Unpin));
-                            }
-                        }
 
                         let versions = versioned.format_versioned_struct(&name, &attrs, &generics);
                         let enum_name = Versioned::format_enum_name_from_versioned_struct(&name);

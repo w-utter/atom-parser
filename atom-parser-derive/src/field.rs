@@ -1132,6 +1132,14 @@ pub fn format_parse_impl(
     generics: &syn::Generics,
     generic_collection: Option<&proc_macro2::TokenStream>,
 ) -> proc_macro2::TokenStream {
+    let mut generics = generics.clone();
+
+    for param in &mut generics.params {
+        if let syn::GenericParam::Type(ty) = param {
+            ty.bounds.push(syn::parse_quote!(::#KRATE::parse::Parse));
+        }
+    }
+
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     quote::quote! {
         impl #impl_generics ::#KRATE::parse::Parse for #name #ty_generics #where_clause {
@@ -1448,6 +1456,7 @@ pub fn format_async_statemachine(
     for param in &mut generics.params {
         if let syn::GenericParam::Type(ty) = param {
             ty.bounds.push(syn::parse_quote!(::core::marker::Unpin));
+            ty.bounds.push(syn::parse_quote!(::#KRATE::parse::AsyncParse));
         }
     }
 

@@ -1,10 +1,6 @@
 use crate::{AsyncReader, ParseError, ParseOptions, PollReader, Reader, TakeReader};
 
-// TODO: split async parse and parse
-// - e.g, the method from parse to creat ehe future from the impl in async parse is moved to
-// asyncparse, so that either can be implemented, and its not required for both to be implemented
-
-pub trait Parse: Sized + AsyncParse {
+pub trait Parse: Sized {
     fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError>;
 }
 
