@@ -21,6 +21,17 @@ make_atom! {
         reserved: [u8; 10],
         #[payload]
         payload: Vec<u8>,
+    }
+
+    struct B2 {
+        #[dynamic_array(size_type = u16, zero_relative = false)]
+        f: u64,
+        #[pascal_string(u16)]
+        pascal: String,
+        #[null_terminated_string]
+        null_terminated: String,
+        #[reserved]
+        reserved: [u8; 10],
         #[trailing_array]
         trailing: u32,
     }
@@ -64,6 +75,24 @@ make_atom! {
     struct H {
         #[children(u32)]
         enum Child {}
+    }
+}
+
+make_atom! {
+    struct I {
+        #[payload_length]
+        len: u32,
+        #[payload]
+        payload: Vec<u8>,
+    }
+}
+
+make_atom! {
+    struct J {
+        #[payload_length]
+        len: u32,
+        #[trailing_array]
+        payload: u32,
     }
 }
 

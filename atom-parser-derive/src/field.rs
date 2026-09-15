@@ -90,6 +90,7 @@ fn is_struct_attr(path: &syn::Path) -> bool {
         || path.is_ident("null_terminated_string")
         || path.is_ident("trailing_array")
         || path.is_ident("payload")
+        || path.is_ident("payload_length")
         || path.is_ident("version")
 }
 
@@ -159,6 +160,47 @@ impl AtomFields {
             }
         })
     }
+
+    pub fn payload_len(fields: &[AtomField]) -> Option<syn::Type> {
+        let mut tys = fields.iter().filter_map(|field| match &field {
+            AtomField::Struct(field, StructFieldAttr::PayloadLength) => Some(&field.ty),
+            _ => None,
+        });
+
+        if tys.clone().count() > 1 {
+            panic!("more than one payload length specified");
+        }
+
+        let ty = tys.next().cloned();
+        let mut trailing = fields.iter().enumerate().filter(|(_, field)| {
+            matches!(
+                field,
+                AtomField::Children { .. }
+                    | AtomField::Struct(
+                        _,
+                        StructFieldAttr::Payload | StructFieldAttr::TrailingArray
+                    )
+            )
+        });
+        let trailing_count = trailing.clone().count();
+
+        if trailing_count > 1 {
+            panic!("more than 1 trailing collection")
+        }
+
+        match (ty.as_ref(), trailing.next()) {
+            (Some(_), Some((_, AtomField::Children { .. }))) => panic!(
+                "length specified with children is unsupported (it is gotten from the atom size)"
+            ),
+            (_, Some((i, _))) if i != fields.len() - 1 => {
+                panic!("trailing field is not the last field declared")
+            }
+            (Some(_), None) => panic!("trailing length specified but no trailing field"),
+            _ => (),
+        }
+
+        ty
+    }
 }
 
 impl syn::parse::Parse for AtomFields {
@@ -218,13 +260,17 @@ impl AtomField {
         })
     }
 
-    pub fn as_field_decl(&self, atom_mod: Option<&syn::Ident>) -> Option<proc_macro2::TokenStream> {
+    pub fn as_field_decl(
+        &self,
+        atom_mod: Option<&syn::Ident>,
+        payload_len: Option<&syn::Type>,
+    ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
 
         let mod_name = atom_mod.map(|name| quote!(#name::));
 
         Some(match self {
-            Self::Struct(f, attr) => return attr.as_field_decl(f),
+            Self::Struct(f, attr) => return attr.as_field_decl(f, payload_len),
             Self::Children { size_ty, .. } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
@@ -292,6 +338,7 @@ impl AtomField {
         &self,
         atom_mod: &syn::Ident,
         version_mod: Option<&syn::Ident>,
+        payload_len: Option<&syn::Type>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
 
@@ -301,7 +348,7 @@ impl AtomField {
         };
 
         Some(match self {
-            Self::Struct(field, attr) => return attr.as_sync_parse(field),
+            Self::Struct(field, attr) => return attr.as_sync_parse(field, payload_len),
             Self::Children { size_ty, .. } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
@@ -808,6 +855,11 @@ pub enum StructFieldAttr {
     // #[trailing_array]
     // trailing: u32
     TrailingArray,
+    // declaration of the length of the trailing payload
+    // at the moment it only supports non-inclusive length
+    // e.g, if a headers length includes itself,
+    // it does not calculate the offset
+    PayloadLength,
     // definition of trailing payload at the end of the atom
     //
     // #[payload]
@@ -868,6 +920,8 @@ impl StructFieldAttr {
             Self::TrailingArray
         } else if path.is_ident("payload") {
             Self::Payload
+        } else if path.is_ident("payload_length") {
+            Self::PayloadLength
         } else if path.is_ident("version") {
             Self::VersionIdentifier
         } else {
@@ -875,7 +929,11 @@ impl StructFieldAttr {
         })
     }
 
-    pub fn as_sync_parse(&self, field: &syn::Field) -> Option<proc_macro2::TokenStream> {
+    pub fn as_sync_parse(
+        &self,
+        field: &syn::Field,
+        payload_len: Option<&syn::Type>,
+    ) -> Option<proc_macro2::TokenStream> {
         let name = &field.ident;
         let ty = &field.ty;
         use quote::quote;
@@ -896,12 +954,33 @@ impl StructFieldAttr {
                     let #name = <::#KRATE::array::DynamicArray::<#length_ty, #ty, #zero_relative> as ::#KRATE::parse::Parse>::parse(reader, options)?;
                 }
             }
-            Self::TrailingArray => quote! {
-                let #name = <::#KRATE::trailing::Trailing::<#ty> as ::#KRATE::parse::Parse>::parse(reader, options)?;
-            },
-            Self::Payload => quote! {
-                let #name = <::#KRATE::payload::Payload as ::#KRATE::parse::Parse>::parse(reader, options)?;
-            },
+            Self::TrailingArray => {
+                if let Some(_) = payload_len {
+                    quote! {
+                        let #name = ::#KRATE::trailing::Trailing::parse_from_len(_payload_len, reader, options)?;
+                    }
+                } else {
+                    quote! {
+                        let #name = ::#KRATE::trailing::Trailing::parse(reader, options)?;
+                    }
+                }
+            }
+            Self::PayloadLength => {
+                quote! {
+                    let _payload_len = <#ty as ::#KRATE::parse::Parse>::parse(reader, options)?;
+                }
+            }
+            Self::Payload => {
+                if let Some(_) = payload_len {
+                    quote! {
+                        let #name = ::#KRATE::payload::Payload::parse_from_len(_payload_len, reader, options)?;
+                    }
+                } else {
+                    quote! {
+                        let #name = ::#KRATE::payload::Payload::parse(reader, options)?;
+                    }
+                }
+            }
             Self::Normal => {
                 quote! {
                     let #name = <#ty as ::#KRATE::parse::Parse>::parse(reader, options)?;
@@ -928,7 +1007,7 @@ impl StructFieldAttr {
         let name = &field.ident;
         use quote::quote;
         Some(match self {
-            Self::Reserved | Self::VersionIdentifier => return None,
+            Self::Reserved | Self::VersionIdentifier | Self::PayloadLength => return None,
             Self::Normal
             | Self::DynamicArray { .. }
             | Self::TrailingArray
@@ -941,13 +1020,17 @@ impl StructFieldAttr {
         })
     }
 
-    pub fn as_field_decl(&self, field: &syn::Field) -> Option<proc_macro2::TokenStream> {
+    pub fn as_field_decl(
+        &self,
+        field: &syn::Field,
+        payload_len: Option<&syn::Type>,
+    ) -> Option<proc_macro2::TokenStream> {
         let name = &field.ident;
         let ty = &field.ty;
 
         use quote::quote;
         Some(match self {
-            Self::Reserved | Self::VersionIdentifier => return None,
+            Self::Reserved | Self::VersionIdentifier | Self::PayloadLength => return None,
             Self::Normal => {
                 quote! {
                     pub #name: #ty
@@ -962,13 +1045,25 @@ impl StructFieldAttr {
                 }
             }
             Self::TrailingArray => {
-                quote! {
-                    pub #name: ::#KRATE::trailing::Trailing<#ty>
+                if let Some(len_ty) = payload_len {
+                    quote! {
+                        pub #name: ::#KRATE::trailing::Trailing<#ty, #len_ty>
+                    }
+                } else {
+                    quote! {
+                        pub #name: ::#KRATE::trailing::Trailing<#ty>
+                    }
                 }
             }
             Self::Payload => {
-                quote! {
-                    pub #name: ::#KRATE::payload::Payload
+                if let Some(len_ty) = payload_len {
+                    quote! {
+                        pub #name: ::#KRATE::payload::Payload<#len_ty>
+                    }
+                } else {
+                    quote! {
+                        pub #name: ::#KRATE::payload::Payload
+                    }
                 }
             }
             Self::PascalString { length_ty } => {
@@ -991,16 +1086,18 @@ impl StructFieldAttr {
 
         use quote::quote;
         Some(match self {
-            Self::Normal | Self::Reserved | Self::VersionIdentifier => return None,
+            Self::Normal | Self::Reserved | Self::VersionIdentifier | Self::PayloadLength => {
+                return None;
+            }
             Self::TrailingArray => {
                 let async_name = quote::format_ident!("{name}_async");
 
                 quote! {
-                    pub fn #name<'a, R: ::#KRATE::reader::Reader>(&self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::trailing::TrailingIterator<'a, R, #ty> {
+                    pub fn #name<'a, R: ::#KRATE::reader::Reader>(&self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<::#KRATE::trailing::TrailingIterator<'a, R, #ty>, ::#KRATE::error::ParseError> {
                         ::#KRATE::trailing::TrailingIterator::from_trailing(&self.#name, reader, opts)
                     }
 
-                    pub fn #async_name<'a, R: ::#KRATE::reader::Reader + ::#KRATE::reader::SwapOffsets + ::#KRATE::reader::PollReader + ::core::marker::Unpin>(&self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::trailing::AsyncTrailingIterator<'a, R, #ty> {
+                    pub fn #async_name<'a, R: ::#KRATE::reader::Reader + ::#KRATE::reader::SwapOffsets + ::#KRATE::reader::PollReader + ::core::marker::Unpin>(&self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<::#KRATE::trailing::AsyncTrailingIterator<'a, R, #ty>, ::#KRATE::error::ParseError> {
                         ::#KRATE::trailing::AsyncTrailingIterator::from_trailing(&self.#name, reader, opts)
                     }
                 }
@@ -1055,7 +1152,16 @@ pub fn format_async_statemachine(
     mut generics: syn::Generics,
     atom_mod: Option<&syn::Ident>,
     generic_collection: Option<&proc_macro2::TokenStream>,
+    payload_len: Option<&syn::Type>,
 ) -> proc_macro2::TokenStream {
+    enum FieldKind {
+        PayloadLength,
+        Payload,
+        Trailing,
+        Reserved,
+        Regular,
+    }
+
     use quote::quote;
     let mod_name = atom_mod.map(|name| quote!(#name::));
 
@@ -1067,7 +1173,7 @@ pub fn format_async_statemachine(
             AtomField::FullBox { name, .. } => {
                 let ty = quote!(#mod_name #name);
                 let name = syn::Ident::new("atom_flags", proc_macro2::Span::call_site());
-                (name, ty, true)
+                (name, ty, FieldKind::Regular)
             }
             AtomField::Flags {
                 field_name, name, ..
@@ -1076,7 +1182,7 @@ pub fn format_async_statemachine(
                 let name = field_name
                     .clone()
                     .unwrap_or(syn::Ident::new("flags", proc_macro2::Span::call_site()));
-                (name, ty, true)
+                (name, ty, FieldKind::Regular)
             }
             AtomField::Version { .. } => unreachable!(),
             AtomField::Children { size_ty, .. } => {
@@ -1087,36 +1193,51 @@ pub fn format_async_statemachine(
                 } else {
                     quote!(::#KRATE::children::Children<#mod_name Child>)
                 };
-                (name, ty, true)
+                (name, ty, FieldKind::Regular)
             }
             AtomField::Struct(field, attr) => match attr {
                 StructFieldAttr::Normal => {
                     let name = field.ident.clone().unwrap();
                     let ty = &field.ty;
 
-                    (name, quote!(#ty), true)
+                    (name, quote!(#ty), FieldKind::Regular)
                 }
                 StructFieldAttr::VersionIdentifier => unreachable!(),
+                StructFieldAttr::PayloadLength => {
+                    let name = quote::format_ident!("_payload_len");
+                    let ty = &field.ty;
+
+                    (name, quote!(#ty), FieldKind::PayloadLength)
+                }
                 StructFieldAttr::Payload => {
                     let name = field.ident.clone().unwrap();
-                    (name, quote!(::#KRATE::payload::Payload), true)
+                    let display_ty = if let Some(len_ty) = payload_len {
+                        quote!(::#KRATE::payload::Payload<#len_ty>)
+                    } else {
+                        quote!(::#KRATE::payload::Payload)
+                    };
+                    (name, display_ty, FieldKind::Payload)
                 }
                 StructFieldAttr::PascalString { length_ty } => {
                     let name = field.ident.clone().unwrap();
                     (
                         name,
                         quote!(::#KRATE::string::PascalString<#length_ty>),
-                        true,
+                        FieldKind::Regular,
                     )
                 }
                 StructFieldAttr::NullTerminatedString => {
                     let name = field.ident.clone().unwrap();
-                    (name, quote!(::#KRATE::string::NullTerminatedString), true)
+                    (
+                        name,
+                        quote!(::#KRATE::string::NullTerminatedString),
+                        FieldKind::Regular,
+                    )
                 }
                 StructFieldAttr::Reserved => {
                     let name = quote::format_ident!("__reserved_{i}");
                     let ty = &field.ty;
-                    (name, quote!(#ty), false)
+                    (name, quote!(#ty), FieldKind::Reserved)
                 }
                 StructFieldAttr::DynamicArray {
                     length_ty,
@@ -1127,13 +1248,18 @@ pub fn format_async_statemachine(
                     (
                         name,
                         quote!(::#KRATE::array::DynamicArray<#length_ty, #ty, #zero_relative>),
-                        true,
+                        FieldKind::Regular,
                     )
                 }
                 StructFieldAttr::TrailingArray => {
                     let ty = &field.ty;
                     let name = field.ident.clone().unwrap();
-                    (name, quote!(::#KRATE::trailing::Trailing<#ty>), true)
+                    let display_ty = if let Some(len_ty) = payload_len {
+                        quote!(::#KRATE::trailing::Trailing<#ty, #len_ty>)
+                    } else {
+                        quote!(::#KRATE::trailing::Trailing<#ty>)
+                    };
+                    (name, display_ty, FieldKind::Trailing)
                 }
             },
         })
@@ -1148,8 +1274,8 @@ pub fn format_async_statemachine(
         let in_progress = &typed_fields[idx];
         let state = quote::format_ident!("S{}", idx);
 
-        let variant_fields = completed.iter().filter_map(|(name, ty, display)| {
-            if !display {
+        let variant_fields = completed.iter().filter_map(|(name, ty, kind)| {
+            if matches!(kind, FieldKind::Reserved) {
                 return None;
             }
 
@@ -1159,9 +1285,31 @@ pub fn format_async_statemachine(
         });
 
         let in_progress_fut = {
-            let (name, ty, _) = in_progress;
-            quote! {
-                #name: <#ty as ::#KRATE::parse::AsyncParse>::Fut<'a, R>,
+            let (name, ty, kind) = in_progress;
+            match kind {
+                FieldKind::Payload => {
+                    if let Some(len) = payload_len {
+                        quote!(#name: ::#KRATE::payload::PayloadParse<'a, R, #len>)
+                    } else {
+                        quote!(#name: ::#KRATE::payload::PayloadParse<'a, R>)
+                    }
+                }
+                FieldKind::Trailing => {
+                    let AtomField::Struct(field, _) = &fields[idx] else {
+                        unreachable!();
+                    };
+                    let trailing_ty = &field.ty;
+                    if let Some(len) = payload_len {
+                        quote!(#name: ::#KRATE::trailing::TrailingParse<'a, R, #trailing_ty, #len>)
+                    } else {
+                        quote!(#name: ::#KRATE::trailing::TrailingParse<'a, R, #trailing_ty>)
+                    }
+                }
+                _ => {
+                    quote! {
+                        #name: <#ty as ::#KRATE::parse::AsyncParse>::Fut<'a, R>,
+                    }
+                }
             }
         };
 
@@ -1174,8 +1322,8 @@ pub fn format_async_statemachine(
 
         let completed_names = completed
             .iter()
-            .filter_map(|(name, _, display)| {
-                if !display {
+            .filter_map(|(name, _, kind)| {
+                if matches!(kind, FieldKind::Reserved) {
                     return None;
                 }
                 Some(name)
@@ -1190,8 +1338,8 @@ pub fn format_async_statemachine(
         };
 
         let on_poll_ready = if idx == typed_fields.len() - 1 {
-            let finished = typed_fields.iter().filter_map(|(name, _, display)| {
-                if !display {
+            let finished = typed_fields.iter().filter_map(|(name, _, kind)| {
+                if matches!(kind, FieldKind::Reserved | FieldKind::PayloadLength) {
                     return None;
                 }
                 Some(name)
@@ -1205,20 +1353,38 @@ pub fn format_async_statemachine(
             }
         } else {
             // get next state
-            let (next_name, next_ty, _) = &typed_fields[idx + 1];
+            let (next_name, next_ty, next_kind) = &typed_fields[idx + 1];
             let next_state = quote::format_ident!("S{}", idx + 1);
 
-            let new_completed = typed_fields[..=idx]
-                .iter()
-                .filter_map(|(name, _, display)| {
-                    if !display {
-                        return None;
+            let new_completed = typed_fields[..=idx].iter().filter_map(|(name, _, kind)| {
+                if matches!(kind, FieldKind::Reserved) {
+                    return None;
+                }
+                Some(name)
+            });
+
+            let next_fut = match next_kind {
+                FieldKind::Trailing => {
+                    if let Some(_) = payload_len {
+                        quote!(let #next_name = ::#KRATE::trailing::Trailing::create_fut_from_len(_payload_len, reader, opts);)
+                    } else {
+                        quote!(let #next_name = ::#KRATE::trailing::Trailing::create_fut(reader, opts);)
                     }
-                    Some(name)
-                });
+                }
+                FieldKind::Payload => {
+                    if let Some(_) = payload_len {
+                        quote!(let #next_name = ::#KRATE::payload::Payload::create_fut_from_len(_payload_len, reader, opts);)
+                    } else {
+                        quote!(let #next_name = ::#KRATE::payload::Payload::create_fut(reader, opts);)
+                    }
+                }
+                _ => {
+                    quote!(let #next_name = <#next_ty as ::#KRATE::parse::AsyncParse>::create_fut(reader, opts);)
+                }
+            };
 
             quote! {
-                let #next_name = <#next_ty as ::#KRATE::parse::AsyncParse>::create_fut(reader, opts);
+                #next_fut
                 *self = Self::#next_state {
                     #(#new_completed,)*
                     #next_name
@@ -1226,7 +1392,7 @@ pub fn format_async_statemachine(
             }
         };
 
-        let check_reserved = if !in_progress.2 {
+        let check_reserved = if matches!(in_progress.2, FieldKind::Reserved) {
             let ty = &in_progress.1;
             Some(quote! {
                 if opts.error_on_used_reserved_fields && (#name != unsafe { ::core::mem::zeroed::<#ty>() }) {
@@ -1237,8 +1403,8 @@ pub fn format_async_statemachine(
             None
         };
 
-        let match_fields = completed.iter().filter_map(|(name, _, display)| {
-            if !display {
+        let match_fields = completed.iter().filter_map(|(name, _, kind)| {
+            if matches!(kind, FieldKind::Reserved) {
                 return None;
             }
 
@@ -1297,10 +1463,26 @@ pub fn format_async_statemachine(
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
 
     let (start, nop_variant, nop_poll, nop_borrow) =
-        if let Some((name, ty, _)) = typed_fields.get(0) {
+        if let Some((name, ty, kind)) = typed_fields.get(0) {
             (
-                quote! {
-                    #name: <#ty as ::#KRATE::parse::AsyncParse>::create_fut(reader, options)
+                match kind {
+                    FieldKind::Trailing => {
+                        if let Some(_) = payload_len {
+                            panic!("trailing with length as first field")
+                        } else {
+                            quote!(#name: ::#KRATE::trailing::Trailing::create_fut(reader, options))
+                        }
+                    }
+                    FieldKind::Payload => {
+                        if let Some(_) = payload_len {
+                            panic!("payload with length as first field")
+                        } else {
+                            quote!(#name: ::#KRATE::payload::Payload::create_fut(reader, options))
+                        }
+                    }
+                    _ => quote! {
+                        #name: <#ty as ::#KRATE::parse::AsyncParse>::create_fut(reader, options)
+                    },
                 },
                 None,
                 None,

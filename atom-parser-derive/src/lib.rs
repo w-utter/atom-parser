@@ -61,10 +61,12 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
                         let version_specific = versioned.versions.iter().map(|(v, fields)| {
+                            let payload_len = AtomFields::payload_len(fields);
+
                             let version_mod = Versioned::version_mod_from_lit(v);
 
                             let version_specific = fields.iter().filter_map(|field| field.as_inline_definition(Some(v)));
-                            let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, Some(&version_mod))).collect::<Vec<_>>();
+                            let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, Some(&version_mod), payload_len.as_ref())).collect::<Vec<_>>();
                             let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
                             let helper_fns = fields.iter().filter_map(|f| f.as_helper_fn(None)).collect::<Vec<_>>();
 
@@ -99,8 +101,8 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                             };
 
                             let parse_impl = format_parse_impl(&name, &sync_parsing, &field_collection, &generics, generic_collection.as_ref());
-                            let async_parse_impl = format_async_statemachine(fields, &name, generics.clone(), None, generic_collection.as_ref());
-                            let fields = fields.iter().filter_map(|field| field.as_field_decl(None));
+                            let async_parse_impl = format_async_statemachine(fields, &name, generics.clone(), None, generic_collection.as_ref(), payload_len.as_ref());
+                            let fields = fields.iter().filter_map(|field| field.as_field_decl(None, payload_len.as_ref()));
 
                             quote! {
                                 pub mod #version_mod {
@@ -160,20 +162,21 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         }
                     }
                     Ok(Err(fields)) => {
+                        let payload_len = AtomFields::payload_len(&fields);
                         let attrs = attrs.iter();
                         // since some fields are omitted
                         // (e.g reserved/padding)
-                        let atom_fields = fields.iter().filter_map(|field| field.as_field_decl(Some(&atom_mod)));
+                        let atom_fields = fields.iter().filter_map(|field| field.as_field_decl(Some(&atom_mod), payload_len.as_ref()));
 
                         let mod_specific = AtomFields::group_inline_definitions(&fields, &atom_mod, None);
 
-                        let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, None)).collect::<Vec<_>>();
+                        let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, None, payload_len.as_ref())).collect::<Vec<_>>();
                         let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
 
                         let helper_fns = fields.iter().filter_map(|f| f.as_helper_fn(Some(&atom_mod))).collect::<Vec<_>>();
 
                         let parse_impl = format_parse_impl(&name, &sync_parsing, &field_collection, &generics, None);
-                        let async_parse_impl = format_async_statemachine(&fields, &name, generics.clone(), Some(&atom_mod), None);
+                        let async_parse_impl = format_async_statemachine(&fields, &name, generics.clone(), Some(&atom_mod), None, payload_len.as_ref());
 
                         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
@@ -213,18 +216,19 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                 match try_expand_into_versioned_fields(fields, def.version) {
                     Ok(Ok(versioned)) => {
                         let version_specific = versioned.versions.iter().map(|(v, fields)| {
+                            let payload_len = AtomFields::payload_len(&fields);
                             let version_mod = Versioned::version_mod_from_lit(v);
 
                             let version_specific = fields.iter().filter_map(|field| field.as_inline_definition(Some(v)));
-                            let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, Some(&version_mod))).collect::<Vec<_>>();
+                            let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, Some(&version_mod), payload_len.as_ref())).collect::<Vec<_>>();
                             let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
                             let helper_fns = fields.iter().filter_map(|f| f.as_helper_fn(None)).collect::<Vec<_>>();
 
                             let name = Versioned::versioned_struct_from_lit(&name, v);
 
                             let parse_impl = format_parse_impl(&name, &sync_parsing, &field_collection, &Default::default(), None);
-                            let async_parse_impl = format_async_statemachine(fields, &name, Default::default(), None, None);
-                            let fields = fields.iter().filter_map(|field| field.as_field_decl(None));
+                            let async_parse_impl = format_async_statemachine(fields, &name, Default::default(), None, None, payload_len.as_ref());
+                            let fields = fields.iter().filter_map(|field| field.as_field_decl(None, payload_len.as_ref()));
 
                             quote! {
                                 pub mod #version_mod {
@@ -280,20 +284,22 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         }
                     }
                     Ok(Err(fields)) => {
+                        let payload_len = AtomFields::payload_len(&fields);
+
                         let attrs = attrs.iter();
                         // since some fields are omitted
                         // (e.g reserved/padding)
-                        let atom_fields = fields.iter().filter_map(|field| field.as_field_decl(Some(&atom_mod)));
+                        let atom_fields = fields.iter().filter_map(|field| field.as_field_decl(Some(&atom_mod), payload_len.as_ref()));
 
                         let mod_specific = AtomFields::group_inline_definitions(&fields, &atom_mod, None);
 
-                        let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, None)).collect::<Vec<_>>();
+                        let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&atom_mod, None, payload_len.as_ref())).collect::<Vec<_>>();
                         let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
 
                         let helper_fns = fields.iter().filter_map(|f| f.as_helper_fn(Some(&atom_mod))).collect::<Vec<_>>();
 
                         let parse_impl = format_parse_impl(&name, &sync_parsing, &field_collection, &Default::default(), None);
-                        let async_parse_impl = format_async_statemachine(&fields, &name, Default::default(), Some(&atom_mod), None);
+                        let async_parse_impl = format_async_statemachine(&fields, &name, Default::default(), Some(&atom_mod), None, payload_len.as_ref());
 
                         quote! {
                             #(#attrs)*
