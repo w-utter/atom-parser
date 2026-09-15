@@ -369,15 +369,15 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                         }
                     }
 
-                    pub enum #async_parse_name<'a, R: PollReader + Unpin> {
+                    pub enum #async_parse_name<'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin> {
                         Repr(<#repr as ::#KRATE::parse::AsyncParse>::Fut<'a, R>),
-                        Done(R, &'a ParseOptions),
+                        Done(R, &'a ::#KRATE::parse_options::ParseOptions),
                         Empty,
                     }
 
-                    impl AsyncParse for #name {
+                    impl ::#KRATE::parse::AsyncParse for #name {
                         type Fut<'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin> = #async_parse_name<'a, R>;
-                        fn create_fut<'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin>(reader: R, options: &'a ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'a, R> {
+                        fn create_fut<'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin>(reader: R, options: &'a ::#KRATE::parse_options::ParseOptions) -> <Self as ::#KRATE::parse::AsyncParse>::Fut<'a, R> {
                            #async_parse_name::Repr(<#repr as ::#KRATE::parse::AsyncParse>::create_fut(reader, options))
                         }
                     }
