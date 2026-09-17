@@ -1,19 +1,19 @@
 use crate::{
     AsyncParse, AsyncReadCstr, AsyncSeek, Extent, Parse, ParseError, ParseOptions, PollReader,
-    Reader, TakeReader, TryFromIntError, impl_take_reader,
+    Reader, TakeReader, TryFromIntError, impl_take_reader, Offset,
 };
 
 mod pascal {
     use super::*;
 
     #[derive(Debug)]
-    pub struct PascalString<S> {
+    pub struct PascalString<O, S> {
         len: S,
-        offset: usize,
+        offset: O,
     }
 
-    impl<S: Copy> PascalString<S> {
-        pub fn extent(&self) -> Extent<usize, S> {
+    impl<O: Offset, S: Copy> PascalString<O, S> {
+        pub fn extent(&self) -> Extent<O, S> {
             let Self { len, offset } = self;
 
             Extent {
@@ -23,38 +23,36 @@ mod pascal {
         }
     }
 
-    impl<S: Parse + TryInto<usize> + Copy + Unpin> Parse for PascalString<S> {
-        fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+    impl<O: Offset, S: Parse<O> + TryInto<O> + Copy + Unpin> Parse<O> for PascalString<O, S> {
+        fn parse<T: Reader<O>>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
             let len = S::parse(reader, options)?;
             let offset = reader.offset();
-            let length: usize = len.try_into().map_err(|_| TryFromIntError)?;
+            let length: O = len.try_into().map_err(|_| TryFromIntError)?;
 
             reader.seek(length)?;
             Ok(Self { len, offset })
         }
     }
 
-    pub enum PascalStringParse<'a, R: PollReader + Unpin, S: AsyncParse + TryInto<usize> + Unpin>
+    pub enum PascalStringParse<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S: AsyncParse<O> + TryInto<O> + Unpin>
     where
-        <S as AsyncParse>::Fut<'a, R>: Unpin,
+        <S as AsyncParse<O>>::Fut<'a, R>: Unpin,
     {
-        Waiting(<S as AsyncParse>::Fut<'a, R>),
+        Waiting(<S as AsyncParse<O>>::Fut<'a, R>),
         Seeking {
-            offset: usize,
+            offset: O,
             len: S,
-            fut: AsyncSeek<R>,
+            fut: AsyncSeek<O, R>,
             opts: &'a ParseOptions,
         },
         Done(R, &'a ParseOptions),
         Empty,
     }
 
-    impl<'a, R: PollReader + Unpin, S: AsyncParse + TryInto<usize> + Unpin + Copy> Future
-        for PascalStringParse<'a, R, S>
-    where
-        <S as AsyncParse>::Fut<'a, R>: Unpin,
+    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S: AsyncParse<O> + TryInto<O> + Unpin + Copy> Future
+        for PascalStringParse<'a, O, R, S>
     {
-        type Output = Result<PascalString<S>, ParseError>;
+        type Output = Result<PascalString<O, S>, ParseError>;
         fn poll(
             mut self: core::pin::Pin<&mut Self>,
             cx: &mut core::task::Context<'_>,
@@ -119,10 +117,8 @@ mod pascal {
         }
     }
 
-    impl<'a, R: PollReader + Unpin, S: AsyncParse + TryInto<usize> + Unpin> TakeReader<'a, R>
-        for PascalStringParse<'a, R, S>
-    where
-        <S as AsyncParse>::Fut<'a, R>: Unpin,
+    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S: AsyncParse<O> + TryInto<O> + Unpin> TakeReader<'a, R>
+        for PascalStringParse<'a, O, R, S>
     {
         impl_take_reader! {}
         fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
@@ -135,9 +131,9 @@ mod pascal {
         }
     }
 
-    impl<S: AsyncParse + TryInto<usize> + Unpin + Copy> AsyncParse for PascalString<S> {
-        type Fut<'a, R: PollReader + Unpin> = PascalStringParse<'a, R, S>;
-        fn create_fut<'a, R: PollReader + Unpin>(
+    impl<O: Offset + Unpin, S: AsyncParse<O> + TryInto<O> + Unpin + Copy> AsyncParse<O> for PascalString<O, S> {
+        type Fut<'a, R: PollReader<O> + Unpin> = PascalStringParse<'a, O, R, S>;
+        fn create_fut<'a, R: PollReader<O> + Unpin>(
             reader: R,
             options: &'a ParseOptions,
         ) -> Self::Fut<'a, R> {
@@ -150,13 +146,13 @@ pub use pascal::*;
 mod null_terminated {
     use super::*;
     #[derive(Debug)]
-    pub struct NullTerminatedString {
-        len: usize,
-        offset: usize,
+    pub struct NullTerminatedString<O> {
+        len: O,
+        offset: O,
     }
 
-    impl NullTerminatedString {
-        pub fn extent(&self) -> Extent<usize, usize> {
+    impl <O: Offset> NullTerminatedString<O> {
+        pub fn extent(&self) -> Extent<O, O> {
             let Self { len, offset } = self;
 
             Extent {
@@ -166,8 +162,8 @@ mod null_terminated {
         }
     }
 
-    impl Parse for NullTerminatedString {
-        fn parse<T: Reader>(reader: &mut T, _: &ParseOptions) -> Result<Self, ParseError> {
+    impl <O: Offset> Parse<O> for NullTerminatedString<O> {
+        fn parse<T: Reader<O>>(reader: &mut T, _: &ParseOptions) -> Result<Self, ParseError> {
             let offset = reader.offset();
             let len = reader.read_cstr()?;
 
@@ -175,10 +171,10 @@ mod null_terminated {
         }
     }
 
-    pub struct NullTerminatedStringParse<'a, R>(usize, AsyncReadCstr<R>, &'a ParseOptions);
+    pub struct NullTerminatedStringParse<'a, O, R>(O, AsyncReadCstr<O, R>, &'a ParseOptions);
 
-    impl<'a, R: PollReader + Unpin> Future for NullTerminatedStringParse<'a, R> {
-        type Output = Result<NullTerminatedString, ParseError>;
+    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for NullTerminatedStringParse<'a, O, R> {
+        type Output = Result<NullTerminatedString<O>, ParseError>;
         fn poll(
             mut self: core::pin::Pin<&mut Self>,
             cx: &mut core::task::Context<'_>,
@@ -193,7 +189,7 @@ mod null_terminated {
         }
     }
 
-    impl<'a, R: PollReader + Unpin> TakeReader<'a, R> for NullTerminatedStringParse<'a, R> {
+    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> TakeReader<'a, R> for NullTerminatedStringParse<'a, O, R> {
         fn take_reader(self) -> (R, &'a ParseOptions) {
             (self.1.reader, self.2)
         }
@@ -202,9 +198,9 @@ mod null_terminated {
         }
     }
 
-    impl AsyncParse for NullTerminatedString {
-        type Fut<'a, R: PollReader + Unpin> = NullTerminatedStringParse<'a, R>;
-        fn create_fut<'a, R: PollReader + Unpin>(
+    impl <O: Offset + Unpin> AsyncParse<O> for NullTerminatedString<O> {
+        type Fut<'a, R: PollReader<O> + Unpin> = NullTerminatedStringParse<'a, O, R>;
+        fn create_fut<'a, R: PollReader<O> + Unpin>(
             reader: R,
             options: &'a ParseOptions,
         ) -> Self::Fut<'a, R> {

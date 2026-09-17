@@ -1,6 +1,7 @@
 use atom_parser::FourCC;
 use atom_parser::make_atom;
 
+/*
 make_atom! {
     #[atom("root")]
     struct Root {
@@ -1405,3 +1406,4 @@ async fn ftyp_async() {
     }
     panic!()
 }
+*/

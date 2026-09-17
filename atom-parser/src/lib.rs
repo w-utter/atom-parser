@@ -20,6 +20,7 @@ pub mod reader;
 pub use reader::{
     AsyncReadCstr, AsyncReader, AsyncSeek, BacktrackReader, PollReader, Reader, SwapOffsets,
     TakeReader, TrailingReader,
+    Offset,
 };
 //#[cfg(feature = "provided_readers")]
 pub use reader::InMemoryReader;

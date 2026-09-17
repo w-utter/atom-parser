@@ -1,15 +1,15 @@
 use crate::{
-    AsyncParse, Endianess, Parse, ParseError, ParseOptions, PollReader, Reader, TakeReader,
+    AsyncParse, Endianess, Parse, ParseError, ParseOptions, PollReader, Reader, TakeReader, Offset,
     impl_take_reader,
 };
 
-pub enum IntegerParse<'a, R, T, const N: usize> {
-    Waiting(R, &'a ParseOptions, [u8; N], core::marker::PhantomData<T>),
+pub enum IntegerParse<'a, O, R, T, const N: usize> {
+    Waiting(R, &'a ParseOptions, [u8; N], core::marker::PhantomData<(O, T)>),
     Done(R, &'a ParseOptions),
     Empty,
 }
 
-impl<'a, R, T, const N: usize> TakeReader<'a, R> for IntegerParse<'a, R, T, N> {
+impl<'a, O, R, T, const N: usize> TakeReader<'a, R> for IntegerParse<'a, O, R, T, N> {
     impl_take_reader! {}
 
     fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
@@ -24,8 +24,8 @@ impl<'a, R, T, const N: usize> TakeReader<'a, R> for IntegerParse<'a, R, T, N> {
 macro_rules! parse_integers {
     ($($i:ty),*,) => {
         $(
-            impl Parse for $i {
-                fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+            impl <O: Offset> Parse<O> for $i {
+                fn parse<T: Reader<O>>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
                     let mut buf = [0; core::mem::size_of::<$i>()];
                     reader.read(&mut buf)?;
 
@@ -38,14 +38,14 @@ macro_rules! parse_integers {
                 }
             }
 
-            impl AsyncParse for $i {
-                type Fut<'a, R: PollReader + Unpin> = IntegerParse<'a, R, $i, { core::mem::size_of::<$i>() }>;
-                fn create_fut<'a, R: PollReader + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+            impl <O: Offset + Unpin> AsyncParse<O> for $i {
+                type Fut<'a, R: PollReader<O> + Unpin> = IntegerParse<'a, O, R, $i, { core::mem::size_of::<$i>() }>;
+                fn create_fut<'a, R: PollReader<O> + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
                     IntegerParse::Waiting(reader, options, [0; _], core::marker::PhantomData)
                 }
             }
 
-            impl <'a, R: PollReader + Unpin> Future for IntegerParse<'a, R, $i, { core::mem::size_of::<$i>() }> {
+            impl <'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for IntegerParse<'a, O, R, $i, { core::mem::size_of::<$i>() }> {
                 type Output = Result<$i, ParseError>;
                 fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
                     let this = core::mem::replace(&mut *self, IntegerParse::Empty);

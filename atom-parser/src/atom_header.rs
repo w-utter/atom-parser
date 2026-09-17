@@ -1,6 +1,6 @@
 use crate::{
     AsyncParse, AtomSize, AtomSizeParse, FourCC, Parse, ParseError, ParseOptions, PollReader,
-    Reader, TakeReader, impl_take_reader,
+    Reader, TakeReader, impl_take_reader, Offset
 };
 
 #[derive(Debug)]
@@ -9,8 +9,8 @@ pub struct AtomHeader {
     pub fcc: FourCC,
 }
 
-impl Parse for AtomHeader {
-    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+impl <O: Offset> Parse<O> for AtomHeader {
+    fn parse<T: Reader<O>>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
         let size = u32::parse(reader, options)?;
         let fcc = FourCC::parse(reader, options)?;
         let size = AtomSize::parse(size, reader, options)?;
@@ -18,22 +18,22 @@ impl Parse for AtomHeader {
     }
 }
 
-pub enum AtomHeaderParse<'a, R: PollReader + Unpin> {
-    Waiting(<u32 as AsyncParse>::Fut<'a, R>),
+pub enum AtomHeaderParse<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> {
+    Waiting(<u32 as AsyncParse<O>>::Fut<'a, R>),
     Fourcc {
         size: u32,
-        fourcc: <FourCC as AsyncParse>::Fut<'a, R>,
+        fourcc: <FourCC as AsyncParse<O>>::Fut<'a, R>,
     },
     AtomSize {
         fourcc: FourCC,
         // the u32 size from before is moved here
-        size: AtomSizeParse<'a, R>,
+        size: AtomSizeParse<'a, O, R>,
     },
     Done(R, &'a ParseOptions),
     Empty,
 }
 
-impl<'a, R: PollReader + Unpin> Future for AtomHeaderParse<'a, R> {
+impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for AtomHeaderParse<'a, O, R> {
     type Output = Result<AtomHeader, ParseError>;
     fn poll(
         mut self: core::pin::Pin<&mut Self>,
@@ -103,7 +103,7 @@ impl<'a, R: PollReader + Unpin> Future for AtomHeaderParse<'a, R> {
     }
 }
 
-impl<'a, R: PollReader + Unpin> TakeReader<'a, R> for AtomHeaderParse<'a, R> {
+impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> TakeReader<'a, R> for AtomHeaderParse<'a, O, R> {
     impl_take_reader! {}
 
     fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
@@ -117,9 +117,9 @@ impl<'a, R: PollReader + Unpin> TakeReader<'a, R> for AtomHeaderParse<'a, R> {
     }
 }
 
-impl AsyncParse for AtomHeader {
-    type Fut<'a, R: PollReader + Unpin> = AtomHeaderParse<'a, R>;
-    fn create_fut<'a, R: PollReader + Unpin>(
+impl <O: Offset + Unpin> AsyncParse<O> for AtomHeader {
+    type Fut<'a, R: PollReader<O> + Unpin> = AtomHeaderParse<'a, O, R>;
+    fn create_fut<'a, R: PollReader<O> + Unpin>(
         reader: R,
         options: &'a ParseOptions,
     ) -> Self::Fut<'a, R> {
