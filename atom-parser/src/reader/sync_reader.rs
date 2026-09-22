@@ -1,4 +1,4 @@
-use crate::{IoError, SwapOffsets, Offset};
+use crate::{IoError, Offset, SwapOffsets};
 
 pub trait Reader<O: Offset>: SwapOffsets<O> {
     fn remaining_size(&self) -> O;

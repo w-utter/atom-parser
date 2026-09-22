@@ -1,8 +1,8 @@
 use atom_parser::FourCC;
 use atom_parser::make_atom;
 
-/*
 make_atom! {
+    #[derive(Debug)]
     #[atom("root")]
     struct Root {
         #[children]
@@ -12,6 +12,7 @@ make_atom! {
         }
     }
 
+    #[derive(Debug)]
     #[atom("ftyp")]
     struct FileType {
         major_brand: FourCC,
@@ -20,6 +21,7 @@ make_atom! {
         compatible_brands: FourCC,
     }
 
+    #[derive(Debug)]
     #[atom("moov")]
     struct Movie {
         #[children]
@@ -37,15 +39,18 @@ make_atom! {
 
 // empty atoms
 make_atom! {
+    #[derive(Debug)]
     #[atom("wide")]
     struct Wide {}
 
+    #[derive(Debug)]
     #[atom("free")]
     struct Free {
         #[payload]
         free_space: Vec<u8>,
     }
 
+    #[derive(Debug)]
     #[atom("skip")]
     struct Skip {
         #[payload]
@@ -55,6 +60,7 @@ make_atom! {
 
 // this can kinda just be anywhere and contain anything
 make_atom! {
+    #[derive(Debug)]
     #[atom("udta")]
     struct Userdata {
 
@@ -63,6 +69,7 @@ make_atom! {
 
 // compressed movie data
 make_atom! {
+    #[derive(Debug)]
     #[atom("cmov")]
     struct CompressedMovie {
         #[children]
@@ -72,11 +79,13 @@ make_atom! {
         }
     }
 
+    #[derive(Debug)]
     #[atom("dcom")]
     struct DataCompression {
         compression_algorithm: u32,
     }
 
+    #[derive(Debug)]
     #[atom("cmvd")]
     struct CompressedMovieData {
         #[payload]
@@ -86,12 +95,14 @@ make_atom! {
 
 // reference movies
 make_atom! {
+    #[derive(Debug)]
     #[atom("rmra")]
     struct ReferenceMovie {
         #[trailing_array]
         reference_movie_descriptors: ReferenceMovieDescriptor,
     }
 
+    #[derive(Debug)]
     #[atom("rmda")]
     struct ReferenceMovieDescriptor {
         #[children]
@@ -104,6 +115,7 @@ make_atom! {
         }
     }
 
+    #[derive(Debug)]
     #[atom("rdrf")]
     struct DataReference2 {
         #[flags(u32)]
@@ -113,6 +125,7 @@ make_atom! {
         data_reference: dref::v0::Child,
     }
 
+    #[derive(Debug)]
     #[atom("rmdr")]
     struct DataRate {
         #[flags(u32)]
@@ -122,6 +135,7 @@ make_atom! {
         data_rate: u32,
     }
 
+    #[derive(Debug)]
     #[atom("rmcs")]
     struct CPUSpeed {
         #[flags(u32)]
@@ -131,6 +145,7 @@ make_atom! {
         cpu_speed: u32,
     }
 
+    #[derive(Debug)]
     #[atom("rmvc")]
     struct VersionCheck {
         #[flags(u32)]
@@ -143,6 +158,7 @@ make_atom! {
         check_type: u16,
     }
 
+    #[derive(Debug)]
     #[atom("rmcd")]
     struct ComponentDetect {
         #[flags(u32)]
@@ -153,6 +169,7 @@ make_atom! {
         minimum_version: u32,
     }
 
+    #[derive(Debug)]
     struct ComponentDescription {
         component_type: FourCC,
         component_subtype: FourCC,
@@ -161,6 +178,7 @@ make_atom! {
         component_flags_mask: u32,
     }
 
+    #[derive(Debug)]
     #[atom("rmqu")]
     struct Quality {
         quality: u32,
@@ -169,6 +187,7 @@ make_atom! {
 
 // stuff in movie
 make_atom! {
+    #[derive(Debug)]
     #[version(0)]
     #[atom("mvhd")]
     struct MovieHeader {
@@ -194,6 +213,7 @@ make_atom! {
         next_track_id: u32,
     }
 
+    #[derive(Debug)]
     #[atom("ctab")]
     struct ColorTable {
         seed: u32,
@@ -206,6 +226,7 @@ make_atom! {
         color_table: Color,
     }
 
+    #[derive(Debug)]
     struct Color {
         #[reserved]
         reserved: u16,
@@ -214,6 +235,7 @@ make_atom! {
         blue: u16,
     }
 
+    #[derive(Debug)]
     #[atom("trak")]
     struct Track {
         #[children]
@@ -234,6 +256,7 @@ make_atom! {
 // clipping region
 // can be used in movies/tracks
 make_atom! {
+    #[derive(Debug)]
     #[atom("clip")]
     struct Clipping {
         #[children]
@@ -242,6 +265,7 @@ make_atom! {
         }
     }
 
+    #[derive(Debug)]
     #[atom("crgn")]
     struct ClippingRegion {
         region_size: u16,
@@ -253,6 +277,7 @@ make_atom! {
 
 // track specific
 make_atom! {
+    #[derive(Debug)]
     #[version(0)]
     #[atom("tkhd")]
     struct TrackHeader {
@@ -282,6 +307,7 @@ make_atom! {
     }
 
 
+    #[derive(Debug)]
     #[atom("matt")]
     struct TrackMatte {
         #[children]
@@ -289,6 +315,8 @@ make_atom! {
             CompressedMatte,
         }
     }
+
+    #[derive(Debug)]
     #[version(0)]
     #[atom("kmat")]
     struct CompressedMatte {
@@ -300,6 +328,7 @@ make_atom! {
         // technically any video description can be here
     }
 
+    #[derive(Debug)]
     #[atom("edts")]
     struct Edit {
         #[children]
@@ -308,6 +337,7 @@ make_atom! {
         }
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("elst")]
     struct EditList {
@@ -319,12 +349,14 @@ make_atom! {
         table_entries: EditListEntry,
     }
 
+    #[derive(Debug)]
     struct EditListEntry {
         duration: u32,
         media_time: u32,
         media_rate: u32,
     }
 
+    #[derive(Debug)]
     #[atom("tref")]
     struct TrackReference {
         #[children]
@@ -338,43 +370,49 @@ make_atom! {
         }
     }
 
+    #[derive(Debug)]
     #[atom("tmcd")]
     struct TimeCode {
         #[trailing_array]
         related_track_ids: u32,
     }
 
+    #[derive(Debug)]
     #[atom("chap")]
     struct ChapterList {
         #[trailing_array]
         related_track_ids: u32,
     }
 
+    #[derive(Debug)]
     #[atom("sync")]
     struct Synchonization {
         #[trailing_array]
         related_track_ids: u32,
     }
 
+    #[derive(Debug)]
     #[atom("scpt")]
     struct Transcript {
         #[trailing_array]
         related_track_ids: u32,
     }
 
+    #[derive(Debug)]
     #[atom("ssrc")]
     struct NonprimarySource {
         #[trailing_array]
         related_track_ids: u32,
     }
 
+    #[derive(Debug)]
     #[atom("hint")]
     struct Hint {
         #[trailing_array]
         related_track_ids: u32,
     }
 
-
+    #[derive(Debug)]
     #[atom("load")]
     struct TrackLoadingSettings {
         preload_start_time: u32,
@@ -387,6 +425,7 @@ make_atom! {
         default_hints: u32,
     }
 
+    #[derive(Debug)]
     #[atom("imap")]
     struct TrackInputMap {
         #[children]
@@ -395,6 +434,7 @@ make_atom! {
         }
     }
 
+    #[derive(Debug)]
     #[atom(b"\0\0in")]
     struct TrackInput {
         id: u32,
@@ -410,16 +450,19 @@ make_atom! {
         }
     }
 
+    #[derive(Debug)]
     #[atom(b"\0\0ty")]
     struct InputType {
         ty: u32,
     }
 
+    #[derive(Debug)]
     #[atom("obid")]
     struct ObjectId {
         object_id: u32,
     }
 
+    #[derive(Debug)]
     #[atom("mdia")]
     struct Media {
         #[children]
@@ -434,6 +477,7 @@ make_atom! {
 
 //media
 make_atom! {
+    #[derive(Debug)]
     #[version(0)]
     #[atom("mdhd")]
     struct MediaHeader {
@@ -449,6 +493,7 @@ make_atom! {
         quality: u16,
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("hdlr")]
     struct HandlerReference {
@@ -467,6 +512,8 @@ make_atom! {
         #[pascal_string(u8)]
         component_name: String,
     }
+
+    #[derive(Debug)]
     #[atom("minf")]
     struct MediaInformation {
         #[children]
@@ -485,6 +532,7 @@ make_atom! {
 
 // media information
 make_atom! {
+    #[derive(Debug)]
     #[version(0)]
     #[atom("vmhd")]
     struct VideoMediaInformationHeader {
@@ -496,6 +544,7 @@ make_atom! {
         opcolor: [u16; 3],
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("smhd")]
     struct SoundMediaInformationHeader {
@@ -508,11 +557,13 @@ make_atom! {
         resered: [u8; 2]
     }
 
+    #[derive(Debug)]
     #[atom("gmhd")]
     struct BaseMediaInformationHeader {
         // empty...
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("gmin")]
     struct BaseMediaInformation {
@@ -527,6 +578,7 @@ make_atom! {
         reserved: [u8; 2]
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("tmci")]
     struct TimecodeMediaInformation {
@@ -555,6 +607,7 @@ make_atom! {
 
 // sample table
 make_atom! {
+    #[derive(Debug)]
     #[atom("stbl")]
     struct SampleTable {
         #[children]
@@ -576,6 +629,7 @@ make_atom! {
         description: D,
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("stsd")]
     struct SampleDescription {
@@ -589,6 +643,7 @@ make_atom! {
         }
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("stts")]
     struct TimeToSample {
@@ -600,11 +655,13 @@ make_atom! {
         time_to_sample_table: TimeToSampleTableEntry,
     }
 
+    #[derive(Debug)]
     struct TimeToSampleTableEntry {
         sample_count: u32,
         sample_duration: u32,
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("stss")]
     struct SyncSample {
@@ -616,6 +673,7 @@ make_atom! {
         sync_sample_table: u32,
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("stsc")]
     struct SampleToChunk {
@@ -627,12 +685,14 @@ make_atom! {
         sample_to_chunk_table: SampleToChunkTableEntry,
     }
 
+    #[derive(Debug)]
     struct SampleToChunkTableEntry {
         first_chunk: u32,
         samples_per_chunk: u32,
         sample_description_id: u32,
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("stsz")]
     struct SampleSize {
@@ -648,6 +708,7 @@ make_atom! {
 
 // data information
 make_atom! {
+    #[derive(Debug)]
     #[atom("dinf")]
     struct DataInformation {
         #[children]
@@ -656,6 +717,7 @@ make_atom! {
         }
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("dref")]
     struct DataReference {
@@ -671,6 +733,7 @@ make_atom! {
         }
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("alis")]
     struct MacAlias {
@@ -682,6 +745,7 @@ make_atom! {
         mac_alias: Vec<u8>,
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("rsrc")]
     struct MacResource {
@@ -693,6 +757,7 @@ make_atom! {
         mac_alias_resource: Vec<u8>,
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom(b"url\0")]
     struct Url {
@@ -704,6 +769,7 @@ make_atom! {
         url: Vec<u8>,
     }
 
+    #[derive(Debug)]
     #[version(0)]
     #[atom("stco")]
     struct ChunkOffset {
@@ -720,6 +786,7 @@ make_atom! {
 pub mod sample_description {
     use super::*;
     make_atom! {
+        #[derive(Debug)]
         struct Video {
             version: u16,
             #[reserved]
@@ -744,6 +811,7 @@ pub mod sample_description {
         // - see page 99
 
 
+        #[derive(Debug)]
         struct Sound {
             version: u16,
             revision_level: u16,
@@ -755,6 +823,7 @@ pub mod sample_description {
             sample_rate: u32,
         }
 
+        #[derive(Debug)]
         struct Timecode {
             #[reserved]
             reserved: u32,
@@ -773,6 +842,7 @@ pub mod sample_description {
             source_reference: Userdata,
         }
 
+        #[derive(Debug)]
         struct Text {
             #[flags(u32)]
             display_flags: struct DisplayFlags {
@@ -813,6 +883,7 @@ pub mod sample_description {
         // TODO: text sample extensions / hypertext
         // - see page 111
 
+        #[derive(Debug)]
         struct Music {
             #[flags(u32)]
             flags: struct Flags {
@@ -820,22 +891,27 @@ pub mod sample_description {
             }
         }
 
+        #[derive(Debug)]
         struct Mpeg {
             // empty
         }
 
+        #[derive(Debug)]
         struct Sprite {
             // empty
         }
 
+        #[derive(Debug)]
         struct Tween {
             // empty
         }
 
+        #[derive(Debug)]
         struct Q3D {
             // empty
         }
 
+        #[derive(Debug)]
         struct Streaming {
             version: u32,
             #[reserved]
@@ -843,6 +919,7 @@ pub mod sample_description {
             flags: u32,
         }
 
+        #[derive(Debug)]
         struct Hint {
             version: u16,
             last_compatible_version: u16,
@@ -866,6 +943,7 @@ pub type StreamingSampleDescription = SampleDescriptionEntry<sample_description:
 
 // hints
 make_atom! {
+    #[derive(Debug)]
     #[atom("hnti")]
     struct HintInfo {
         #[children]
@@ -874,63 +952,92 @@ make_atom! {
         }
     }
 
+    #[derive(Debug)]
     #[atom("trpy")]
     struct TrackPayloadSizeHint64 {
         byte_len: u64,
     }
+
+    #[derive(Debug)]
     #[atom("totl")]
     struct TrackPayloadSizeHint32 {
         byte_len: u32,
     }
+
+    #[derive(Debug)]
     #[atom("nump")]
     struct NetworkPacketHint64 {
         network_packet_count: u64,
     }
+
+    #[derive(Debug)]
     #[atom("npck")]
     struct NetworkPacketHint32 {
         network_packet_count: u32,
     }
+
+    #[derive(Debug)]
     #[atom("tpyl")]
     struct ByteCountHint64 {
         total_bytes_minus_rtp_headers: u64,
     }
+
+    #[derive(Debug)]
     #[atom("tpay")]
     struct ByteCountHint32 {
         total_bytes_minus_rtp_headers: u32,
     }
+
+    #[derive(Debug)]
     #[atom("maxr")]
     struct DatarateHint {
         granularity_ms: u32,
         maximum_datarate: u32,
     }
+
+    #[derive(Debug)]
     #[atom("dmed")]
     struct MediaTrackBytesHint {
         byte_count: u64,
     }
+
+    #[derive(Debug)]
     #[atom("dimm")]
     struct ImmediateBytesHint {
         byte_count: u64,
     }
+
+    #[derive(Debug)]
     #[atom("drep")]
     struct RepeatedBytesHint {
         byte_count: u64,
     }
+
+    #[derive(Debug)]
     #[atom("tmin")]
     struct MinTransmissionTimeHint {
         shortest_transmission_ms: u32,
     }
+
+    #[derive(Debug)]
     #[atom("tmax")]
     struct MaxTransmissionTimeHint {
         longest_transmission_ms: u32,
     }
+
+    #[derive(Debug)]
     #[atom("pmax")]
     struct LargestPacketHint {
         byte_count: u32,
     }
+
+    #[derive(Debug)]
     #[atom("dmax")]
     struct LargestPacketDurationHint {
         largest_duration_ms: u32,
     }
+
+    #[derive(Debug)]
     #[atom("payt")]
     struct PayloadTypeHint {
         payload_number: u32,
@@ -996,7 +1103,7 @@ fn ftyp() {
                                                         );
                                                     }
                                                     elst::EditListVersions::Unknown(v) => {
-                                                        println!("unknown elst: {v}")
+                                                        println!("unknown elst: {v:?}")
                                                     }
                                                 },
                                                 _ => (),
@@ -1054,7 +1161,7 @@ fn ftyp() {
                                                                                         }
                                                                                     }
                                                                                 }
-                                                                                dref::DataReferenceVersions::Unknown(v) => println!("unknown dref: {v}"),
+                                                                                dref::DataReferenceVersions::Unknown(v) => println!("unknown dref: {v:?}"),
                                                                             }
                                                                         }
                                                                         _ => (),
@@ -1077,7 +1184,7 @@ fn ftyp() {
                                                                                         println!("sample desc: {child:?}");
                                                                                     }
                                                                                 }
-                                                                                stsd::SampleDescriptionVersions::Unknown(v) => println!("unknown stsd: {v}"),
+                                                                                stsd::SampleDescriptionVersions::Unknown(v) => println!("unknown stsd: {v:?}"),
                                                                             }
                                                                         }
                                                                         stbl::Child::TimeToSample(tts) => {
@@ -1087,7 +1194,7 @@ fn ftyp() {
                                                                                     let time_to_sample = tts.time_to_sample_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
                                                                                     println!("tts entries: {time_to_sample:?}");
                                                                                 }
-                                                                                stts::TimeToSampleVersions::Unknown(v) => println!("unknown stts: {v}"),
+                                                                                stts::TimeToSampleVersions::Unknown(v) => println!("unknown stts: {v:?}"),
                                                                             }
                                                                         }
                                                                         stbl::Child::SyncSample(sync) => {
@@ -1097,7 +1204,7 @@ fn ftyp() {
                                                                                     let sync_samples = sync.sync_sample_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
                                                                                     println!("sync sample entries: {sync_samples:?}");
                                                                                 }
-                                                                                stss::SyncSampleVersions::Unknown(v) => println!("unknown stts: {v}"),
+                                                                                stss::SyncSampleVersions::Unknown(v) => println!("unknown stts: {v:?}"),
                                                                             }
                                                                         }
                                                                         stbl::Child::SampleToChunk(stc) => {
@@ -1107,7 +1214,7 @@ fn ftyp() {
                                                                                     let sample_to_chunk = stc.sample_to_chunk_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
                                                                                     println!("stc entries: {sample_to_chunk:?}");
                                                                                 }
-                                                                                stsc::SampleToChunkVersions::Unknown(v) => println!("unknown stsc: {v}"),
+                                                                                stsc::SampleToChunkVersions::Unknown(v) => println!("unknown stsc: {v:?}"),
                                                                             }
                                                                         }
                                                                         stbl::Child::SampleSize(ss) => {
@@ -1117,7 +1224,7 @@ fn ftyp() {
                                                                                     let sample_sizes = ss.sample_size_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
                                                                                     println!("ss entries: {sample_sizes:?}");
                                                                                 }
-                                                                                stsz::SampleSizeVersions::Unknown(v) => println!("unknown stsz: {v}"),
+                                                                                stsz::SampleSizeVersions::Unknown(v) => println!("unknown stsz: {v:?}"),
                                                                             }
                                                                         }
                                                                         stbl::Child::ChunkOffset(co) => {
@@ -1127,7 +1234,7 @@ fn ftyp() {
                                                                                     let offsets = co.chunk_offset_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
                                                                                     println!("co32 entries: {offsets:?}")
                                                                                 }
-                                                                                stco::ChunkOffsetVersions::Unknown(v) => println!("unknown stco: {v}"),
+                                                                                stco::ChunkOffsetVersions::Unknown(v) => println!("unknown stco: {v:?}"),
                                                                             }
                                                                         }
                                                                         stbl::Child::Unsupported(u) => println!("unsupported stbl entry: {u:?}"),
@@ -1230,7 +1337,7 @@ async fn ftyp_async() {
                                                         );
                                                     }
                                                     elst::EditListVersions::Unknown(v) => {
-                                                        println!("unknown elst: {v}")
+                                                        println!("unknown elst: {v:?}")
                                                     }
                                                 },
                                                 _ => (),
@@ -1290,7 +1397,7 @@ async fn ftyp_async() {
                                                                                         }
                                                                                     }
                                                                                 }
-                                                                                dref::DataReferenceVersions::Unknown(v) => println!("unknown dref: {v}"),
+                                                                                dref::DataReferenceVersions::Unknown(v) => println!("unknown dref: {v:?}"),
                                                                             }
                                                                         }
                                                                         _ => (),
@@ -1313,7 +1420,7 @@ async fn ftyp_async() {
                                                                                         println!("sample desc: {child:?}");
                                                                                     }
                                                                                 }
-                                                                                stsd::SampleDescriptionVersions::Unknown(v) => println!("unknown stsd: {v}"),
+                                                                                stsd::SampleDescriptionVersions::Unknown(v) => println!("unknown stsd: {v:?}"),
                                                                             }
                                                                         }
                                                                         stbl::Child::TimeToSample(tts) => {
@@ -1323,7 +1430,7 @@ async fn ftyp_async() {
                                                                                     let time_to_sample = tts.time_to_sample_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
                                                                                     println!("tts entries: {time_to_sample:?}");
                                                                                 }
-                                                                                stts::TimeToSampleVersions::Unknown(v) => println!("unknown stts: {v}"),
+                                                                                stts::TimeToSampleVersions::Unknown(v) => println!("unknown stts: {v:?}"),
                                                                             }
                                                                         }
                                                                         stbl::Child::SyncSample(sync) => {
@@ -1333,7 +1440,7 @@ async fn ftyp_async() {
                                                                                     let sync_samples = sync.sync_sample_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
                                                                                     println!("sync sample entries: {sync_samples:?}");
                                                                                 }
-                                                                                stss::SyncSampleVersions::Unknown(v) => println!("unknown stts: {v}"),
+                                                                                stss::SyncSampleVersions::Unknown(v) => println!("unknown stts: {v:?}"),
                                                                             }
                                                                         }
                                                                         stbl::Child::SampleToChunk(stc) => {
@@ -1343,7 +1450,7 @@ async fn ftyp_async() {
                                                                                     let sample_to_chunk = stc.sample_to_chunk_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
                                                                                     println!("stc entries: {sample_to_chunk:?}");
                                                                                 }
-                                                                                stsc::SampleToChunkVersions::Unknown(v) => println!("unknown stsc: {v}"),
+                                                                                stsc::SampleToChunkVersions::Unknown(v) => println!("unknown stsc: {v:?}"),
                                                                             }
                                                                         }
                                                                         stbl::Child::SampleSize(ss) => {
@@ -1353,7 +1460,7 @@ async fn ftyp_async() {
                                                                                     let sample_sizes = ss.sample_size_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
                                                                                     println!("ss entries: {sample_sizes:?}");
                                                                                 }
-                                                                                stsz::SampleSizeVersions::Unknown(v) => println!("unknown stsz: {v}"),
+                                                                                stsz::SampleSizeVersions::Unknown(v) => println!("unknown stsz: {v:?}"),
                                                                             }
                                                                         }
                                                                         stbl::Child::ChunkOffset(co) => {
@@ -1363,7 +1470,7 @@ async fn ftyp_async() {
                                                                                     let offsets = co.chunk_offset_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
                                                                                     println!("co32 entries: {offsets:?}")
                                                                                 }
-                                                                                stco::ChunkOffsetVersions::Unknown(v) => println!("unknown stco: {v}"),
+                                                                                stco::ChunkOffsetVersions::Unknown(v) => println!("unknown stco: {v:?}"),
                                                                             }
                                                                         }
                                                                         stbl::Child::Unsupported(u) => println!("unsupported stbl entry: {u:?}"),
@@ -1406,4 +1513,3 @@ async fn ftyp_async() {
     }
     panic!()
 }
-*/

@@ -1,13 +1,14 @@
 use atom_parser::make_atom;
 
-/*
 make_atom! {
+    #[derive(Debug)]
     #[enum_repr(u32)]
     enum MagicNumber {
         UsingMicroseconds = 0xA1B2C3D4,
         UsingNanoseconds = 0xA1B23C4D,
     }
 
+    #[derive(Debug)]
     struct Header {
         magic_num: MagicNumber,
         major_version: u16,
@@ -18,6 +19,7 @@ make_atom! {
         link_type: u16,
     }
 
+    #[derive(Debug)]
     struct Record {
         second_ts: u32,
         subsecond_ts: u32,
@@ -70,52 +72,3 @@ async fn pcap_async() {
     }
     panic!()
 }
-*/
-
-trait Something {
-    type Assoc;
-}
-struct A<T> {
-    inner: T,
-}
-
-impl <T> Something for A<T> {
-    type Assoc = T;
-}
-
-impl Something for u32 {
-    type Assoc = Self;
-}
-
-// TODO: the proc macro needs to take in a generic O now
-// - its probably best to have a phantomdata <O> for all collections of data
-//      - may need to have an associated type Output<O> = Self
-//          - issue is that the offset is only applicable to some fields
-//          - e.g, u16/u32 dont need a <O> but any collection of data does
-//  
-// - or, scrap this and replace `usize` with `Offset` which can be configured at compile time.
-//      - e.g, 
-//          #[cfg(feature = "offset_width_usize")]
-//          type Offset = usize;
-//          #[cfg(feature = "offset_width_u64")]
-//          type Offset = u64;
-//          #[cfg(feature = "offset_width_u32")]
-//          type Offset = u32;
-//      for all pre existing instances of usize
-//
-//  - orrrr
-//      - move the offset size to the end of the generics
-//      e.g, SomtStruct<A, B, O: Offset = usize> {...}
-//
-//      then have a newtrait 
-//      trait Parsed {
-//          type Output<O>;
-//      }
-//
-//      then impl <A, B> Parsed for SomStruct<A, B> {
-//          type Output<O> = SomeStruct<A, B, O>;
-//      }
-//
-//      then the full type can be referred to as 
-//      <SomeStruct<A, B> as Parsed>::Output<O>;
-//      which should allow it to be generic over the offset

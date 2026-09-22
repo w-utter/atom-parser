@@ -1,6 +1,7 @@
 use crate::{
-    AsyncIterState, AsyncIterator, AsyncParse, BacktrackReader, Parse, ParseError, ParseOptions,
-    PollReader, Reader, SizedChildren, SwapOffsets, TakeReader, impl_take_reader, Offset
+    AsyncIterState, AsyncIterator, AsyncParse, BacktrackReader, Offset, Parse, ParseError,
+    ParseOptions, Parsed, PollReader, Reader, SizedChildren, SwapOffsets, TakeReader,
+    impl_take_reader,
 };
 
 pub trait ArraySize: Clone + Copy + core::ops::AddAssign + core::cmp::Ord {
@@ -16,31 +17,53 @@ macro_rules! impl_array_size {
                 const ONE: Self = 1;
             }
         )*
+
+        pub trait TryFromArraySize: $(TryFrom<$i>+)+ {}
+
+        impl  <T: $(TryFrom<$i>+)+> TryFromArraySize for T { }
     }
 }
 
 impl_array_size! {
-    u16, u32,
+    u8, u16, u32,
 }
 
-#[derive(Debug)]
-pub struct DynamicArray<O, S, I, const ZERO_RELATIVE: bool> {
-    size: S,
+pub struct DynamicArray<O, S: Parsed, I, const ZERO_RELATIVE: bool> {
+    size: <S as Parsed>::Output<O>,
     offset: O,
     _pd: core::marker::PhantomData<I>,
 }
 
-pub struct DynamicArrayIter<'a, O, R: SwapOffsets<O>, S, I, const ZERO_RELATIVE: bool> {
-    size: S,
-    current: S,
+impl<U, S: Parsed, I, const ZERO_RELATIVE: bool> Parsed for DynamicArray<U, S, I, ZERO_RELATIVE> {
+    type Output<O> = DynamicArray<U, S, I, ZERO_RELATIVE>;
+}
+
+impl<O: core::fmt::Debug, S: Parsed, I, const ZERO_RELATIVE: bool> core::fmt::Debug
+    for DynamicArray<O, S, I, ZERO_RELATIVE>
+where
+    <S as Parsed>::Output<O>: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DynamicArray")
+            .field("offset", &self.offset)
+            .field("size", &self.size)
+            .finish()
+    }
+}
+
+pub struct DynamicArrayIter<'a, O, R: SwapOffsets<O>, S: Parsed, I, const ZERO_RELATIVE: bool> {
+    size: <S as Parsed>::Output<O>,
+    current: <S as Parsed>::Output<O>,
     exhausted: bool,
     pub reader: BacktrackReader<O, &'a mut R>,
     opts: &'a ParseOptions,
     _pd: core::marker::PhantomData<I>,
 }
 
-impl<'a, O: Offset, R: SwapOffsets<O>, S: ArraySize + Copy, I, const ZERO_RELATIVE: bool>
+impl<'a, O: Offset, R: SwapOffsets<O>, S: Parsed, I, const ZERO_RELATIVE: bool>
     DynamicArrayIter<'a, O, R, S, I, ZERO_RELATIVE>
+where
+    <S as Parsed>::Output<O>: ArraySize,
 {
     pub fn from_dynamic_array(
         arr: &DynamicArray<O, S, I, ZERO_RELATIVE>,
@@ -60,10 +83,15 @@ impl<'a, O: Offset, R: SwapOffsets<O>, S: ArraySize + Copy, I, const ZERO_RELATI
         Self::new(*len, reader, *offset, opts)
     }
 
-    fn new(size: S, reader: &'a mut R, offset: O, opts: &'a ParseOptions) -> Self {
+    fn new(
+        size: <S as Parsed>::Output<O>,
+        reader: &'a mut R,
+        offset: O,
+        opts: &'a ParseOptions,
+    ) -> Self {
         Self {
             size,
-            current: S::ZERO,
+            current: <<S as Parsed>::Output<O>>::ZERO,
             exhausted: false,
             reader: BacktrackReader::new(reader, offset),
             opts,
@@ -105,12 +133,14 @@ fn dynamic_array_iter_has_next<const ZERO_RELATIVE: bool, S: ArraySize>(
     true
 }
 
-impl<'a, O: Offset, R: Reader<O>, S: ArraySize, I: Parse<O>, const ZERO_RELATIVE: bool> Iterator
+impl<'a, O: Offset, R: Reader<O>, S: Parsed, I: Parse<O>, const ZERO_RELATIVE: bool> Iterator
     for DynamicArrayIter<'a, O, R, S, I, ZERO_RELATIVE>
+where
+    <S as Parsed>::Output<O>: ArraySize,
 {
-    type Item = Result<I, ParseError>;
+    type Item = Result<<I as Parsed>::Output<O>, ParseError>;
     fn next(&mut self) -> Option<Self::Item> {
-        let has_next = dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(
+        let has_next = dynamic_array_iter_has_next::<ZERO_RELATIVE, _>(
             &mut self.current,
             &self.size,
             &mut self.exhausted,
@@ -127,25 +157,34 @@ pub struct AsyncDynamicArrayIter<
     'a,
     O: Offset + Unpin,
     R: SwapOffsets<O> + PollReader<O> + Unpin,
-    S,
+    S: Parsed,
     I: AsyncParse<O>,
     const ZERO_RELATIVE: bool,
-> {
-    size: S,
-    current: S,
+> where
+    <I as Parsed>::Output<O>: Unpin,
+{
+    size: <S as Parsed>::Output<O>,
+    current: <S as Parsed>::Output<O>,
     exhausted: bool,
 
-    state: AsyncIterState<'a, BacktrackReader<O, &'a mut R>, I::Fut<'a, BacktrackReader<O, &'a mut R>>>,
+    state: AsyncIterState<
+        'a,
+        BacktrackReader<O, &'a mut R>,
+        I::Fut<'a, BacktrackReader<O, &'a mut R>>,
+    >,
 }
 
 impl<
     'a,
     O: Offset + Unpin,
     R: SwapOffsets<O> + PollReader<O> + Unpin,
-    S: ArraySize + Copy,
+    S: Parsed,
     I: AsyncParse<O>,
     const ZERO_RELATIVE: bool,
 > AsyncDynamicArrayIter<'a, O, R, S, I, ZERO_RELATIVE>
+where
+    <I as Parsed>::Output<O>: Unpin,
+    <S as Parsed>::Output<O>: ArraySize + Unpin,
 {
     pub fn from_dynamic_array(
         arr: &DynamicArray<O, S, I, ZERO_RELATIVE>,
@@ -157,7 +196,7 @@ impl<
     }
 
     pub fn from_sized_children(
-        children: &SizedChildren<O, S, I>,
+        children: &SizedChildren<O, S, <I as Parsed>::Output<O>>,
         reader: &'a mut R,
         opts: &'a ParseOptions,
     ) -> Self {
@@ -165,14 +204,19 @@ impl<
         Self::new(*len, reader, *offset, opts)
     }
 
-    fn new(size: S, reader: &'a mut R, offset: O, opts: &'a ParseOptions) -> Self {
+    fn new(
+        size: <S as Parsed>::Output<O>,
+        reader: &'a mut R,
+        offset: O,
+        opts: &'a ParseOptions,
+    ) -> Self {
         let reader = BacktrackReader::new(reader, offset);
 
         let mut exhausted = false;
-        let mut current = S::ZERO;
+        let mut current = <<S as Parsed>::Output<O> as ArraySize>::ZERO;
 
         let state =
-            if dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(&mut current, &size, &mut exhausted)
+            if dynamic_array_iter_has_next::<ZERO_RELATIVE, _>(&mut current, &size, &mut exhausted)
             {
                 AsyncIterState::Iterating(I::create_fut(reader, opts))
             } else {
@@ -197,12 +241,15 @@ impl<
     'a,
     O: Offset + Unpin,
     R: SwapOffsets<O> + PollReader<O> + Unpin,
-    S: ArraySize + Unpin,
+    S: Parsed,
     I: AsyncParse<O> + Unpin,
     const ZERO_RELATIVE: bool,
 > AsyncIterator for AsyncDynamicArrayIter<'a, O, R, S, I, ZERO_RELATIVE>
+where
+    <I as Parsed>::Output<O>: Unpin,
+    <S as Parsed>::Output<O>: ArraySize + Unpin,
 {
-    type Item = Result<I, ParseError>;
+    type Item = Result<<I as Parsed>::Output<O>, ParseError>;
     fn poll_next(
         mut self: core::pin::Pin<&mut Self>,
         ctx: &mut core::task::Context<'_>,
@@ -213,8 +260,8 @@ impl<
         let mut this = core::mem::replace(
             &mut *self,
             Self {
-                size: S::ZERO,
-                current: S::ZERO,
+                size: <<S as Parsed>::Output<O>>::ZERO,
+                current: <<S as Parsed>::Output<O>>::ZERO,
                 exhausted: false,
                 state: AsyncIterState::Empty,
             },
@@ -233,7 +280,7 @@ impl<
                 }
                 Poll::Ready(res) => {
                     let (reader, opts) = i.take_reader();
-                    this.state = if dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(
+                    this.state = if dynamic_array_iter_has_next::<ZERO_RELATIVE, _>(
                         &mut this.current,
                         &this.size,
                         &mut this.exhausted,
@@ -255,10 +302,14 @@ impl<
     'a,
     O: Offset + Unpin,
     R: SwapOffsets<O> + PollReader<O> + Unpin,
-    S: ArraySize + Unpin,
+    S: Parsed,
     I: AsyncParse<O> + Unpin,
     const ZERO_RELATIVE: bool,
-> TakeReader<'a, BacktrackReader<O, &'a mut R>> for AsyncDynamicArrayIter<'a, O, R, S, I, ZERO_RELATIVE>
+> TakeReader<'a, BacktrackReader<O, &'a mut R>>
+    for AsyncDynamicArrayIter<'a, O, R, S, I, ZERO_RELATIVE>
+where
+    <I as Parsed>::Output<O>: Unpin,
+    <S as Parsed>::Output<O>: ArraySize + Unpin,
 {
     fn take_reader(self) -> (BacktrackReader<O, &'a mut R>, &'a ParseOptions) {
         self.state.take_reader()
@@ -268,16 +319,21 @@ impl<
     }
 }
 
-impl<O: Offset, I: Parse<O> + Unpin, S: Parse<O> + ArraySize + Unpin, const ZERO_RELATIVE: bool> Parse<O>
+impl<O: Offset, I: Parse<O> + Unpin, S: Parse<O> + Unpin, const ZERO_RELATIVE: bool> Parse<O>
     for DynamicArray<O, S, I, ZERO_RELATIVE>
+where
+    <S as Parsed>::Output<O>: ArraySize,
 {
-    fn parse<T: Reader<O>>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+    fn parse<T: Reader<O>>(
+        reader: &mut T,
+        options: &ParseOptions,
+    ) -> Result<<Self as Parsed>::Output<O>, ParseError> {
         let size = S::parse(reader, options)?;
         let offset = reader.offset();
-        let mut current = S::ZERO;
+        let mut current = <<S as Parsed>::Output<O>>::ZERO;
         let mut exhausted = false;
 
-        while dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(&mut current, &size, &mut exhausted) {
+        while dynamic_array_iter_has_next::<ZERO_RELATIVE, _>(&mut current, &size, &mut exhausted) {
             let _ = I::parse(reader, options)?;
         }
 
@@ -293,16 +349,19 @@ pub enum DynamicArrayParse<
     'a,
     O: Offset + Unpin,
     R: PollReader<O> + Unpin,
-    S: AsyncParse<O> + ArraySize,
+    S: AsyncParse<O>,
     I: AsyncParse<O>,
     const ZERO_RELATIVE: bool,
-> {
+> where
+    <S as Parsed>::Output<O>: ArraySize + Unpin,
+    <I as Parsed>::Output<O>: Unpin,
+{
     Waiting(<S as AsyncParse<O>>::Fut<'a, R>),
     Iterating {
         offset: O,
         exhausted: bool,
-        len: S,
-        idx: S,
+        len: <S as Parsed>::Output<O>,
+        idx: <S as Parsed>::Output<O>,
         fut: <I as AsyncParse<O>>::Fut<'a, R>,
     },
     Done(R, &'a ParseOptions),
@@ -313,10 +372,13 @@ impl<
     'a,
     O: Offset + Unpin,
     R: PollReader<O> + Unpin,
-    S: AsyncParse<O> + ArraySize + Unpin,
+    S: AsyncParse<O> + Unpin,
     I: AsyncParse<O> + Unpin,
     const ZERO_RELATIVE: bool,
 > Future for DynamicArrayParse<'a, O, R, S, I, ZERO_RELATIVE>
+where
+    <S as Parsed>::Output<O>: ArraySize + Unpin,
+    <I as Parsed>::Output<O>: Unpin,
 {
     type Output = Result<DynamicArray<O, S, I, ZERO_RELATIVE>, ParseError>;
     fn poll(
@@ -344,10 +406,10 @@ impl<
                                 return Poll::Ready(Err(e));
                             }
                         };
-                        let mut idx = S::ZERO;
+                        let mut idx = <<S as Parsed>::Output<O>>::ZERO;
                         let mut exhausted = false;
 
-                        if dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(
+                        if dynamic_array_iter_has_next::<ZERO_RELATIVE, _>(
                             &mut idx,
                             &len,
                             &mut exhausted,
@@ -392,7 +454,7 @@ impl<
                             return Poll::Ready(Err(e));
                         }
 
-                        let has_next = dynamic_array_iter_has_next::<ZERO_RELATIVE, S>(
+                        let has_next = dynamic_array_iter_has_next::<ZERO_RELATIVE, _>(
                             &mut idx,
                             &len,
                             &mut exhausted,
@@ -422,8 +484,17 @@ impl<
     }
 }
 
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S: AsyncParse<O> + ArraySize, I: AsyncParse<O>, const ZERO_RELATIVE: bool>
-    TakeReader<'a, R> for DynamicArrayParse<'a, O, R, S, I, ZERO_RELATIVE>
+impl<
+    'a,
+    O: Offset + Unpin,
+    R: PollReader<O> + Unpin,
+    S: AsyncParse<O>,
+    I: AsyncParse<O>,
+    const ZERO_RELATIVE: bool,
+> TakeReader<'a, R> for DynamicArrayParse<'a, O, R, S, I, ZERO_RELATIVE>
+where
+    <S as Parsed>::Output<O>: ArraySize + Unpin,
+    <I as Parsed>::Output<O>: Unpin,
 {
     impl_take_reader! {}
     fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
@@ -436,8 +507,15 @@ impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S: AsyncParse<O> + ArraySi
     }
 }
 
-impl<O: Offset + Unpin, S: AsyncParse<O> + ArraySize + Unpin, I: AsyncParse<O> + Unpin, const ZERO_RELATIVE: bool> AsyncParse<O>
-    for DynamicArray<O, S, I, ZERO_RELATIVE>
+impl<
+    O: Offset + Unpin,
+    S: AsyncParse<O> + Unpin,
+    I: AsyncParse<O> + Unpin,
+    const ZERO_RELATIVE: bool,
+> AsyncParse<O> for DynamicArray<O, S, I, ZERO_RELATIVE>
+where
+    <S as Parsed>::Output<O>: ArraySize + Unpin,
+    <I as Parsed>::Output<O>: Unpin,
 {
     type Fut<'a, R: PollReader<O> + Unpin> = DynamicArrayParse<'a, O, R, S, I, ZERO_RELATIVE>;
     fn create_fut<'a, R: PollReader<O> + Unpin>(

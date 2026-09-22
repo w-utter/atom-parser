@@ -1,7 +1,7 @@
 use crate::{
-    AsyncIterState, AsyncIterator, AsyncParse, BacktrackReader, Parse, ParseError, ParseOptions,
-    PollReader, Reader, SwapOffsets, TakeReader, TrailingReader, impl_take_reader,
-    Offset,
+    AsyncIterState, AsyncIterator, AsyncParse, BacktrackReader, FourCC, Offset, Parse, ParseError,
+    ParseOptions, Parsed, PollReader, Reader, SwapOffsets, TakeReader, TrailingReader,
+    impl_take_reader,
 };
 
 #[derive(Debug)]
@@ -11,21 +11,43 @@ pub struct Children<O, T> {
     size: O,
 }
 
-#[derive(Debug)]
-pub struct SizedChildren<O, S, T> {
+impl<U, T: Parsed> Parsed for Children<U, T> {
+    type Output<O> = Children<U, <T as Parsed>::Output<O>>;
+}
+
+pub struct SizedChildren<O, S: Parsed, T> {
     _pd: core::marker::PhantomData<T>,
-    pub(crate) len: S,
+    pub(crate) len: <S as Parsed>::Output<O>,
     pub(crate) offset: O,
+}
+
+impl<O: core::fmt::Debug, S: Parsed, T> core::fmt::Debug for SizedChildren<O, S, T>
+where
+    <S as Parsed>::Output<O>: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SizedChildren")
+            .field("offset", &self.offset)
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+impl<U, S: Parsed, T: Parsed> Parsed for SizedChildren<U, S, T> {
+    type Output<O> = SizedChildren<U, S, <T as Parsed>::Output<O>>;
 }
 
 mod sync_impl {
     use super::*;
 
-    impl<O: Offset, S: Parse<O> + Unpin, I: Parse<O> + Unpin> Parse<O> for SizedChildren<O, S, I> {
-        fn parse<T: Reader<O>>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+    impl<O: Offset, S: Parse<O>, I: Parse<O>> Parse<O> for SizedChildren<O, S, I> {
+        fn parse<T: Reader<O>>(
+            reader: &mut T,
+            options: &ParseOptions,
+        ) -> Result<<Self as Parsed>::Output<O>, ParseError> {
             let len = S::parse(reader, options)?;
             let offset = reader.offset();
-            Ok(Self {
+            Ok(SizedChildren {
                 _pd: core::marker::PhantomData,
                 len,
                 offset,
@@ -33,11 +55,14 @@ mod sync_impl {
         }
     }
 
-    impl<O: Offset, I: Parse<O> + Unpin> Parse<O> for Children<O, I> {
-        fn parse<T: Reader<O>>(reader: &mut T, _: &ParseOptions) -> Result<Self, ParseError> {
+    impl<O: Offset, I: Parse<O>> Parse<O> for Children<O, I> {
+        fn parse<T: Reader<O>>(
+            reader: &mut T,
+            _: &ParseOptions,
+        ) -> Result<<Self as Parsed>::Output<O>, ParseError> {
             let offset = reader.offset();
             let size = reader.remaining_size();
-            Ok(Self {
+            Ok(Children {
                 _pd: core::marker::PhantomData,
                 offset,
                 size,
@@ -71,7 +96,7 @@ mod sync_impl {
     }
 
     impl<'a, O: Offset, R: Reader<O>, C: Parse<O>> Iterator for ChildrenIter<'a, O, R, C> {
-        type Item = Result<C, ParseError>;
+        type Item = Result<<C as Parsed>::Output<O>, ParseError>;
         fn next(&mut self) -> Option<Self::Item> {
             if self.reader.remaining_size() > O::zero() {
                 Some(C::parse(&mut self.reader, self.opts))
@@ -85,7 +110,15 @@ pub use sync_impl::*;
 
 mod async_impl {
     use super::*;
-    pub struct AsyncChildrenIter<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, C: AsyncParse<O>> {
+    pub struct AsyncChildrenIter<
+        'a,
+        O: Offset + Unpin,
+        R: SwapOffsets<O> + PollReader<O> + Unpin,
+        C: AsyncParse<O>,
+    >
+    where
+        <C as Parsed>::Output<O>: Unpin,
+    {
         state: AsyncIterState<
             'a,
             BacktrackReader<O, TrailingReader<O, &'a mut R>>,
@@ -93,9 +126,13 @@ mod async_impl {
         >,
     }
 
-    impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin + Reader<O>, C: AsyncParse<O>> AsyncChildrenIter<'a, O, R, C> {
+    impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, C: AsyncParse<O>>
+        AsyncChildrenIter<'a, O, R, C>
+    where
+        <C as Parsed>::Output<O>: Unpin,
+    {
         pub fn from_children(
-            children: &Children<O, C>,
+            children: &Children<O, <C as Parsed>::Output<O>>,
             reader: &'a mut R,
             opts: &'a ParseOptions,
         ) -> Self {
@@ -121,10 +158,16 @@ mod async_impl {
         }
     }
 
-    impl<'a, O: Offset + Unpin + Copy, R: SwapOffsets<O> + PollReader<O> + Unpin, C: AsyncParse<O> + Unpin> AsyncIterator
-        for AsyncChildrenIter<'a, O, R, C>
+    impl<
+        'a,
+        O: Offset + Unpin + Copy,
+        R: SwapOffsets<O> + PollReader<O> + Unpin,
+        C: AsyncParse<O> + Unpin,
+    > AsyncIterator for AsyncChildrenIter<'a, O, R, C>
+    where
+        <C as Parsed>::Output<O>: Unpin,
     {
-        type Item = Result<C, ParseError>;
+        type Item = Result<<C as Parsed>::Output<O>, ParseError>;
         fn poll_next(
             mut self: core::pin::Pin<&mut Self>,
             ctx: &mut core::task::Context<'_>,
@@ -166,9 +209,17 @@ mod async_impl {
     }
 
     impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, C: AsyncParse<O> + Unpin>
-        TakeReader<'a, BacktrackReader<O, TrailingReader<O, &'a mut R>>> for AsyncChildrenIter<'a, O, R, C>
+        TakeReader<'a, BacktrackReader<O, TrailingReader<O, &'a mut R>>>
+        for AsyncChildrenIter<'a, O, R, C>
+    where
+        <C as Parsed>::Output<O>: Unpin,
     {
-        fn take_reader(self) -> (BacktrackReader<O, TrailingReader<O, &'a mut R>>, &'a ParseOptions) {
+        fn take_reader(
+            self,
+        ) -> (
+            BacktrackReader<O, TrailingReader<O, &'a mut R>>,
+            &'a ParseOptions,
+        ) {
             self.state.take_reader()
         }
         fn borrow_reader(
@@ -181,7 +232,15 @@ mod async_impl {
         }
     }
 
-    pub enum SizedChildrenParse<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S: AsyncParse<O> + Unpin, C>
+    pub enum SizedChildrenParse<
+        'a,
+        O: Offset + Unpin,
+        R: PollReader<O> + Unpin,
+        S: AsyncParse<O> + Unpin,
+        C,
+    >
+    where
+        <S as Parsed>::Output<O>: Unpin,
     {
         Size {
             fut: <S as AsyncParse<O>>::Fut<'a, R>,
@@ -191,10 +250,18 @@ mod async_impl {
         Empty,
     }
 
-    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S: AsyncParse<O> + Unpin, C: AsyncParse<O> + Unpin> Future
-        for SizedChildrenParse<'a, O, R, S, C>
+    impl<
+        'a,
+        O: Offset + Unpin,
+        R: PollReader<O> + Unpin,
+        S: AsyncParse<O> + Unpin,
+        C: AsyncParse<O> + Unpin,
+    > Future for SizedChildrenParse<'a, O, R, S, C>
+    where
+        <S as Parsed>::Output<O>: Unpin,
+        <C as Parsed>::Output<O>: Unpin,
     {
-        type Output = Result<SizedChildren<O, S, C>, ParseError>;
+        type Output = Result<<SizedChildren<O, S, C> as Parsed>::Output<O>, ParseError>;
         fn poll(
             mut self: core::pin::Pin<&mut Self>,
             cx: &mut core::task::Context<'_>,
@@ -228,8 +295,16 @@ mod async_impl {
         }
     }
 
-    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S: AsyncParse<O> + Unpin, C: AsyncParse<O>> TakeReader<'a, R>
-        for SizedChildrenParse<'a, O, R, S, C>
+    impl<
+        'a,
+        O: Offset + Unpin,
+        R: PollReader<O> + Unpin,
+        S: AsyncParse<O> + Unpin,
+        C: AsyncParse<O>,
+    > TakeReader<'a, R> for SizedChildrenParse<'a, O, R, S, C>
+    where
+        <S as Parsed>::Output<O>: Unpin,
+        <C as Parsed>::Output<O>: Unpin,
     {
         impl_take_reader! {}
         fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
@@ -241,7 +316,12 @@ mod async_impl {
         }
     }
 
-    impl<O: Offset + Unpin, S: AsyncParse<O> + Unpin, C: AsyncParse<O> + Unpin> AsyncParse<O> for SizedChildren<O, S, C> {
+    impl<O: Offset + Unpin, S: AsyncParse<O> + Unpin, C: AsyncParse<O> + Unpin> AsyncParse<O>
+        for SizedChildren<O, S, C>
+    where
+        <S as Parsed>::Output<O>: Unpin,
+        <C as Parsed>::Output<O>: Unpin,
+    {
         type Fut<'a, R: PollReader<O> + Unpin> = SizedChildrenParse<'a, O, R, S, C>;
         fn create_fut<'a, R: PollReader<O> + Unpin>(
             reader: R,
@@ -254,9 +334,17 @@ mod async_impl {
         }
     }
 
-    pub struct ChildrenParse<'a, O: Offset + Unpin, R, C>(R, &'a ParseOptions, core::marker::PhantomData<(O, C)>);
-    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, C: AsyncParse<O>> Future for ChildrenParse<'a, O, R, C> {
-        type Output = Result<Children<O, C>, ParseError>;
+    pub struct ChildrenParse<'a, O: Offset + Unpin, R, C>(
+        R,
+        &'a ParseOptions,
+        core::marker::PhantomData<(O, C)>,
+    );
+    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, C: AsyncParse<O>> Future
+        for ChildrenParse<'a, O, R, C>
+    where
+        <C as Parsed>::Output<O>: Unpin,
+    {
+        type Output = Result<<Children<O, C> as Parsed>::Output<O>, ParseError>;
         fn poll(
             self: core::pin::Pin<&mut Self>,
             _: &mut core::task::Context<'_>,
@@ -271,7 +359,11 @@ mod async_impl {
         }
     }
 
-    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, C: AsyncParse<O>> TakeReader<'a, R> for ChildrenParse<'a, O, R, C> {
+    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, C: AsyncParse<O>> TakeReader<'a, R>
+        for ChildrenParse<'a, O, R, C>
+    where
+        <C as Parsed>::Output<O>: Unpin,
+    {
         fn take_reader(self) -> (R, &'a ParseOptions) {
             (self.0, self.1)
         }
@@ -280,7 +372,10 @@ mod async_impl {
         }
     }
 
-    impl<O: Offset + Unpin, C: AsyncParse<O> + Unpin> AsyncParse<O> for Children<O, C> {
+    impl<O: Offset + Unpin, C: AsyncParse<O> + Unpin> AsyncParse<O> for Children<O, C>
+    where
+        <C as Parsed>::Output<O>: Unpin,
+    {
         type Fut<'a, R: PollReader<O> + Unpin> = ChildrenParse<'a, O, R, C>;
         fn create_fut<'a, R: PollReader<O> + Unpin>(
             reader: R,
@@ -291,3 +386,18 @@ mod async_impl {
     }
 }
 pub use async_impl::*;
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct UnknownChild<O> {
+    pub child_fcc: FourCC,
+    _offset: core::marker::PhantomData<O>,
+}
+
+impl<O> UnknownChild<O> {
+    pub fn new(child_fcc: FourCC) -> Self {
+        Self {
+            child_fcc,
+            _offset: core::marker::PhantomData,
+        }
+    }
+}

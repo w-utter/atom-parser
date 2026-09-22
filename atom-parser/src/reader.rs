@@ -1,4 +1,4 @@
-use crate::ParseOptions;
+use crate::{ParseOptions, TryFromArraySize};
 
 pub mod async_reader;
 pub use async_reader::{AsyncReadCstr, AsyncReader, AsyncSeek, PollReader};
@@ -6,16 +6,16 @@ pub mod extensions;
 pub use extensions::{BacktrackReader, TrailingReader};
 pub mod sync_reader;
 pub use sync_reader::Reader;
-//#[cfg(feature = "provided_readers")]
+#[cfg(feature = "provided_readers")]
 pub mod provided;
-//#[cfg(feature = "provided_readers")]
+#[cfg(feature = "provided_readers")]
 pub use provided::InMemoryReader;
 
 macro_rules! offset_trait {
    ($($t:path),+ $(,)?) => {
        pub trait Offset: $($t+)+ {}
        impl <T: $($t+)+ > Offset for T {}
-    }; 
+    };
 }
 
 offset_trait! {
@@ -26,6 +26,7 @@ offset_trait! {
     core::ops::Add,
     num_traits::Zero,
     TryFrom<usize>,
+    TryFromArraySize,
     Copy,
 }
 

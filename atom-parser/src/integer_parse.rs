@@ -1,10 +1,15 @@
 use crate::{
-    AsyncParse, Endianess, Parse, ParseError, ParseOptions, PollReader, Reader, TakeReader, Offset,
-    impl_take_reader,
+    AsyncParse, Endianess, Offset, Parse, ParseError, ParseOptions, Parsed, PollReader, Reader,
+    TakeReader, impl_take_reader,
 };
 
 pub enum IntegerParse<'a, O, R, T, const N: usize> {
-    Waiting(R, &'a ParseOptions, [u8; N], core::marker::PhantomData<(O, T)>),
+    Waiting(
+        R,
+        &'a ParseOptions,
+        [u8; N],
+        core::marker::PhantomData<(O, T)>,
+    ),
     Done(R, &'a ParseOptions),
     Empty,
 }
@@ -24,6 +29,11 @@ impl<'a, O, R, T, const N: usize> TakeReader<'a, R> for IntegerParse<'a, O, R, T
 macro_rules! parse_integers {
     ($($i:ty),*,) => {
         $(
+
+            impl Parsed for $i {
+                type Output<O> = $i;
+            }
+
             impl <O: Offset> Parse<O> for $i {
                 fn parse<T: Reader<O>>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
                     let mut buf = [0; core::mem::size_of::<$i>()];

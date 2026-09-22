@@ -1,4 +1,4 @@
-use crate::{Extent, ParseError, ParseOptions, PollReader, Reader, TakeReader, Offset};
+use crate::{Extent, Offset, ParseError, ParseOptions, PollReader, Reader, TakeReader};
 
 #[derive(Debug)]
 pub struct Payload<O, S = O> {
@@ -17,7 +17,7 @@ impl<O: Offset, S: Copy> Payload<O, S> {
     }
 }
 
-impl <O: Offset> Payload<O> {
+impl<O: Offset> Payload<O> {
     pub fn parse<T: Reader<O>>(reader: &mut T, _: &ParseOptions) -> Result<Self, ParseError> {
         let offset = reader.offset();
         let size = reader.remaining_size();
@@ -36,8 +36,15 @@ impl<O: Offset, S> Payload<O, S> {
     }
 }
 
-pub struct PayloadParse<'a, O: Unpin, R, S = O>(R, &'a ParseOptions, S, core::marker::PhantomData<O>);
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S: Copy + Unpin> Future for PayloadParse<'a, O, R, S> {
+pub struct PayloadParse<'a, O: Unpin, R, S = O>(
+    R,
+    &'a ParseOptions,
+    S,
+    core::marker::PhantomData<O>,
+);
+impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S: Copy + Unpin> Future
+    for PayloadParse<'a, O, R, S>
+{
     type Output = Result<Payload<O, S>, ParseError>;
     fn poll(
         self: core::pin::Pin<&mut Self>,
@@ -58,7 +65,7 @@ impl<'a, O: Unpin, R, S> TakeReader<'a, R> for PayloadParse<'a, O, R, S> {
     }
 }
 
-impl <O: Offset + Unpin> Payload<O> {
+impl<O: Offset + Unpin> Payload<O> {
     pub fn create_fut<'a, R: PollReader<O> + Unpin>(
         reader: R,
         options: &'a ParseOptions,

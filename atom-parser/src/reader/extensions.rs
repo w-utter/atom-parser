@@ -1,4 +1,4 @@
-use crate::{IoError, PollReader, Reader, SwapOffsets, Offset};
+use crate::{IoError, Offset, PollReader, Reader, SwapOffsets};
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
@@ -54,7 +54,9 @@ mod backtrack_reader {
         }
     }
 
-    impl<O: Offset + Unpin, R: PollReader<O> + SwapOffsets<O> + Unpin> PollReader<O> for BacktrackReader<O, R> {
+    impl<O: Offset + Unpin, R: PollReader<O> + SwapOffsets<O> + Unpin> PollReader<O>
+        for BacktrackReader<O, R>
+    {
         fn poll_read(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,

@@ -6,8 +6,8 @@ pub mod integer_parse;
 pub use integer_parse::IntegerParse;
 pub mod array;
 pub use array::{
-    ArrayGuard, ArrayParse, AsyncDynamicArrayIter, DynamicArray, DynamicArrayIter,
-    DynamicArrayParse,
+    ArrayGuard, ArrayParse, ArraySize, AsyncDynamicArrayIter, DynamicArray, DynamicArrayIter,
+    DynamicArrayParse, TryFromArraySize,
 };
 pub mod async_iter_state;
 pub use async_iter_state::AsyncIterState;
@@ -17,13 +17,12 @@ pub mod atom_header;
 pub use atom_header::{AtomHeader, AtomHeaderParse};
 pub mod reader;
 // impl_take_reader is also exported from here
-pub use reader::{
-    AsyncReadCstr, AsyncReader, AsyncSeek, BacktrackReader, PollReader, Reader, SwapOffsets,
-    TakeReader, TrailingReader,
-    Offset,
-};
-//#[cfg(feature = "provided_readers")]
+#[cfg(feature = "provided_readers")]
 pub use reader::InMemoryReader;
+pub use reader::{
+    AsyncReadCstr, AsyncReader, AsyncSeek, BacktrackReader, Offset, PollReader, Reader,
+    SwapOffsets, TakeReader, TrailingReader,
+};
 pub mod parse_options;
 pub use parse_options::{Endianess, ParseOptions};
 pub mod error;
@@ -41,9 +40,11 @@ pub use payload::{Payload, PayloadParse};
 pub mod trailing;
 pub use trailing::{AsyncTrailingIterator, Trailing, TrailingIterator, TrailingParse};
 pub mod parse;
-pub use parse::{AsyncParse, Parse};
+pub use parse::{AsyncParse, Parse, Parsed};
 pub mod flags;
 pub use flags::{Flags, FlagsParse};
+pub mod version;
+pub use version::UnknownVersion;
 
 pub use atom_parser_derive::make_atom;
 pub use futures_core::Stream as AsyncIterator;

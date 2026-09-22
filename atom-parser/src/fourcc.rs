@@ -1,5 +1,6 @@
 use crate::{
-    AsyncParse, IntegerParse, Parse, ParseError, ParseOptions, PollReader, Reader, TakeReader, Offset,
+    AsyncParse, IntegerParse, Offset, Parse, ParseError, ParseOptions, Parsed, PollReader, Reader,
+    TakeReader,
 };
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
@@ -18,7 +19,11 @@ impl core::fmt::Debug for FourCC {
     }
 }
 
-impl <O: Offset> Parse<O> for FourCC {
+impl Parsed for FourCC {
+    type Output<O> = FourCC;
+}
+
+impl<O: Offset> Parse<O> for FourCC {
     fn parse<T: Reader<O>>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
         let inner = u32::parse(reader, options)?;
         Ok(Self(inner.to_be_bytes()))
@@ -64,7 +69,7 @@ impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> TakeReader<'a, R> for Four
     }
 }
 
-impl <O: Offset + Unpin> AsyncParse<O> for FourCC {
+impl<O: Offset + Unpin> AsyncParse<O> for FourCC {
     type Fut<'a, R: PollReader<O> + Unpin> = FourCCParse<'a, O, R>;
     fn create_fut<'a, R: PollReader<O> + Unpin>(
         reader: R,

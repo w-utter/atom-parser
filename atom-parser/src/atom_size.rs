@@ -1,4 +1,4 @@
-use crate::{ParseError, ParseOptions, PollReader, Reader, TakeReader, impl_take_reader, Offset};
+use crate::{Offset, ParseError, ParseOptions, PollReader, Reader, TakeReader, impl_take_reader};
 
 #[cfg(feature = "extended_sized_atoms")]
 use crate::{AsyncParse, IntegerParse, Parse};
@@ -196,7 +196,9 @@ impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for AtomSizeParse<'
     }
 }
 
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> TakeReader<'a, R> for AtomSizeParse<'a, O, R> {
+impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> TakeReader<'a, R>
+    for AtomSizeParse<'a, O, R>
+{
     impl_take_reader! {}
 
     fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {

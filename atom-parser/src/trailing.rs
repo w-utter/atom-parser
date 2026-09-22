@@ -1,6 +1,7 @@
 use crate::{
-    AsyncIterState, AsyncIterator, AsyncParse, BacktrackReader, Parse, ParseError, ParseOptions,
-    PollReader, Reader, SwapOffsets, TakeReader, TrailingReader, TryFromIntError, Offset
+    AsyncIterState, AsyncIterator, AsyncParse, BacktrackReader, Offset, Parse, ParseError,
+    ParseOptions, Parsed, PollReader, Reader, SwapOffsets, TakeReader, TrailingReader,
+    TryFromIntError,
 };
 
 #[derive(Debug)]
@@ -37,9 +38,18 @@ impl<O: Offset, I: Parse<O>, S> Trailing<O, I, S> {
     }
 }
 
-pub struct TrailingParse<'a, O: Unpin, R, T, S = O>(R, &'a ParseOptions, S, core::marker::PhantomData<(T, O)>);
+pub struct TrailingParse<'a, O: Unpin, R, T, S = O>(
+    R,
+    &'a ParseOptions,
+    S,
+    core::marker::PhantomData<(T, O)>,
+);
 
-impl<'a, O: Offset + Unpin, R: PollReader<O>, T: AsyncParse<O>, S: Unpin + Copy> Future for TrailingParse<'a, O, R, T, S> {
+impl<'a, O: Offset + Unpin, R: PollReader<O>, T: AsyncParse<O>, S: Unpin + Copy> Future
+    for TrailingParse<'a, O, R, T, S>
+where
+    <T as Parsed>::Output<O>: Unpin,
+{
     type Output = Result<Trailing<O, T, S>, ParseError>;
     fn poll(
         self: core::pin::Pin<&mut Self>,
@@ -55,7 +65,11 @@ impl<'a, O: Offset + Unpin, R: PollReader<O>, T: AsyncParse<O>, S: Unpin + Copy>
     }
 }
 
-impl<'a, O: Offset + Unpin, R, T: AsyncParse<O>, S: Unpin> TakeReader<'a, R> for TrailingParse<'a, O, R, T, S> {
+impl<'a, O: Offset + Unpin, R, T: AsyncParse<O>, S: Unpin> TakeReader<'a, R>
+    for TrailingParse<'a, O, R, T, S>
+where
+    <T as Parsed>::Output<O>: Unpin,
+{
     fn take_reader(self) -> (R, &'a ParseOptions) {
         (self.0, self.1)
     }
@@ -64,7 +78,10 @@ impl<'a, O: Offset + Unpin, R, T: AsyncParse<O>, S: Unpin> TakeReader<'a, R> for
     }
 }
 
-impl<O: Offset + Unpin, T: AsyncParse<O> + Unpin> Trailing<O, T> {
+impl<O: Offset + Unpin, T: AsyncParse<O> + Unpin> Trailing<O, T>
+where
+    <T as Parsed>::Output<O>: Unpin,
+{
     pub fn create_fut<'a, R: PollReader<O> + Unpin>(
         reader: R,
         options: &'a ParseOptions,
@@ -74,7 +91,10 @@ impl<O: Offset + Unpin, T: AsyncParse<O> + Unpin> Trailing<O, T> {
     }
 }
 
-impl<O: Offset + Unpin, T: AsyncParse<O> + Unpin, S: Unpin> Trailing<O, T, S> {
+impl<O: Offset + Unpin, T: AsyncParse<O> + Unpin, S: Unpin> Trailing<O, T, S>
+where
+    <T as Parsed>::Output<O>: Unpin,
+{
     pub fn create_fut_from_len<'a, R: PollReader<O> + Unpin>(
         size: S,
         reader: R,
@@ -118,7 +138,7 @@ impl<'a, O: Offset, R: SwapOffsets<O> + Reader<O>, T> TrailingIterator<'a, O, R,
 }
 
 impl<'a, O: Offset, T: Parse<O>, R: Reader<O>> Iterator for TrailingIterator<'a, O, R, T> {
-    type Item = Result<T, ParseError>;
+    type Item = Result<<T as Parsed>::Output<O>, ParseError>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.reader.remaining_size() == O::zero() {
             return None;
@@ -129,7 +149,14 @@ impl<'a, O: Offset, T: Parse<O>, R: Reader<O>> Iterator for TrailingIterator<'a,
     }
 }
 
-pub struct AsyncTrailingIterator<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncParse<O> + Unpin> {
+pub struct AsyncTrailingIterator<
+    'a,
+    O: Offset + Unpin,
+    R: SwapOffsets<O> + PollReader<O> + Unpin,
+    T: AsyncParse<O> + Unpin,
+> where
+    <T as Parsed>::Output<O>: Unpin,
+{
     state: AsyncIterState<
         'a,
         BacktrackReader<O, TrailingReader<O, &'a mut R>>,
@@ -139,6 +166,8 @@ pub struct AsyncTrailingIterator<'a, O: Offset + Unpin, R: SwapOffsets<O> + Poll
 
 impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncParse<O> + Unpin>
     AsyncTrailingIterator<'a, O, R, T>
+where
+    <T as Parsed>::Output<O>: Unpin,
 {
     pub fn from_trailing<S: Copy + TryInto<O>>(
         trailing: &Trailing<O, T, S>,
@@ -163,10 +192,12 @@ impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncP
     }
 }
 
-impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncParse<O> + Unpin> AsyncIterator
-    for AsyncTrailingIterator<'a, O, R, T>
+impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncParse<O> + Unpin>
+    AsyncIterator for AsyncTrailingIterator<'a, O, R, T>
+where
+    <T as Parsed>::Output<O>: Unpin,
 {
-    type Item = Result<T, ParseError>;
+    type Item = Result<<T as Parsed>::Output<O>, ParseError>;
     fn poll_next(
         mut self: core::pin::Pin<&mut Self>,
         ctx: &mut core::task::Context<'_>,
@@ -207,9 +238,17 @@ impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncP
 }
 
 impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncParse<O> + Unpin>
-    TakeReader<'a, BacktrackReader<O, TrailingReader<O, &'a mut R>>> for AsyncTrailingIterator<'a, O, R, T>
+    TakeReader<'a, BacktrackReader<O, TrailingReader<O, &'a mut R>>>
+    for AsyncTrailingIterator<'a, O, R, T>
+where
+    <T as Parsed>::Output<O>: Unpin,
 {
-    fn take_reader(self) -> (BacktrackReader<O, TrailingReader<O, &'a mut R>>, &'a ParseOptions) {
+    fn take_reader(
+        self,
+    ) -> (
+        BacktrackReader<O, TrailingReader<O, &'a mut R>>,
+        &'a ParseOptions,
+    ) {
         self.state.take_reader()
     }
     fn borrow_reader(

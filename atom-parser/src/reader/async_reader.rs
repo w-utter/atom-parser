@@ -1,4 +1,4 @@
-use crate::{IoError, SwapOffsets, Offset};
+use crate::{IoError, Offset, SwapOffsets};
 use core::marker::PhantomPinned;
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -33,18 +33,11 @@ impl<'a, O: Offset, R: Unpin + PollReader<O>> PollReader<O> for &'a mut R {
         Pin::new(&mut **self).poll_read(cx, buf)
     }
 
-    fn poll_read_cstr(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<O, IoError>> {
+    fn poll_read_cstr(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<O, IoError>> {
         Pin::new(&mut **self).poll_read_cstr(cx)
     }
 
-    fn seek_start(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        amt: O,
-    ) -> Result<(), IoError> {
+    fn seek_start(mut self: Pin<&mut Self>, cx: &mut Context<'_>, amt: O) -> Result<(), IoError> {
         Pin::new(&mut **self).seek_start(cx, amt)
     }
 
@@ -120,7 +113,10 @@ impl<O: Offset, R: PollReader<O>> AsyncReadCstr<O, R> {
     }
 }
 
-unsafe impl<O: Offset + Unpin, R: PollReader<O> +Unpin> pin_project::UnsafeUnpin for AsyncReadCstr<O, R> {}
+unsafe impl<O: Offset + Unpin, R: PollReader<O> + Unpin> pin_project::UnsafeUnpin
+    for AsyncReadCstr<O, R>
+{
+}
 
 impl<O: Offset, R: PollReader<O> + Unpin> Future for AsyncReadCstr<O, R> {
     type Output = Result<O, IoError>;
