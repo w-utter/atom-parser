@@ -1,4 +1,4 @@
-use crate::ParseOptions;
+use crate::{ParseOptions, TryFromArraySize};
 
 pub mod async_reader;
 pub use async_reader::{AsyncReadCstr, AsyncReader, AsyncSeek, PollReader};
@@ -6,20 +6,39 @@ pub mod extensions;
 pub use extensions::{BacktrackReader, TrailingReader};
 pub mod sync_reader;
 pub use sync_reader::Reader;
-//#[cfg(feature = "provided_readers")]
+#[cfg(feature = "provided_readers")]
 pub mod provided;
-//#[cfg(feature = "provided_readers")]
+#[cfg(feature = "provided_readers")]
 pub use provided::InMemoryReader;
+
+macro_rules! offset_trait {
+   ($($t:path),+ $(,)?) => {
+       pub trait Offset: $($t+)+ {}
+       impl <T: $($t+)+ > Offset for T {}
+    };
+}
+
+offset_trait! {
+    core::cmp::PartialOrd,
+    core::cmp::PartialEq,
+    num_traits::CheckedSub,
+    num_traits::CheckedAdd,
+    core::ops::Add,
+    num_traits::Zero,
+    TryFrom<usize>,
+    TryFromArraySize,
+    Copy,
+}
 
 /// used for nested parsing
 /// e.g swapping out the readers offset for another
 /// to be able to backtrack / read ahead to a known position
-pub trait SwapOffsets {
-    fn swap_offsets(&mut self, offset: &mut usize);
+pub trait SwapOffsets<O> {
+    fn swap_offsets(&mut self, offset: &mut O);
 }
 
-impl<'a, S: SwapOffsets> SwapOffsets for &'a mut S {
-    fn swap_offsets(&mut self, offset: &mut usize) {
+impl<'a, O, S: SwapOffsets<O>> SwapOffsets<O> for &'a mut S {
+    fn swap_offsets(&mut self, offset: &mut O) {
         S::swap_offsets(self, offset)
     }
 }

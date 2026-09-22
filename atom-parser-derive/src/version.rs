@@ -192,13 +192,46 @@ impl Versioned {
     ) -> proc_macro2::TokenStream {
         use quote::quote;
 
-        let mut generics = generics.clone();
-        for param in &mut generics.params {
+        let generics = generics.clone();
+
+        let mut parse_generics = generics.clone();
+
+        for param in &mut parse_generics.params {
             if let syn::GenericParam::Type(ty) = param {
-                ty.bounds.push(syn::parse_quote!(::core::marker::Unpin));
+                ty.bounds.push(syn::parse_quote!(::#KRATE::parse::Parse<O>));
             }
         }
 
+        let mut async_parse_generics = generics.clone();
+
+        let async_where_clause =
+            async_parse_generics
+                .where_clause
+                .get_or_insert_with(|| syn::WhereClause {
+                    where_token: <syn::Token![where]>::default(),
+                    predicates: syn::punctuated::Punctuated::new(),
+                });
+
+        for param in &mut async_parse_generics.params {
+            if let syn::GenericParam::Type(ty) = param {
+                ty.bounds
+                    .push(syn::parse_quote!(::#KRATE::parse::AsyncParse<O>));
+                ty.bounds.push(syn::parse_quote!(::core::marker::Unpin));
+                let name = &ty.ident;
+                async_where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<O>: ::core::marker::Unpin));
+            }
+        }
+
+        let mut storage_generics = generics.clone();
+        let mut async_generics = generics.clone();
+        parse_generics
+            .params
+            .push(syn::parse_quote!(O: ::#KRATE::reader::Offset = usize));
+        async_parse_generics
+            .params
+            .push(syn::parse_quote!(O: ::#KRATE::reader::Offset + ::core::marker::Unpin = usize));
+        storage_generics.params.push(syn::parse_quote!(O = usize));
+        let (parse_impl_generics, parse_ty_generics, _) = parse_generics.split_for_impl();
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
         let enum_name = Self::format_enum_name_from_versioned_struct(name);
@@ -206,7 +239,7 @@ impl Versioned {
             let variant = Self::versioned_enum_variant_from_lit(v);
             let version_mod = Self::version_mod_from_lit(v);
             let versioned_name = Self::versioned_struct_from_lit(&name, v);
-            quote!(#variant(#version_mod::#versioned_name #ty_generics),)
+            quote!(#variant(#version_mod::#versioned_name #parse_ty_generics),)
         });
 
         let sync_parsing = self.versions.iter().map(|(v, _)| {
@@ -214,14 +247,14 @@ impl Versioned {
             let version_mod = Self::version_mod_from_lit(v);
             let versioned_name = Self::versioned_struct_from_lit(&name, v);
 
-            quote!(#v => Self::#variant(#version_mod::#versioned_name::parse(reader, options)?),)
+            quote!(#v => #enum_name::#variant(#version_mod::#versioned_name::parse(reader, options)?),)
         });
 
         let async_sm_variants = self.versions.iter().map(|(v, _)| {
             let variant = Self::versioned_enum_variant_from_lit(v);
             let version_mod = Self::version_mod_from_lit(v);
             let versioned_name = Self::versioned_struct_from_lit(&name, v);
-            quote!(#variant(<#version_mod::#versioned_name #ty_generics as ::#KRATE::parse::AsyncParse>::Fut<'a, R>))
+            quote!(#variant(<#version_mod::#versioned_name #ty_generics as ::#KRATE::parse::AsyncParse<O>>::Fut<'a, R>))
         });
 
         let async_parse_enum_name = quote::format_ident!("Async{}Parse", enum_name);
@@ -254,42 +287,70 @@ impl Versioned {
             let versioned_name = Self::versioned_struct_from_lit(&name, v);
 
             quote! {
-                #v => #async_parse_enum_name::#variant(<#version_mod::#versioned_name #ty_generics as ::#KRATE::parse::AsyncParse>::create_fut(reader, opts)),
+                #v => #async_parse_enum_name::#variant(<#version_mod::#versioned_name #ty_generics as ::#KRATE::parse::AsyncParse<O>>::create_fut(reader, opts)),
             }
         });
 
         let version_repr = &self.version_repr;
 
-        let mut async_parse_generics = generics.clone();
-        async_parse_generics.params.push(syn::parse_quote!('a));
-        async_parse_generics
+        {
+            let where_clause =
+                async_generics
+                    .where_clause
+                    .get_or_insert_with(|| syn::WhereClause {
+                        where_token: <syn::Token![where]>::default(),
+                        predicates: syn::punctuated::Punctuated::new(),
+                    });
+
+            for param in &mut async_generics.params {
+                if let syn::GenericParam::Type(ty) = param {
+                    ty.bounds
+                        .push(syn::parse_quote!(::#KRATE::parse::AsyncParse<O>));
+                    ty.bounds.push(syn::parse_quote!(::core::marker::Unpin));
+                    let name = &ty.ident;
+                    where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<O>: ::core::marker::Unpin));
+                }
+            }
+        }
+
+        async_generics.params.push(syn::parse_quote!('a));
+        async_generics
             .params
-            .push(syn::parse_quote!(R: ::#KRATE::reader::PollReader + ::core::marker::Unpin));
+            .push(syn::parse_quote!(O: ::#KRATE::reader::Offset + ::core::marker::Unpin));
+        async_generics
+            .params
+            .push(syn::parse_quote!(R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin));
 
         let (async_impl_generics, async_ty_generics, async_where_clause) =
             async_parse_generics.split_for_impl();
 
+        let (async_parse_impl_generics, async_parse_ty_generics, async_parse_where_clause) =
+            async_generics.split_for_impl();
+
         quote! {
             #(#attrs)*
-            #[derive(Debug)]
-            pub enum #enum_name #generics {
+            pub enum #enum_name #storage_generics {
                 #(#enum_variants)*
-                Unknown(#version_repr),
+                Unknown(::#KRATE::version::UnknownVersion<O, #version_repr>),
+            }
+
+            impl #impl_generics ::#KRATE::parse::Parsed for #enum_name #ty_generics #where_clause {
+                type Output<O> = #enum_name #parse_ty_generics ;
             }
 
             use super::*;
-            impl #impl_generics ::#KRATE::parse::Parse for #enum_name #ty_generics #where_clause {
-                fn parse<T: ::#KRATE::reader::Reader>(reader: &mut T, options: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<Self, ::#KRATE::error::ParseError> {
-                    let version_ident = <#version_repr as ::#KRATE::parse::Parse>::parse(reader, options)?;
+            impl #parse_impl_generics ::#KRATE::parse::Parse<O> for #enum_name #ty_generics #where_clause {
+                fn parse<T: ::#KRATE::reader::Reader<O>>(reader: &mut T, options: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<O>, ::#KRATE::error::ParseError> {
+                    let version_ident = <#version_repr as ::#KRATE::parse::Parse<O>>::parse(reader, options)?;
                     Ok(match version_ident {
                         #(#sync_parsing)*
-                        u => Self::Unknown(u),
+                        u => #enum_name::Unknown(::#KRATE::version::UnknownVersion::new(u)),
                     })
                 }
             }
 
-            impl #impl_generics #enum_name #ty_generics #where_clause {
-                pub fn create_fut_from_version<'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin>(version: #version_repr, reader: R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> #async_parse_enum_name #async_ty_generics {
+            impl #async_impl_generics #enum_name #async_ty_generics #async_where_clause {
+                pub fn create_fut_from_version<'a, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin>(version: #version_repr, reader: R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> #async_parse_enum_name #async_parse_ty_generics {
                     match version {
                         #(#async_create_fut)*
                         u => {
@@ -301,22 +362,22 @@ impl Versioned {
                 }
             }
 
-            pub enum #async_parse_enum_name #async_parse_generics {
+            pub enum #async_parse_enum_name #async_generics #async_parse_where_clause {
                 #(#async_sm_variants,)*
-                Unknown(#version_repr, ::#KRATE::reader::AsyncSeek<R>, &'a ::#KRATE::parse_options::ParseOptions),
+                Unknown(#version_repr, ::#KRATE::reader::AsyncSeek<O, R>, &'a ::#KRATE::parse_options::ParseOptions),
                 Done(R, &'a ::#KRATE::parse_options::ParseOptions),
                 Empty,
             }
 
-            impl #impl_generics ::#KRATE::parse::AsyncParse for #enum_name #ty_generics #where_clause {
-                type Fut<'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin> = #async_parse_enum_name #async_ty_generics;
-                fn create_fut<'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin>(reader: R, options: &'a ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'a, R> {
+            impl #async_impl_generics ::#KRATE::parse::AsyncParse<O> for #enum_name #ty_generics #async_parse_where_clause {
+                type Fut<'a, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin> = #async_parse_enum_name #async_parse_ty_generics;
+                fn create_fut<'a, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin>(reader: R, options: &'a ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'a, R> {
                     unreachable!("can only be called when version is available")
                 }
             }
 
-            impl #async_impl_generics Future for #async_parse_enum_name #async_ty_generics #async_where_clause {
-                type Output = ::core::result::Result<#enum_name #ty_generics, ::#KRATE::error::ParseError>;
+            impl #async_parse_impl_generics Future for #async_parse_enum_name #async_parse_ty_generics #async_parse_where_clause {
+                type Output = ::core::result::Result<<#enum_name #ty_generics as ::#KRATE::parse::Parsed>::Output<O>, ::#KRATE::error::ParseError>;
                 fn poll(mut self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
                     loop {
                         let mut this = ::core::mem::replace(&mut *self, Self::Empty);
@@ -332,7 +393,7 @@ impl Versioned {
                                         let _ = res?;
                                         let reader = seek.reader;
                                         *self = Self::Done(reader, opts);
-                                        return ::core::task::Poll::Ready(Ok(#enum_name::Unknown(version)));
+                                        return ::core::task::Poll::Ready(Ok(#enum_name::Unknown(::#KRATE::version::UnknownVersion::new(version))));
                                     }
                                 }
                             }
@@ -343,7 +404,7 @@ impl Versioned {
                 }
             }
 
-            impl #async_impl_generics ::#KRATE::reader::TakeReader<'a, R> for #async_parse_enum_name #async_ty_generics #async_where_clause {
+            impl #async_parse_impl_generics ::#KRATE::reader::TakeReader<'a, R> for #async_parse_enum_name #async_parse_ty_generics #async_parse_where_clause {
                 fn take_reader(self) -> (R, &'a ::#KRATE::parse_options::ParseOptions) {
                     match self {
                         Self::Done(reader, opts) => return (reader, opts),
@@ -370,30 +431,83 @@ impl Versioned {
         atom_mod: &syn::Ident,
     ) -> proc_macro2::TokenStream {
         use quote::quote;
-        let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+        let (_, ty_generics, _) = generics.split_for_impl();
+
+        let mut async_generics = generics.clone();
+
+        {
+            let async_where_clause =
+                async_generics
+                    .where_clause
+                    .get_or_insert_with(|| syn::WhereClause {
+                        where_token: <syn::Token![where]>::default(),
+                        predicates: syn::punctuated::Punctuated::new(),
+                    });
+
+            for param in &mut async_generics.params {
+                if let syn::GenericParam::Type(ty) = param {
+                    ty.bounds
+                        .push(syn::parse_quote!(::#KRATE::parse::AsyncParse<O>));
+                    ty.bounds.push(syn::parse_quote!(::core::marker::Unpin));
+                    let name = &ty.ident;
+                    async_where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<O>: ::core::marker::Unpin));
+                }
+            }
+        }
+
+        async_generics
+            .params
+            .push(syn::parse_quote!(O: ::#KRATE::reader::Offset + ::core::marker::Unpin));
+        let (async_version_impl_generics, async_version_ty_generics, async_version_where_clause) =
+            async_generics.split_for_impl();
 
         let mut async_parse_generics = generics.clone();
+
+        {
+            let async_where_clause =
+                async_parse_generics
+                    .where_clause
+                    .get_or_insert_with(|| syn::WhereClause {
+                        where_token: <syn::Token![where]>::default(),
+                        predicates: syn::punctuated::Punctuated::new(),
+                    });
+
+            for param in &mut async_parse_generics.params {
+                if let syn::GenericParam::Type(ty) = param {
+                    ty.bounds
+                        .push(syn::parse_quote!(::#KRATE::parse::AsyncParse<O>));
+                    ty.bounds.push(syn::parse_quote!(::core::marker::Unpin));
+                    let name = &ty.ident;
+                    async_where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<O>: ::core::marker::Unpin));
+                }
+            }
+        }
+
         async_parse_generics.params.push(syn::parse_quote!('a));
         async_parse_generics
             .params
-            .push(syn::parse_quote!(R: ::#KRATE::reader::PollReader + ::core::marker::Unpin));
+            .push(syn::parse_quote!(O: ::#KRATE::reader::Offset + ::core::marker::Unpin));
+
+        async_parse_generics
+            .params
+            .push(syn::parse_quote!(R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin));
         let (async_impl_generics, async_ty_generics, async_where_clause) =
             async_parse_generics.split_for_impl();
 
         let enum_name = Self::format_enum_name_from_versioned_struct(name);
-        let async_parse_enum_name = quote::format_ident!("Asnyc{}Parse", name);
+        let async_parse_enum_name = quote::format_ident!("Async{}Parse", name);
         let parse_repr = &self.version_repr;
 
         quote! {
-            pub enum #async_parse_enum_name #async_parse_generics {
-                Version(<#parse_repr as ::#KRATE::parse::AsyncParse>::Fut<'a, R>),
-                VersionSpecific(<#atom_mod::#enum_name #ty_generics as ::#KRATE::parse::AsyncParse>::Fut<'a, R>),
+            pub enum #async_parse_enum_name #async_parse_generics #async_where_clause {
+                Version(<#parse_repr as ::#KRATE::parse::AsyncParse<O>>::Fut<'a, R>),
+                VersionSpecific(<#atom_mod::#enum_name #ty_generics as ::#KRATE::parse::AsyncParse<O>>::Fut<'a, R>),
                 Done(R, &'a ::#KRATE::parse_options::ParseOptions),
                 Empty,
             }
 
             impl #async_impl_generics Future for #async_parse_enum_name #async_ty_generics #async_where_clause {
-                type Output = ::core::result::Result<#name #ty_generics, ::#KRATE::error::ParseError>;
+                type Output = ::core::result::Result<<#name #ty_generics as ::#KRATE::parse::Parsed>::Output<O>, ::#KRATE::error::ParseError>;
                 fn poll(mut self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
                     loop {
                         let mut this = ::core::mem::replace(&mut*self, Self::Empty);
@@ -406,7 +520,7 @@ impl Versioned {
                                     }
                                     ::core::task::Poll::Ready(v) => {
                                         let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(fut);
-                                        *self = Self::VersionSpecific(<#atom_mod::#enum_name>::create_fut_from_version(v?, reader, opts));
+                                        *self = Self::VersionSpecific(<#atom_mod::#enum_name #async_version_ty_generics>::create_fut_from_version(v?, reader, opts));
                                     }
                                 }
                             }
@@ -452,10 +566,10 @@ impl Versioned {
                 }
             }
 
-            impl #impl_generics ::#KRATE::parse::AsyncParse for #name #ty_generics #where_clause {
-                type Fut<'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin> = #async_parse_enum_name #async_ty_generics;
-                fn create_fut<'a, R: ::#KRATE::reader::PollReader + ::core::marker::Unpin>(reader: R, options: &'a ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'a, R> {
-                    #async_parse_enum_name::Version(<#parse_repr as ::#KRATE::parse::AsyncParse>::create_fut(reader, options))
+            impl #async_version_impl_generics ::#KRATE::parse::AsyncParse<O> for #name #ty_generics #async_version_where_clause {
+                type Fut<'a, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin> = #async_parse_enum_name #async_ty_generics;
+                fn create_fut<'a, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin>(reader: R, options: &'a ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'a, R> {
+                    #async_parse_enum_name::Version(<#parse_repr as ::#KRATE::parse::AsyncParse<O>>::create_fut(reader, options))
                 }
             }
         }

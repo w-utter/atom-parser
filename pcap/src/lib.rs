@@ -1,12 +1,14 @@
 use atom_parser::make_atom;
 
 make_atom! {
+    #[derive(Debug)]
     #[enum_repr(u32)]
     enum MagicNumber {
         UsingMicroseconds = 0xA1B2C3D4,
         UsingNanoseconds = 0xA1B23C4D,
     }
 
+    #[derive(Debug)]
     struct Header {
         magic_num: MagicNumber,
         major_version: u16,
@@ -17,6 +19,7 @@ make_atom! {
         link_type: u16,
     }
 
+    #[derive(Debug)]
     struct Record {
         second_ts: u32,
         subsecond_ts: u32,

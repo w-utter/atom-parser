@@ -1,4 +1,4 @@
-use crate::{IoError, PollReader, Reader, SwapOffsets};
+use crate::{IoError, Offset, PollReader, Reader, SwapOffsets};
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
@@ -6,13 +6,13 @@ use core::task::{Context, Poll};
 // for things like iterating over collections
 mod backtrack_reader {
     use super::*;
-    pub struct BacktrackReader<R: SwapOffsets> {
+    pub struct BacktrackReader<O, R: SwapOffsets<O>> {
         pub reader: R,
-        stored_offset: usize,
+        stored_offset: O,
     }
 
-    impl<R: SwapOffsets> BacktrackReader<R> {
-        pub fn new(mut reader: R, mut backtrack_to: usize) -> Self {
+    impl<O, R: SwapOffsets<O>> BacktrackReader<O, R> {
+        pub fn new(mut reader: R, mut backtrack_to: O) -> Self {
             reader.swap_offsets(&mut backtrack_to);
             Self {
                 reader,
@@ -21,23 +21,23 @@ mod backtrack_reader {
         }
     }
 
-    impl<R: SwapOffsets> Drop for BacktrackReader<R> {
+    impl<O, R: SwapOffsets<O>> Drop for BacktrackReader<O, R> {
         fn drop(&mut self) {
             self.reader.swap_offsets(&mut self.stored_offset)
         }
     }
 
-    impl<S: SwapOffsets> SwapOffsets for BacktrackReader<S> {
-        fn swap_offsets(&mut self, offset: &mut usize) {
+    impl<O, S: SwapOffsets<O>> SwapOffsets<O> for BacktrackReader<O, S> {
+        fn swap_offsets(&mut self, offset: &mut O) {
             self.reader.swap_offsets(offset)
         }
     }
 
-    impl<R: Reader> Reader for BacktrackReader<R> {
-        fn remaining_size(&self) -> usize {
+    impl<O: Offset, R: Reader<O>> Reader<O> for BacktrackReader<O, R> {
+        fn remaining_size(&self) -> O {
             self.reader.remaining_size()
         }
-        fn offset(&self) -> usize {
+        fn offset(&self) -> O {
             self.reader.offset()
         }
 
@@ -45,16 +45,18 @@ mod backtrack_reader {
             self.reader.read(bytes)
         }
 
-        fn read_cstr(&mut self) -> Result<usize, IoError> {
+        fn read_cstr(&mut self) -> Result<O, IoError> {
             self.reader.read_cstr()
         }
 
-        fn seek(&mut self, amt: usize) -> Result<(), IoError> {
+        fn seek(&mut self, amt: O) -> Result<(), IoError> {
             self.reader.seek(amt)
         }
     }
 
-    impl<R: PollReader + SwapOffsets + Unpin> PollReader for BacktrackReader<R> {
+    impl<O: Offset + Unpin, R: PollReader<O> + SwapOffsets<O> + Unpin> PollReader<O>
+        for BacktrackReader<O, R>
+    {
         fn poll_read(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -66,14 +68,14 @@ mod backtrack_reader {
         fn poll_read_cstr(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
-        ) -> Poll<Result<usize, IoError>> {
+        ) -> Poll<Result<O, IoError>> {
             Pin::new(&mut self.reader).poll_read_cstr(cx)
         }
 
         fn seek_start(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
-            amt: usize,
+            amt: O,
         ) -> Result<(), IoError> {
             Pin::new(&mut self.reader).seek_start(cx, amt)
         }
@@ -85,11 +87,11 @@ mod backtrack_reader {
             Pin::new(&mut self.reader).poll_seek_complete(cx)
         }
 
-        fn offset(&self) -> usize {
+        fn offset(&self) -> O {
             self.reader.offset()
         }
 
-        fn remaining_size(&self) -> usize {
+        fn remaining_size(&self) -> O {
             self.reader.remaining_size()
         }
     }
@@ -101,43 +103,51 @@ pub use backtrack_reader::*;
 // e.g nested atoms
 mod trailing_reader {
     pub use super::*;
-    pub struct TrailingReader<R> {
+    pub struct TrailingReader<O, R> {
         pub reader: R,
-        max_offset: usize,
+        max_offset: O,
     }
 
-    impl<R> TrailingReader<R> {
-        pub fn new(reader: R, max_offset: usize) -> Self {
+    impl<O, R> TrailingReader<O, R> {
+        pub fn new(reader: R, max_offset: O) -> Self {
             Self { reader, max_offset }
         }
     }
 
-    impl<S: SwapOffsets> SwapOffsets for TrailingReader<S> {
-        fn swap_offsets(&mut self, offset: &mut usize) {
+    impl<O, S: SwapOffsets<O>> SwapOffsets<O> for TrailingReader<O, S> {
+        fn swap_offsets(&mut self, offset: &mut O) {
             self.reader.swap_offsets(offset)
         }
     }
 
-    impl<R: Reader> Reader for TrailingReader<R> {
-        fn remaining_size(&self) -> usize {
+    impl<O: Offset, R: Reader<O>> Reader<O> for TrailingReader<O, R> {
+        fn remaining_size(&self) -> O {
             self.max_offset
-                .checked_sub(self.reader.offset())
-                .unwrap_or_default()
+                .checked_sub(&self.reader.offset())
+                .unwrap_or(O::zero())
         }
 
-        fn offset(&self) -> usize {
+        fn offset(&self) -> O {
             self.reader.offset()
         }
 
         fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError> {
-            if bytes.len() > self.remaining_size() {
-                return Err(std::io::Error::other("not enough spc"));
+            let res: Result<O, _> = bytes.len().try_into();
+            match res {
+                Ok(len) if len > self.remaining_size() => {
+                    return Err(std::io::Error::other("not enough spc"));
+                }
+                Err(_) => {
+                    return Err(std::io::Error::other("too big"));
+                }
+                _ => (),
             }
+
             self.reader.read(bytes)?;
             Ok(())
         }
 
-        fn read_cstr(&mut self) -> Result<usize, IoError> {
+        fn read_cstr(&mut self) -> Result<O, IoError> {
             let len = self.reader.read_cstr()?;
             if len > self.remaining_size() {
                 return Err(std::io::Error::other("not enough spc"));
@@ -145,7 +155,7 @@ mod trailing_reader {
             Ok(len)
         }
 
-        fn seek(&mut self, amt: usize) -> Result<(), IoError> {
+        fn seek(&mut self, amt: O) -> Result<(), IoError> {
             if amt > self.remaining_size() {
                 return Err(std::io::Error::other("not enough spc"));
             }
@@ -154,22 +164,30 @@ mod trailing_reader {
         }
     }
 
-    impl<R: PollReader + Unpin> PollReader for TrailingReader<R> {
+    impl<O: Offset + Unpin, R: PollReader<O> + Unpin> PollReader<O> for TrailingReader<O, R> {
         fn poll_read(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
             buf: &mut [u8],
         ) -> Poll<Result<(), IoError>> {
-            if buf.len() > self.remaining_size() {
-                return Poll::Ready(Err(std::io::Error::other("not enough spc")));
+            let res: Result<O, _> = buf.len().try_into();
+            match res {
+                Ok(len) if len > self.remaining_size() => {
+                    return Poll::Ready(Err(std::io::Error::other("not enough spc")));
+                }
+                Err(_) => {
+                    return Poll::Ready(Err(std::io::Error::other("too big")));
+                }
+                _ => (),
             }
+
             Pin::new(&mut self.reader).poll_read(cx, buf)
         }
 
         fn poll_read_cstr(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
-        ) -> Poll<Result<usize, IoError>> {
+        ) -> Poll<Result<O, IoError>> {
             let len = core::task::ready!(Pin::new(&mut self.reader).poll_read_cstr(cx))?;
 
             if len > self.remaining_size() {
@@ -181,7 +199,7 @@ mod trailing_reader {
         fn seek_start(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
-            amt: usize,
+            amt: O,
         ) -> Result<(), IoError> {
             Pin::new(&mut self.reader).seek_start(cx, amt)
         }
@@ -193,14 +211,14 @@ mod trailing_reader {
             Pin::new(&mut self.reader).poll_seek_complete(cx)
         }
 
-        fn offset(&self) -> usize {
+        fn offset(&self) -> O {
             self.reader.offset()
         }
 
-        fn remaining_size(&self) -> usize {
+        fn remaining_size(&self) -> O {
             self.max_offset
-                .checked_sub(self.reader.offset())
-                .unwrap_or_default()
+                .checked_sub(&self.reader.offset())
+                .unwrap_or(O::zero())
         }
     }
 }

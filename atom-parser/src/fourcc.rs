@@ -1,5 +1,6 @@
 use crate::{
-    AsyncParse, IntegerParse, Parse, ParseError, ParseOptions, PollReader, Reader, TakeReader,
+    AsyncParse, IntegerParse, Offset, Parse, ParseError, ParseOptions, Parsed, PollReader, Reader,
+    TakeReader,
 };
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
@@ -18,18 +19,22 @@ impl core::fmt::Debug for FourCC {
     }
 }
 
-impl Parse for FourCC {
-    fn parse<T: Reader>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+impl Parsed for FourCC {
+    type Output<O> = FourCC;
+}
+
+impl<O: Offset> Parse<O> for FourCC {
+    fn parse<T: Reader<O>>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
         let inner = u32::parse(reader, options)?;
         Ok(Self(inner.to_be_bytes()))
     }
 }
 
-pub struct FourCCParse<'a, R: PollReader + Unpin> {
-    pub inner: <u32 as AsyncParse>::Fut<'a, R>,
+pub struct FourCCParse<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> {
+    pub inner: <u32 as AsyncParse<O>>::Fut<'a, R>,
 }
 
-impl<'a, R: PollReader + Unpin> Future for FourCCParse<'a, R> {
+impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for FourCCParse<'a, O, R> {
     type Output = Result<FourCC, ParseError>;
     fn poll(
         mut self: core::pin::Pin<&mut Self>,
@@ -55,7 +60,7 @@ impl<'a, R: PollReader + Unpin> Future for FourCCParse<'a, R> {
     }
 }
 
-impl<'a, R: PollReader + Unpin> TakeReader<'a, R> for FourCCParse<'a, R> {
+impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> TakeReader<'a, R> for FourCCParse<'a, O, R> {
     fn take_reader(self) -> (R, &'a ParseOptions) {
         self.inner.take_reader()
     }
@@ -64,9 +69,9 @@ impl<'a, R: PollReader + Unpin> TakeReader<'a, R> for FourCCParse<'a, R> {
     }
 }
 
-impl AsyncParse for FourCC {
-    type Fut<'a, R: PollReader + Unpin> = FourCCParse<'a, R>;
-    fn create_fut<'a, R: PollReader + Unpin>(
+impl<O: Offset + Unpin> AsyncParse<O> for FourCC {
+    type Fut<'a, R: PollReader<O> + Unpin> = FourCCParse<'a, O, R>;
+    fn create_fut<'a, R: PollReader<O> + Unpin>(
         reader: R,
         options: &'a ParseOptions,
     ) -> Self::Fut<'a, R> {

@@ -12,13 +12,13 @@ impl InMemoryReader {
     }
 }
 
-impl SwapOffsets for InMemoryReader {
+impl SwapOffsets<usize> for InMemoryReader {
     fn swap_offsets(&mut self, offset: &mut usize) {
         core::mem::swap(&mut self.offset, offset)
     }
 }
 
-impl Reader for InMemoryReader {
+impl Reader<usize> for InMemoryReader {
     fn remaining_size(&self) -> usize {
         self.bytes
             .len()
@@ -60,7 +60,7 @@ impl Reader for InMemoryReader {
     }
 }
 
-impl PollReader for InMemoryReader {
+impl PollReader<usize> for InMemoryReader {
     fn poll_read(
         mut self: core::pin::Pin<&mut Self>,
         _: &mut core::task::Context<'_>,
