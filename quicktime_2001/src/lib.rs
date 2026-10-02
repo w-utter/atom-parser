@@ -651,8 +651,22 @@ make_atom! {
         struct Flags {
             // empty
         },
-        #[dynamic_array(size_type = u32, zero_relative = false)]
-        time_to_sample_table: TimeToSampleTableEntry,
+        #[condition]
+        uniform_time_to_sample: u32,
+        #[conditional(TimeToSample)]
+        time_to_sample: {
+            if uniform_time_to_sample > 0 {
+                Uniform {
+                    #[reuse_condition]
+                    uniform_time_to_sample: u32,
+                }
+            } else {
+                Table {
+                    #[dynamic_array(size_type = u32, zero_relative = false)]
+                    time_to_sample_table: TimeToSampleTableEntry,
+                }
+            }
+        }
     }
 
     #[derive(Debug)]
@@ -700,9 +714,22 @@ make_atom! {
         struct Flags {
             // empty
         },
-        sample_size: u32,
-        #[dynamic_array(size_type = u32, zero_relative = false)]
-        sample_size_table: u32,
+        #[condition]
+        uniform_sample_size: u32,
+        #[conditional(SampleSize)]
+        sample_size: {
+            if uniform_sample_size > 0 {
+                Uniform {
+                    #[reuse_condition]
+                    uniform_sample_size: u32,
+                }
+            } else {
+                Table {
+                    #[dynamic_array(size_type = u32, zero_relative = false)]
+                    sample_size_table: u32,
+                }
+            }
+        }
     }
 }
 
@@ -1048,8 +1075,7 @@ make_atom! {
 
 #[test]
 fn ftyp() {
-    let mut r =
-        atom_parser::InMemoryReader::from_path("../file_example_MOV_480_700kB.mov").unwrap();
+    let mut r = atom_parser::InMemoryReader::from_path("../66GhzSup.Mov").unwrap();
     let opts = Default::default();
 
     use atom_parser::Parse;
@@ -1191,8 +1217,13 @@ fn ftyp() {
                                                                             match tts.version {
                                                                                 stts::TimeToSampleVersions::V0(tts) => {
                                                                                     println!("tts: {tts:?}");
-                                                                                    let time_to_sample = tts.time_to_sample_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
-                                                                                    println!("tts entries: {time_to_sample:?}");
+                                                                                    match tts.time_to_sample {
+                                                                                        stts::v0::TimeToSample::Uniform(u) => println!("uniform: {u:?}"),
+                                                                                        stts::v0::TimeToSample::Table(st) => {
+                                                                                            let time_to_sample = st.time_to_sample_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                                            println!("tts entries: {time_to_sample:?}");
+                                                                                        }
+                                                                                    }
                                                                                 }
                                                                                 stts::TimeToSampleVersions::Unknown(v) => println!("unknown stts: {v:?}"),
                                                                             }
@@ -1221,8 +1252,13 @@ fn ftyp() {
                                                                             match ss.version {
                                                                                 stsz::SampleSizeVersions::V0(ss) => {
                                                                                     println!("ss: {ss:?}");
-                                                                                    let sample_sizes = ss.sample_size_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
-                                                                                    println!("ss entries: {sample_sizes:?}");
+                                                                                    match ss.sample_size {
+                                                                                        stsz::v0::SampleSize::Uniform(u) => println!("uniform: {u:?}"),
+                                                                                        stsz::v0::SampleSize::Table(st) => {
+                                                                                            let sample_sizes = st.sample_size_table(r, &opts).collect::<Result<Vec<_>, _>>().unwrap();
+                                                                                            println!("ss entries: {sample_sizes:?}");
+                                                                                        }
+                                                                                    }
                                                                                 }
                                                                                 stsz::SampleSizeVersions::Unknown(v) => println!("unknown stsz: {v:?}"),
                                                                             }
@@ -1280,8 +1316,7 @@ fn ftyp() {
 
 #[tokio::test]
 async fn ftyp_async() {
-    let mut r =
-        atom_parser::InMemoryReader::from_path("../file_example_MOV_480_700kB.mov").unwrap();
+    let mut r = atom_parser::InMemoryReader::from_path("../66GhzSup.Mov").unwrap();
     let opts = Default::default();
 
     use atom_parser::AsyncParse;
@@ -1427,8 +1462,13 @@ async fn ftyp_async() {
                                                                             match tts.version {
                                                                                 stts::TimeToSampleVersions::V0(tts) => {
                                                                                     println!("tts: {tts:?}");
-                                                                                    let time_to_sample = tts.time_to_sample_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
-                                                                                    println!("tts entries: {time_to_sample:?}");
+                                                                                    match tts.time_to_sample {
+                                                                                        stts::v0::TimeToSample::Uniform(u) => println!("uniform: {u:?}"),
+                                                                                        stts::v0::TimeToSample::Table(st) => {
+                                                                                            let time_to_sample = st.time_to_sample_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
+                                                                                            println!("tts entries: {time_to_sample:?}");
+                                                                                        }
+                                                                                    }
                                                                                 }
                                                                                 stts::TimeToSampleVersions::Unknown(v) => println!("unknown stts: {v:?}"),
                                                                             }
@@ -1457,8 +1497,13 @@ async fn ftyp_async() {
                                                                             match ss.version {
                                                                                 stsz::SampleSizeVersions::V0(ss) => {
                                                                                     println!("ss: {ss:?}");
-                                                                                    let sample_sizes = ss.sample_size_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
-                                                                                    println!("ss entries: {sample_sizes:?}");
+                                                                                    match ss.sample_size {
+                                                                                        stsz::v0::SampleSize::Uniform(u) => println!("uniform: {u:?}"),
+                                                                                        stsz::v0::SampleSize::Table(st) => {
+                                                                                            let sample_sizes = st.sample_size_table_async(r, &opts).collect::<Result<Vec<_>, _>>().await.unwrap();
+                                                                                            println!("ss entries: {sample_sizes:?}");
+                                                                                        }
+                                                                                    }
                                                                                 }
                                                                                 stsz::SampleSizeVersions::Unknown(v) => println!("unknown stsz: {v:?}"),
                                                                             }

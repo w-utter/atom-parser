@@ -18,6 +18,8 @@ mod version;
 use version::{Version, VersionList, Versioned, try_expand_into_versioned_fields};
 mod fourcc;
 use fourcc::FourCC;
+mod conditional;
+use conditional::{Conditionals, GroupedConditionals};
 
 // used to format the base path of the module
 // e.g ::atom_parse::trailing::TrailingIterator
@@ -115,8 +117,8 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                     }
 
                     impl <O: ::#KRATE::reader::Offset> ::#KRATE::parse::Parse<O> for #name {
-                        fn parse<T: ::#KRATE::reader::Reader<O>>(reader: &mut T, options: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<O>, ::#KRATE::error::ParseError> {
-                            let repr = <#repr as ::#KRATE::parse::Parse<O>>::parse(reader, options)?;
+                        fn parse<T: ::#KRATE::reader::Reader<O>>(reader: &mut T, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<O>, ::#KRATE::error::ParseError> {
+                            let repr = <#repr as ::#KRATE::parse::Parse<O>>::parse(reader, opts)?;
                             Ok(Self::try_from_bits(repr))
                         }
                     }
@@ -129,8 +131,8 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
                     impl <O: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<O> for #name {
                         type Fut<'a, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin> = #async_parse_name<'a, O, R>;
-                        fn create_fut<'a, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin>(reader: R, options: &'a ::#KRATE::parse_options::ParseOptions) -> <Self as ::#KRATE::parse::AsyncParse<O>>::Fut<'a, R> {
-                           #async_parse_name::Repr(<#repr as ::#KRATE::parse::AsyncParse<O>>::create_fut(reader, options))
+                        fn create_fut<'a, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin>(reader: R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> <Self as ::#KRATE::parse::AsyncParse<O>>::Fut<'a, R> {
+                           #async_parse_name::Repr(<#repr as ::#KRATE::parse::AsyncParse<O>>::create_fut(reader, opts))
                         }
                     }
 
@@ -200,6 +202,8 @@ fn format_struct_impl(
     }
 
     use quote::quote;
+
+    let generic_collection = None;
     match try_expand_into_versioned_fields(fields, version) {
         Ok(Ok(versioned)) => {
             let version_specific = versioned.versions.iter().map(|(v, fields)| {
@@ -210,7 +214,8 @@ fn format_struct_impl(
 
                 let version_mod = Versioned::version_mod_from_lit(v);
 
-                let version_specific = fields.iter().filter_map(|field| field.as_inline_definition(Some(v), &attrs));
+
+                let version_specific = fields.iter().filter_map(|field| field.as_inline_definition(Some(v), &attrs, &generics, generic_collection, payload_len.as_ref()));
                 let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&mod_name, Some(&version_mod), payload_len.as_ref())).collect::<Vec<_>>();
                 let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
                 let sync_helper_fns = fields.iter().filter_map(|f| f.as_sync_helper_fn(None)).collect::<Vec<_>>();
@@ -248,7 +253,7 @@ fn format_struct_impl(
 
                 let parse_impl = format_parse_impl(&name, &sync_parsing, &field_collection, &generics, generic_collection.as_ref());
                 let async_parse_impl = format_async_statemachine(fields, &name, generics.clone(), None, generic_collection.as_ref(), payload_len.as_ref());
-                let fields = fields.iter().filter_map(|field| field.as_field_decl(None, payload_len.as_ref()));
+                let fields = fields.iter().filter_map(|field| field.as_field_decl(None, payload_len.as_ref(), &generics)).collect::<Vec<_>>();
 
                 let mut parse_generics = generics.clone();
                 let mut async_parse_generics = generics.clone();
@@ -327,8 +332,8 @@ fn format_struct_impl(
                 }
 
                 impl #parse_impl_generics ::#KRATE::parse::Parse<O> for #name #ty_generics #where_clause {
-                    fn parse<T: ::#KRATE::reader::Reader<O>>(reader: &mut T, options: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<O>, ::#KRATE::error::ParseError> {
-                        let version = <#mod_name::#enum_name #ty_generics as ::#KRATE::parse::Parse<O>>::parse(reader, options)?;
+                    fn parse<T: ::#KRATE::reader::Reader<O>>(reader: &mut T, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<O>, ::#KRATE::error::ParseError> {
+                        let version = <#mod_name::#enum_name #ty_generics as ::#KRATE::parse::Parse<O>>::parse(reader, opts)?;
                         Ok(#name {
                             version,
                         })
@@ -348,10 +353,20 @@ fn format_struct_impl(
             // (e.g reserved/padding)
             let atom_fields = fields
                 .iter()
-                .filter_map(|field| field.as_field_decl(Some(&mod_name), payload_len.as_ref()));
+                .filter_map(|field| {
+                    field.as_field_decl(Some(&mod_name), payload_len.as_ref(), &generics)
+                })
+                .collect::<Vec<_>>();
 
-            let mod_specific =
-                AtomFields::group_inline_definitions(&fields, &mod_name, None, &attrs);
+            let mod_specific = AtomFields::group_inline_definitions(
+                &fields,
+                &mod_name,
+                None,
+                &attrs,
+                &generics,
+                generic_collection,
+                payload_len.as_ref(),
+            );
             let attrs = attrs.iter();
 
             let sync_parsing = fields

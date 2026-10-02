@@ -114,7 +114,7 @@ impl FlagList {
 
         quote! {
             impl ::#KRATE::flags::FlagsParse<#parse_repr> for #name {
-                fn try_from_bits(bits: #parse_repr, options: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<Self, ::#KRATE::error::ParseError> {
+                fn try_from_bits(bits: #parse_repr, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<Self, ::#KRATE::error::ParseError> {
                     #flags_check
 
                     Ok(Self {
@@ -185,7 +185,7 @@ impl FlagList {
                 .collect::<Vec<_>>();
 
             Some(quote! {
-                if options.error_on_missing_flags && ((bits & (#((#expected_flags))|*)) != (#((#expected_flags))|*)) {
+                if opts.error_on_missing_flags && ((bits & (#((#expected_flags))|*)) != (#((#expected_flags))|*)) {
                     return Err(::#KRATE::error::ParseError::MissingFlags);
                 }
             })
@@ -196,7 +196,7 @@ impl FlagList {
         let check = if !current_flags.is_empty() {
             let flags = current_flags.iter().map(|flag| &flag.val);
             Some(quote! {
-                if (options.error_on_unknown_flags && ((bits & (#((#flags))|*))) != 0) {
+                if (opts.error_on_unknown_flags && ((bits & (#((#flags))|*))) != 0) {
                     return Err(::#KRATE::error::ParseError::UnknownFlags);
                 }
             })
@@ -313,9 +313,9 @@ impl FlagList {
 
             impl <O: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<O> for #name {
                 type Fut<'a, R: ::#KRATE::reader::PollReader<O> + Unpin> = #parse_name<'a, O, R>;
-                fn create_fut<'a, R: ::#KRATE::reader::PollReader<O> + Unpin>(reader: R, options: &'a ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'a, R> {
+                fn create_fut<'a, R: ::#KRATE::reader::PollReader<O> + Unpin>(reader: R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'a, R> {
                     #parse_name {
-                        inner: <#parse_repr as ::#KRATE::parse::AsyncParse<O>>::create_fut(reader, options)
+                        inner: <#parse_repr as ::#KRATE::parse::AsyncParse<O>>::create_fut(reader, opts)
                     }
                 }
             }
