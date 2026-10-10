@@ -11,6 +11,14 @@ impl FourCC {
     pub const fn new(bytes: [u8; 4]) -> Self {
         Self(bytes)
     }
+
+    pub const fn from_le_bits(bits: u32) -> Self {
+        Self::new(bits.to_le_bytes())
+    }
+
+    pub const fn from_be_bits(bits: u32) -> Self {
+        Self::new(bits.to_be_bytes())
+    }
 }
 
 impl core::fmt::Debug for FourCC {

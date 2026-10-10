@@ -6,9 +6,11 @@ edition = "2024"
 [features]
 store_unknown_fields = []
 
+[dev-dependencies]
+tokio-stream = "0.1"
+
 [dependencies]
 atom-parser = { path = "../atom-parser", features = ["provided_readers"] }
 
 # only for async runtime and for `StreamExt`
 tokio = {version = "1.53", features = ["rt", "macros"]}
-tokio-stream = "0.1"

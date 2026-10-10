@@ -29,46 +29,57 @@ make_atom! {
         #[payload]
         packet: Vec<u8>,
     }
+
+    #[derive(Debug)]
+    struct PcapFile {
+        header: Header,
+        #[trailing_array]
+        records: Record,
+    }
 }
+
+#[cfg(test)]
+const TEST_FILE: &str = "../telnet-raw.pcap";
 
 #[test]
 fn pcap() {
-    let mut r = atom_parser::InMemoryReader::from_path("../telnet-raw.pcap").unwrap();
+    let mut r = atom_parser::InMemoryReader::from_path(TEST_FILE).unwrap();
     let opts = atom_parser::ParseOptions {
         endianess: atom_parser::Endianess::Little,
         ..Default::default()
     };
     use atom_parser::Parse;
-    let header = Header::parse(&mut r, &opts).unwrap();
 
-    use atom_parser::Reader;
-    println!("header: {header:?}");
-    while r.remaining_size() > 0 {
-        let record = Record::parse(&mut r, &opts).unwrap();
-        println!("packet: {record:?}");
-        r.seek(record.packet.extent().len as usize).unwrap();
-    }
+    let file = PcapFile::parse(&mut r, &opts).unwrap();
+    println!("file: {file:?}");
+
+    let records = file
+        .records(&mut r, &opts)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    println!("records: {records:?} (len: {})", records.len());
     panic!()
 }
 
 #[tokio::test]
 async fn pcap_async() {
-    let mut r = atom_parser::InMemoryReader::from_path("../telnet-raw.pcap").unwrap();
+    let mut r = atom_parser::InMemoryReader::from_path(TEST_FILE).unwrap();
     let opts = atom_parser::ParseOptions {
         endianess: atom_parser::Endianess::Little,
         ..Default::default()
     };
     use atom_parser::AsyncParse;
-    let header = Header::parse_async(&mut r, &opts).await.unwrap();
+    let file = PcapFile::parse_async(&mut r, &opts).await.unwrap();
+    println!("file: {file:?}");
 
-    use atom_parser::Reader;
-    println!("header: {header:?}");
-    while r.remaining_size() > 0 {
-        let record = Record::parse_async(&mut r, &opts).await.unwrap();
-        println!("packet: {record:?}");
-        atom_parser::AsyncSeek::seek(&mut r, record.packet.extent().len as usize)
-            .await
-            .unwrap();
-    }
+    use tokio_stream::StreamExt;
+    let records = file
+        .records_async(&mut r, &opts)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .await
+        .unwrap();
+    println!("records: {records:?} (len: {})", records.len());
     panic!()
 }

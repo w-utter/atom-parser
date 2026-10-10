@@ -12,6 +12,44 @@ pub trait Reader<O: Offset>: SwapOffsets<O> {
     fn seek_remaining(&mut self) -> Result<(), IoError> {
         self.seek(self.remaining_size())
     }
+
+    fn extent(&self) -> crate::Extent<O, O> {
+        let len = self.remaining_size();
+        let offset = self.offset();
+        crate::Extent { offset, len }
+    }
+
+    #[cfg(feature = "alloc")]
+    fn read_extent_in<A: alloc::alloc::Allocator>(
+        &self,
+        extent: crate::Extent<O, O>,
+        alloc: A,
+    ) -> Result<alloc::boxed::Box<[u8], A>, crate::ParseError>;
+    #[cfg(feature = "alloc")]
+    fn read_bytes_in<A: alloc::alloc::Allocator, S1: TryInto<O>, S2: TryInto<O>>(
+        &self,
+        extent: crate::Extent<S1, S2>,
+        alloc: A,
+    ) -> Result<alloc::boxed::Box<[u8], A>, crate::ParseError> {
+        let offset = extent
+            .offset
+            .try_into()
+            .map_err(|_| crate::ParseError::IntegerConversion(crate::TryFromIntError))?;
+        let len = extent
+            .len
+            .try_into()
+            .map_err(|_| crate::ParseError::IntegerConversion(crate::TryFromIntError))?;
+        let extent = crate::Extent { offset, len };
+        self.read_extent_in(extent, alloc)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn read_bytes<S1: TryInto<O>, S2: TryInto<O>>(
+        &self,
+        extent: crate::Extent<S1, S2>,
+    ) -> Result<alloc::boxed::Box<[u8]>, crate::ParseError> {
+        self.read_bytes_in(extent, alloc::alloc::Global)
+    }
 }
 
 impl<'a, O: Offset, R: Reader<O>> Reader<O> for &'a mut R {
@@ -33,5 +71,14 @@ impl<'a, O: Offset, R: Reader<O>> Reader<O> for &'a mut R {
 
     fn seek(&mut self, amt: O) -> Result<(), IoError> {
         R::seek(self, amt)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn read_extent_in<A: alloc::alloc::Allocator>(
+        &self,
+        extent: crate::Extent<O, O>,
+        alloc: A,
+    ) -> Result<alloc::boxed::Box<[u8], A>, crate::ParseError> {
+        R::read_extent_in(self, extent, alloc)
     }
 }

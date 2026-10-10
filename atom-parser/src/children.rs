@@ -387,17 +387,14 @@ mod async_impl {
 }
 pub use async_impl::*;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct UnknownChild<O> {
     pub child_fcc: FourCC,
-    _offset: core::marker::PhantomData<O>,
+    pub extent: crate::Extent<O, O>,
 }
 
 impl<O> UnknownChild<O> {
-    pub fn new(child_fcc: FourCC) -> Self {
-        Self {
-            child_fcc,
-            _offset: core::marker::PhantomData,
-        }
+    pub fn new(child_fcc: FourCC, extent: crate::Extent<O, O>) -> Self {
+        Self { child_fcc, extent }
     }
 }

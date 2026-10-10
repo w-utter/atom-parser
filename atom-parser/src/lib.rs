@@ -1,5 +1,8 @@
 #![feature(maybe_uninit_array_assume_init)]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 pub mod atom_size;
 pub use atom_size::{AtomSize, AtomSizeParse};
 pub mod integer_parse;
@@ -26,7 +29,7 @@ pub use reader::{
 pub mod parse_options;
 pub use parse_options::{Endianess, ParseOptions};
 pub mod error;
-use error::{IoError, ParseError, TryFromIntError};
+pub use error::{IoError, ParseError, TryFromIntError};
 pub mod children;
 pub use children::{
     AsyncChildrenIter, Children, ChildrenIter, ChildrenParse, SizedChildren, SizedChildrenParse,
@@ -45,6 +48,8 @@ pub mod flags;
 pub use flags::{Flags, FlagsParse};
 pub mod version;
 pub use version::UnknownVersion;
+pub mod atom;
+pub use atom::AnonymousAtom;
 
 pub use atom_parser_derive::make_atom;
 pub use futures_core::Stream as AsyncIterator;
@@ -56,6 +61,7 @@ pub trait Atom: Sized {
 }
 
 /// offset + Size
+#[derive(Debug, Clone, Copy)]
 pub struct Extent<O, S> {
     pub offset: O,
     pub len: S,

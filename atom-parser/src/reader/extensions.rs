@@ -52,6 +52,15 @@ mod backtrack_reader {
         fn seek(&mut self, amt: O) -> Result<(), IoError> {
             self.reader.seek(amt)
         }
+
+        #[cfg(feature = "alloc")]
+        fn read_extent_in<A: alloc::alloc::Allocator>(
+            &self,
+            extent: crate::Extent<O, O>,
+            alloc: A,
+        ) -> Result<alloc::boxed::Box<[u8], A>, crate::ParseError> {
+            self.reader.read_extent_in(extent, alloc)
+        }
     }
 
     impl<O: Offset + Unpin, R: PollReader<O> + SwapOffsets<O> + Unpin> PollReader<O>
@@ -93,6 +102,16 @@ mod backtrack_reader {
 
         fn remaining_size(&self) -> O {
             self.reader.remaining_size()
+        }
+
+        #[cfg(feature = "alloc")]
+        fn poll_read_extent<A: alloc::alloc::Allocator>(
+            mut self: Pin<&mut Self>,
+            extent: &crate::Extent<O, O>,
+            buf: &mut alloc::vec::Vec<u8, A>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), crate::ParseError>> {
+            Pin::new(&mut self.reader).poll_read_extent(extent, buf, cx)
         }
     }
 }
@@ -162,6 +181,15 @@ mod trailing_reader {
             self.reader.seek(amt)?;
             Ok(())
         }
+
+        #[cfg(feature = "alloc")]
+        fn read_extent_in<A: alloc::alloc::Allocator>(
+            &self,
+            extent: crate::Extent<O, O>,
+            alloc: A,
+        ) -> Result<alloc::boxed::Box<[u8], A>, crate::ParseError> {
+            self.reader.read_extent_in(extent, alloc)
+        }
     }
 
     impl<O: Offset + Unpin, R: PollReader<O> + Unpin> PollReader<O> for TrailingReader<O, R> {
@@ -220,6 +248,26 @@ mod trailing_reader {
                 .checked_sub(&self.reader.offset())
                 .unwrap_or(O::zero())
         }
+
+        #[cfg(feature = "alloc")]
+        fn poll_read_extent<A: alloc::alloc::Allocator>(
+            mut self: Pin<&mut Self>,
+            extent: &crate::Extent<O, O>,
+            buf: &mut alloc::vec::Vec<u8, A>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), crate::ParseError>> {
+            Pin::new(&mut self.reader).poll_read_extent(extent, buf, cx)
+        }
     }
 }
 pub use trailing_reader::*;
+
+impl<O: core::ops::Add<Output = O> + Copy, R: SwapOffsets<O>>
+    BacktrackReader<O, TrailingReader<O, R>>
+{
+    pub fn from_extent(reader: R, extent: crate::Extent<O, O>) -> Self {
+        let crate::Extent { offset, len } = extent;
+        let max_offset = offset + len;
+        BacktrackReader::new(TrailingReader::new(reader, max_offset), offset)
+    }
+}

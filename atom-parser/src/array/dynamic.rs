@@ -34,6 +34,12 @@ pub struct DynamicArray<O, S: Parsed, I, const ZERO_RELATIVE: bool> {
     _pd: core::marker::PhantomData<I>,
 }
 
+impl<O, S: Parsed, I, const ZERO_RELATIVE: bool> DynamicArray<O, S, I, ZERO_RELATIVE> {
+    pub fn len(&self) -> &<S as Parsed>::Output<O> {
+        &self.size
+    }
+}
+
 impl<U, S: Parsed, I, const ZERO_RELATIVE: bool> Parsed for DynamicArray<U, S, I, ZERO_RELATIVE> {
     type Output<O> = DynamicArray<U, S, I, ZERO_RELATIVE>;
 }

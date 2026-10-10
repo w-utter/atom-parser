@@ -605,8 +605,9 @@ impl AtomField {
                                     }
                                 )*
                                 missed => {
+                                    let extent = ::#krate::reader::Reader::extent(&r);
                                     ::#krate::reader::Reader::seek_remaining(&mut r)?;
-                                    Child::Unsupported(::#KRATE::children::UnknownChild::new(missed))
+                                    Child::Unsupported(::#KRATE::children::UnknownChild::new(missed, extent))
                                 }
                             })
                         }
@@ -678,8 +679,9 @@ impl AtomField {
                                                         }
                                                     )*
                                                     u => {
+                                                        let extent = #KRATE::reader::PollReader::extent(&reader);
                                                         let rest = ::#KRATE::reader::PollReader::remaining_size(&reader);
-                                                        Self::Seek(Child::Unsupported(::#KRATE::children::UnknownChild::new(u)), ::#KRATE::reader::AsyncSeek::seek(reader, rest), opts)
+                                                        Self::Seek(Child::Unsupported(::#KRATE::children::UnknownChild::new(u, extent)), ::#KRATE::reader::AsyncSeek::seek(reader, rest), opts)
                                                     }
                                                 };
                                             }

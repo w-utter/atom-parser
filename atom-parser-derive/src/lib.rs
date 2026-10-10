@@ -86,11 +86,19 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
                 let enum_variants = variants.iter().map(|v| &v.name);
 
-                let try_from_impl = variants.iter().map(|v| {
+                let const_bindings = variants.iter().enumerate().map(|(i, v)| {
                     let val = &v.val;
+                    let variant = quote::format_ident!("VARIANT_{}", i);
+                    quote! {
+                        const #variant: #repr = #val;
+                    }
+                });
+
+                let try_from_impl = variants.iter().enumerate().map(|(i, v)| {
+                    let variant = quote::format_ident!("VARIANT_{}", i);
                     let name = &v.name;
                     quote!{
-                        #val => Self::#name
+                        #variant => Self::#name
                     }
                 });
 
@@ -105,6 +113,7 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
 
                     impl #name {
                         pub fn try_from_bits(bits: #repr) -> Self {
+                            #(#const_bindings)*
                             match bits {
                                 #(#try_from_impl,)*
                                 u => Self::Unknown(u),

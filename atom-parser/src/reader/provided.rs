@@ -58,6 +58,26 @@ impl Reader<usize> for InMemoryReader {
         self.offset += amt;
         Ok(())
     }
+
+    #[cfg(feature = "alloc")]
+    fn read_extent_in<A: alloc::alloc::Allocator>(
+        &self,
+        extent: crate::Extent<usize, usize>,
+        alloc: A,
+    ) -> Result<alloc::boxed::Box<[u8], A>, crate::ParseError> {
+        if extent.offset + extent.len > self.bytes.len() {
+            return Err(crate::ParseError::Io(IoError::other("no space")));
+        }
+
+        let bytes = &self.bytes[extent.offset..(extent.offset + extent.len)];
+
+        let mut v = alloc::vec::Vec::new_in(alloc);
+        // FIXME: move reading an extent into a separate error
+        // as its a subset of IoError & allocator error
+        v.try_reserve_exact(bytes.len()).unwrap();
+        v.extend_from_slice(bytes);
+        Ok(v.into_boxed_slice())
+    }
 }
 
 impl PollReader<usize> for InMemoryReader {
@@ -119,5 +139,21 @@ impl PollReader<usize> for InMemoryReader {
             .len()
             .checked_sub(self.offset)
             .unwrap_or_default()
+    }
+
+    #[cfg(feature = "alloc")]
+    fn poll_read_extent<A: alloc::alloc::Allocator>(
+        self: core::pin::Pin<&mut Self>,
+        extent: &crate::Extent<usize, usize>,
+        buf: &mut alloc::vec::Vec<u8, A>,
+        _: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Result<(), crate::ParseError>> {
+        if extent.offset + extent.len > self.bytes.len() {
+            return core::task::Poll::Ready(Err(crate::ParseError::Io(IoError::other("no space"))));
+        }
+
+        let bytes = &self.bytes[extent.offset..(extent.offset + extent.len)];
+        buf.extend_from_slice(bytes);
+        core::task::Poll::Ready(Ok(()))
     }
 }
