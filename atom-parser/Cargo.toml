@@ -8,6 +8,7 @@ extended_sized_atoms = []
 store_unknown_fields = []
 provided_readers = []
 alloc = []
+std = ["alloc"]
 
 [dependencies]
 thiserror = "2.0"

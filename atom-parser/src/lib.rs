@@ -1,4 +1,6 @@
 #![feature(maybe_uninit_array_assume_init)]
+#![feature(core_io)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -20,7 +22,7 @@ pub mod atom_header;
 pub use atom_header::{AtomHeader, AtomHeaderParse};
 pub mod reader;
 // impl_take_reader is also exported from here
-#[cfg(feature = "provided_readers")]
+#[cfg(all(feature = "provided_readers", feature = "alloc"))]
 pub use reader::InMemoryReader;
 pub use reader::{
     AsyncReadCstr, AsyncReader, AsyncSeek, BacktrackReader, Offset, PollReader, Reader,
@@ -29,7 +31,10 @@ pub use reader::{
 pub mod parse_options;
 pub use parse_options::{Endianess, ParseOptions};
 pub mod error;
+#[cfg(feature = "alloc")]
+pub use error::ExtentError;
 pub use error::{IoError, ParseError, TryFromIntError};
+
 pub mod children;
 pub use children::{
     AsyncChildrenIter, Children, ChildrenIter, ChildrenParse, SizedChildren, SizedChildrenParse,

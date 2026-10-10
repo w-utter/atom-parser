@@ -8,7 +8,7 @@ pub mod sync_reader;
 pub use sync_reader::Reader;
 #[cfg(feature = "provided_readers")]
 pub mod provided;
-#[cfg(feature = "provided_readers")]
+#[cfg(all(feature = "provided_readers", feature = "alloc"))]
 pub use provided::InMemoryReader;
 
 macro_rules! offset_trait {

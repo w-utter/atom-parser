@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 store_unknown_fields = []
+std = ["atom-parser/std"]
 
 [dependencies]
 atom-parser = { path = "../atom-parser", features = ["provided_readers", "alloc"] }

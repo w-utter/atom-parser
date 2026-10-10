@@ -23,7 +23,18 @@ impl FourCC {
 
 impl core::fmt::Debug for FourCC {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:?}", String::from_utf8_lossy(&self.0))
+        write!(f, "fcc\"")?;
+        for chunk in self.0.utf8_chunks() {
+            for ch in chunk.valid().chars() {
+                write!(f, "{}", ch.escape_debug())?;
+            }
+
+            for byte in chunk.invalid() {
+                write!(f, "\\x{:02X}", byte).unwrap();
+            }
+        }
+        write!(f, "\"")?;
+        Ok(())
     }
 }
 

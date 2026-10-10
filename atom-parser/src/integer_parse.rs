@@ -68,7 +68,7 @@ macro_rules! parse_integers {
                                 }
                                 core::task::Poll::Ready(res) => {
                                     *self = Self::Done(r, opts);
-                                    return std::task::Poll::Ready(Ok(res.map(|_| if matches!(opts.endianess, Endianess::Big) {
+                                    return core::task::Poll::Ready(Ok(res.map(|_| if matches!(opts.endianess, Endianess::Big) {
                                         // likely path
                                         <$i>::from_be_bytes(buf)
                                     } else {

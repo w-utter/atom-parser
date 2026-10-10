@@ -58,7 +58,7 @@ mod backtrack_reader {
             &self,
             extent: crate::Extent<O, O>,
             alloc: A,
-        ) -> Result<alloc::boxed::Box<[u8], A>, crate::ParseError> {
+        ) -> Result<alloc::boxed::Box<[u8], A>, crate::ExtentError> {
             self.reader.read_extent_in(extent, alloc)
         }
     }
@@ -110,7 +110,7 @@ mod backtrack_reader {
             extent: &crate::Extent<O, O>,
             buf: &mut alloc::vec::Vec<u8, A>,
             cx: &mut Context<'_>,
-        ) -> Poll<Result<(), crate::ParseError>> {
+        ) -> Poll<Result<(), crate::ExtentError>> {
             Pin::new(&mut self.reader).poll_read_extent(extent, buf, cx)
         }
     }
@@ -154,10 +154,10 @@ mod trailing_reader {
             let res: Result<O, _> = bytes.len().try_into();
             match res {
                 Ok(len) if len > self.remaining_size() => {
-                    return Err(std::io::Error::other("not enough spc"));
+                    return Err(IoError::UnexpectedEndOfData);
                 }
                 Err(_) => {
-                    return Err(std::io::Error::other("too big"));
+                    return Err(IoError::Io(core::io::ErrorKind::FileTooLarge.into()));
                 }
                 _ => (),
             }
@@ -169,14 +169,14 @@ mod trailing_reader {
         fn read_cstr(&mut self) -> Result<O, IoError> {
             let len = self.reader.read_cstr()?;
             if len > self.remaining_size() {
-                return Err(std::io::Error::other("not enough spc"));
+                return Err(IoError::UnexpectedEndOfData);
             }
             Ok(len)
         }
 
         fn seek(&mut self, amt: O) -> Result<(), IoError> {
             if amt > self.remaining_size() {
-                return Err(std::io::Error::other("not enough spc"));
+                return Err(IoError::UnexpectedEndOfData);
             }
             self.reader.seek(amt)?;
             Ok(())
@@ -187,7 +187,7 @@ mod trailing_reader {
             &self,
             extent: crate::Extent<O, O>,
             alloc: A,
-        ) -> Result<alloc::boxed::Box<[u8], A>, crate::ParseError> {
+        ) -> Result<alloc::boxed::Box<[u8], A>, crate::ExtentError> {
             self.reader.read_extent_in(extent, alloc)
         }
     }
@@ -201,10 +201,10 @@ mod trailing_reader {
             let res: Result<O, _> = buf.len().try_into();
             match res {
                 Ok(len) if len > self.remaining_size() => {
-                    return Poll::Ready(Err(std::io::Error::other("not enough spc")));
+                    return Poll::Ready(Err(IoError::UnexpectedEndOfData));
                 }
                 Err(_) => {
-                    return Poll::Ready(Err(std::io::Error::other("too big")));
+                    return Poll::Ready(Err(IoError::Io(core::io::ErrorKind::FileTooLarge.into())));
                 }
                 _ => (),
             }
@@ -219,7 +219,7 @@ mod trailing_reader {
             let len = core::task::ready!(Pin::new(&mut self.reader).poll_read_cstr(cx))?;
 
             if len > self.remaining_size() {
-                return Poll::Ready(Err(std::io::Error::other("not enough spc")));
+                return Poll::Ready(Err(IoError::UnexpectedEndOfData));
             }
             Poll::Ready(Ok(len))
         }
@@ -255,7 +255,7 @@ mod trailing_reader {
             extent: &crate::Extent<O, O>,
             buf: &mut alloc::vec::Vec<u8, A>,
             cx: &mut Context<'_>,
-        ) -> Poll<Result<(), crate::ParseError>> {
+        ) -> Poll<Result<(), crate::ExtentError>> {
             Pin::new(&mut self.reader).poll_read_extent(extent, buf, cx)
         }
     }

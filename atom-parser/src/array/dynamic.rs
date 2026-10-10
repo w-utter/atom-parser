@@ -25,7 +25,7 @@ macro_rules! impl_array_size {
 }
 
 impl_array_size! {
-    u8, u16, u32,
+    u8, u16, u32, u64,
 }
 
 pub struct DynamicArray<O, S: Parsed, I, const ZERO_RELATIVE: bool> {

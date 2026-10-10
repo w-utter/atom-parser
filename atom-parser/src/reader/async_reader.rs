@@ -35,7 +35,7 @@ pub trait PollReader<O: Offset> {
         extent: &crate::Extent<O, O>,
         buf: &mut alloc::vec::Vec<u8, A>,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<(), crate::ParseError>>;
+    ) -> Poll<Result<(), crate::ExtentError>>;
 }
 
 #[cfg(feature = "alloc")]
@@ -49,7 +49,7 @@ pub struct ReadingExtent<O: Offset, R: PollReader<O>, A: alloc::alloc::Allocator
 impl<O: Offset + Unpin, R: PollReader<O> + Unpin, A: alloc::alloc::Allocator + Unpin> Future
     for ReadingExtent<O, R, A>
 {
-    type Output = Result<(), crate::ParseError>;
+    type Output = Result<(), crate::ExtentError>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let Self {
             reader,
@@ -86,7 +86,7 @@ impl<
     S2: TryInto<O> + TryInto<usize> + Copy + Unpin,
 > Future for AsyncReadExtent<O, R, A, S1, S2>
 {
-    type Output = Result<Box<[u8], A>, crate::ParseError>;
+    type Output = Result<alloc::boxed::Box<[u8], A>, crate::ExtentError>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
             let this = core::mem::replace(&mut *self, Self::Done);
@@ -97,20 +97,21 @@ impl<
                     reader,
                 } => {
                     let offset = extent.offset.try_into().map_err(|_| {
-                        crate::ParseError::IntegerConversion(crate::TryFromIntError)
+                        crate::ExtentError::IntegerConversion(crate::TryFromIntError)
                     })?;
                     let len: O = extent.len.try_into().map_err(|_| {
-                        crate::ParseError::IntegerConversion(crate::TryFromIntError)
+                        crate::ExtentError::IntegerConversion(crate::TryFromIntError)
                     })?;
                     let reserve_len: usize = extent.len.try_into().map_err(|_| {
-                        crate::ParseError::IntegerConversion(crate::TryFromIntError)
+                        crate::ExtentError::IntegerConversion(crate::TryFromIntError)
                     })?;
 
                     let extent = crate::Extent { offset, len };
 
                     let mut buffer = alloc::vec::Vec::new_in(alloc);
-                    // FIXME: same as the provided sync impl
-                    buffer.try_reserve_exact(reserve_len).unwrap();
+                    buffer
+                        .try_reserve_exact(reserve_len)
+                        .map_err(|_| alloc::alloc::AllocError)?;
                     *self = Self::Reading(ReadingExtent {
                         reader,
                         extent,
@@ -170,7 +171,7 @@ impl<'a, O: Offset, R: Unpin + PollReader<O>> PollReader<O> for &'a mut R {
         extent: &crate::Extent<O, O>,
         buf: &mut alloc::vec::Vec<u8, A>,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<(), crate::ParseError>> {
+    ) -> Poll<Result<(), crate::ExtentError>> {
         Pin::new(&mut **self).poll_read_extent(extent, buf, cx)
     }
 }

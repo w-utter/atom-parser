@@ -24,21 +24,21 @@ pub trait Reader<O: Offset>: SwapOffsets<O> {
         &self,
         extent: crate::Extent<O, O>,
         alloc: A,
-    ) -> Result<alloc::boxed::Box<[u8], A>, crate::ParseError>;
+    ) -> Result<alloc::boxed::Box<[u8], A>, crate::ExtentError>;
     #[cfg(feature = "alloc")]
     fn read_bytes_in<A: alloc::alloc::Allocator, S1: TryInto<O>, S2: TryInto<O>>(
         &self,
         extent: crate::Extent<S1, S2>,
         alloc: A,
-    ) -> Result<alloc::boxed::Box<[u8], A>, crate::ParseError> {
+    ) -> Result<alloc::boxed::Box<[u8], A>, crate::ExtentError> {
         let offset = extent
             .offset
             .try_into()
-            .map_err(|_| crate::ParseError::IntegerConversion(crate::TryFromIntError))?;
+            .map_err(|_| crate::ExtentError::IntegerConversion(crate::TryFromIntError))?;
         let len = extent
             .len
             .try_into()
-            .map_err(|_| crate::ParseError::IntegerConversion(crate::TryFromIntError))?;
+            .map_err(|_| crate::ExtentError::IntegerConversion(crate::TryFromIntError))?;
         let extent = crate::Extent { offset, len };
         self.read_extent_in(extent, alloc)
     }
@@ -47,7 +47,7 @@ pub trait Reader<O: Offset>: SwapOffsets<O> {
     fn read_bytes<S1: TryInto<O>, S2: TryInto<O>>(
         &self,
         extent: crate::Extent<S1, S2>,
-    ) -> Result<alloc::boxed::Box<[u8]>, crate::ParseError> {
+    ) -> Result<alloc::boxed::Box<[u8]>, crate::ExtentError> {
         self.read_bytes_in(extent, alloc::alloc::Global)
     }
 }
@@ -78,7 +78,7 @@ impl<'a, O: Offset, R: Reader<O>> Reader<O> for &'a mut R {
         &self,
         extent: crate::Extent<O, O>,
         alloc: A,
-    ) -> Result<alloc::boxed::Box<[u8], A>, crate::ParseError> {
+    ) -> Result<alloc::boxed::Box<[u8], A>, crate::ExtentError> {
         R::read_extent_in(self, extent, alloc)
     }
 }

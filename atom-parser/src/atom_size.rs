@@ -140,7 +140,7 @@ impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for AtomSizeParse<'
                     }
 
                     if size != 0 && size < AtomSize::MIN_ATOM_SIZE_32 {
-                        return std::task::Poll::Ready(Err(ParseError::AtomSizeTooSmall));
+                        return core::task::Poll::Ready(Err(ParseError::AtomSizeTooSmall));
                     }
 
                     let size = if size == 0 {
@@ -177,7 +177,7 @@ impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for AtomSizeParse<'
                                 unreachable!("invalid future state");
                             };
                             *self = AtomSizeParse::Done(reader, options);
-                            return std::task::Poll::Ready(res.and_then(|extended_size| {
+                            return core::task::Poll::Ready(res.and_then(|extended_size| {
                                 if extended_size < AtomSize::MIN_ATOM_SIZE_64 {
                                     Err(ParseError::AtomSizeTooSmall)
                                 } else {

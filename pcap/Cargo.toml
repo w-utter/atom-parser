@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 store_unknown_fields = []
+std = ["atom-parser/std"]
 
 [dev-dependencies]
 tokio-stream = "0.1"

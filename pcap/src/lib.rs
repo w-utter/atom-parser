@@ -41,9 +41,22 @@ make_atom! {
 #[cfg(test)]
 const TEST_FILE: &str = "../telnet-raw.pcap";
 
+#[cfg(test)]
+fn create_reader() -> atom_parser::InMemoryReader<'static> {
+    #[cfg(not(feature = "std"))]
+    {
+        let bytes = std::fs::read(TEST_FILE).unwrap();
+        atom_parser::InMemoryReader::from_buf(bytes)
+    }
+    #[cfg(feature = "std")]
+    {
+        atom_parser::InMemoryReader::from_path(TEST_FILE).unwrap()
+    }
+}
+
 #[test]
 fn pcap() {
-    let mut r = atom_parser::InMemoryReader::from_path(TEST_FILE).unwrap();
+    let mut r = create_reader();
     let opts = atom_parser::ParseOptions {
         endianess: atom_parser::Endianess::Little,
         ..Default::default()
@@ -64,7 +77,7 @@ fn pcap() {
 
 #[tokio::test]
 async fn pcap_async() {
-    let mut r = atom_parser::InMemoryReader::from_path(TEST_FILE).unwrap();
+    let mut r = create_reader();
     let opts = atom_parser::ParseOptions {
         endianess: atom_parser::Endianess::Little,
         ..Default::default()
