@@ -41,4 +41,6 @@ pub enum ParseError {
     MissingFlags,
     #[error("reserved field had nonzero bits")]
     UsedReservedField,
+    #[error("unexpected value from field")]
+    UnexpectedValue,
 }

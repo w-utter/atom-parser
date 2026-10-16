@@ -92,6 +92,7 @@ fn is_atom_attr(path: &syn::Path) -> bool {
 fn is_struct_attr(path: &syn::Path) -> bool {
     path.is_ident("dynamic_array")
         || path.is_ident("reserved")
+        || path.is_ident("expected")
         || path.is_ident("pascal_string")
         || path.is_ident("null_terminated_string")
         || path.is_ident("trailing_array")
@@ -1102,6 +1103,21 @@ pub enum StructFieldAttr {
         zero_relative: syn::LitBool,
         length_ty: syn::Type,
     },
+    // declaration of a field with an expected val
+    // the general case of a reserved field
+    //
+    // #[expected(4)]
+    // payload_size: u8,
+    //
+    // will expand to
+    //
+    // let payload_size = /* parse impl */;
+    // if payload_size != 4 {
+    //      return Err(..)
+    // }
+    Expected {
+        val: syn::Expr,
+    },
     // declaration of reserved field
     //
     // #[reserved]
@@ -1186,6 +1202,9 @@ impl StructFieldAttr {
             }
         } else if path.is_ident("reserved") {
             Self::Reserved
+        } else if path.is_ident("expected") {
+            let val = attr.parse_args::<syn::Expr>()?;
+            Self::Expected { val }
         } else if path.is_ident("null_terminated_string") {
             Self::NullTerminatedString
         } else if path.is_ident("pascal_string") {
@@ -1225,6 +1244,16 @@ impl StructFieldAttr {
                     }
                 }.into()
             },
+            Self::Expected {
+                val,
+            } => {
+                quote! {
+                    let _expected = <#ty as ::#KRATE::parse::Parse<O>>::parse(reader, opts)?;
+                    if _expected != #val {
+                        return Err(::#KRATE::error::ParseError::UnexpectedValue);
+                    }
+                }.into()
+            }
             Self::DynamicArray {
                 length_ty,
                 zero_relative,
@@ -1288,7 +1317,11 @@ impl StructFieldAttr {
         let name = &field.ident;
         use quote::quote;
         Some(match self {
-            Self::Reserved | Self::VersionIdentifier | Self::PayloadLength | Self::Condition => {
+            Self::Reserved
+            | Self::Expected { .. }
+            | Self::VersionIdentifier
+            | Self::PayloadLength
+            | Self::Condition => {
                 return None;
             }
             Self::Normal
@@ -1315,6 +1348,7 @@ impl StructFieldAttr {
         use quote::quote;
         Some(match self {
             Self::Reserved
+            | Self::Expected { .. }
             | Self::VersionIdentifier
             | Self::PayloadLength
             | Self::Condition
@@ -1376,6 +1410,7 @@ impl StructFieldAttr {
         Some(match self {
             Self::Normal
             | Self::Reserved
+            | Self::Expected { .. }
             | Self::VersionIdentifier
             | Self::PayloadLength
             | Self::Payload
@@ -1414,6 +1449,7 @@ impl StructFieldAttr {
         Some(match self {
             Self::Normal
             | Self::Reserved
+            | Self::Expected { .. }
             | Self::VersionIdentifier
             | Self::PayloadLength
             | Self::Payload
@@ -1491,6 +1527,7 @@ pub enum FieldKind<'a> {
     Payload,
     Trailing,
     Reserved,
+    Expected(&'a syn::Expr),
     Regular,
     Conditional(&'a Conditionals),
     Condition,
@@ -1688,6 +1725,11 @@ pub fn prepare_fields_for_statemachine<'a>(
                     let name = quote::format_ident!("__reserved_{i}");
                     let ty = &field.ty;
                     (name, quote!(#ty), FieldKind::Reserved)
+                }
+                StructFieldAttr::Expected { val } => {
+                    let name = quote::format_ident!("__expected_{i}");
+                    let ty = &field.ty;
+                    (name, quote!(#ty), FieldKind::Expected(val))
                 }
                 StructFieldAttr::DynamicArray {
                     length_ty,
@@ -1982,7 +2024,7 @@ pub fn format_statemachine_fields(
         let state = quote::format_ident!("S{}", idx);
 
         let variant_fields = completed.iter().filter_map(|(name, ty, kind)| match kind {
-            FieldKind::Reserved => None,
+            FieldKind::Reserved | FieldKind::Expected { .. } => None,
             FieldKind::Conditional(cond) => {
                 let storage_name = match cond.group().unwrap() {
                     GroupedConditionals::Struct { name, .. } => {
@@ -2091,15 +2133,21 @@ pub fn format_statemachine_fields(
             }
         };
 
-        let check_reserved = if matches!(in_progress.2, FieldKind::Reserved) {
-            let ty = &in_progress.1;
-            Some(quote! {
-                if opts.error_on_used_reserved_fields && (#name != unsafe { ::core::mem::zeroed::<#ty>() }) {
-                    return ::core::task::Poll::Ready(Err(::#KRATE::error::ParseError::UsedReservedField));
+        let check_reserved = match in_progress.2 {
+            FieldKind::Reserved => {
+                let ty = &in_progress.1;
+                Some(quote! {
+                    if opts.error_on_used_reserved_fields && (#name != unsafe { ::core::mem::zeroed::<#ty>() }) {
+                        return ::core::task::Poll::Ready(Err(::#KRATE::error::ParseError::UsedReservedField));
+                    }
+                })
+            }
+            FieldKind::Expected(val) => Some(quote! {
+                if #name != #val {
+                    return ::core::task::Poll::Ready(Err(::#KRATE::error::ParseError::UnexpectedValue));
                 }
-            })
-        } else {
-            None
+            }),
+            _ => None,
         };
 
         let match_fields = completed.iter().filter_map(|(name, _, kind)| {
