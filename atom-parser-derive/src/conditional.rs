@@ -407,11 +407,13 @@ impl ConditionalVariant {
         let (parse_impl_generics, parse_ty_generics, parse_where_clause) =
             parse_generics.split_for_impl();
 
+        let payload_len = AtomFields::nested_payload_len(payload_len, fields);
+
         let typed_fields = crate::field::prepare_fields_for_statemachine(
             fields,
             generics.clone(),
             None,
-            payload_len,
+            payload_len.as_ref(),
         );
 
         let parse_name = quote::format_ident!("Async{}Parse", vname);
@@ -420,7 +422,7 @@ impl ConditionalVariant {
             crate::field::format_statemachine_fields(
                 fields,
                 &typed_fields,
-                payload_len,
+                payload_len.as_ref(),
                 vname,
                 &parse_name,
                 &generics,
@@ -433,7 +435,7 @@ impl ConditionalVariant {
 
         let storage_fields = fields
             .iter()
-            .filter_map(|f| f.as_field_decl(None, payload_len, generics));
+            .filter_map(|f| f.as_field_decl(None, payload_len.as_ref(), generics));
 
         let storage_name = quote::format_ident!("Async{}Storage", vname);
         let (_, nop_variant, _, nop_borrow) = crate::field::format_statemachine_nop_impl(
@@ -441,7 +443,7 @@ impl ConditionalVariant {
             &generics,
             None,
             generic_collection,
-            payload_len,
+            payload_len.as_ref(),
             &|_| Default::default(),
         );
 
@@ -768,6 +770,7 @@ impl Conditionals {
                 });
 
                 let variant_statemachines = variants.iter().map(|v| {
+                    let payload_len = AtomFields::nested_payload_len(payload_len, &v.fields);
                     ConditionalVariant::format_variant_statemachine(
                         &v.variant_name,
                         &v.fields,
@@ -775,14 +778,19 @@ impl Conditionals {
                         generic_collection,
                         &parse_generics,
                         &storage_generics,
-                        payload_len,
+                        payload_len.as_ref(),
                     )
                 });
 
                 let nested = variants.iter().flat_map(|v| {
-                    v.fields.iter().filter_map(|field| {
+                    let payload_len = AtomFields::nested_payload_len(payload_len, &v.fields);
+                    v.fields.iter().filter_map(move |field| {
                         if let AtomField::Conditional(cond) = field {
-                            Some(cond.as_async_state(generics, generic_collection, payload_len))
+                            Some(cond.as_async_state(
+                                generics,
+                                generic_collection,
+                                payload_len.as_ref(),
+                            ))
                         } else {
                             None
                         }
@@ -830,6 +838,7 @@ impl Conditionals {
             }
             GroupedConditionals::Struct { name, fields } => {
                 let exhaustive = false;
+                let payload_len = AtomFields::nested_payload_len(payload_len, &fields);
                 let parse_variant =
                     ConditionalVariant::format_variant_parse(&name, exhaustive, &parse_ty_generics);
 
@@ -846,12 +855,16 @@ impl Conditionals {
                     generic_collection,
                     &parse_generics,
                     &storage_generics,
-                    payload_len,
+                    payload_len.as_ref(),
                 );
 
                 let nested = fields.iter().filter_map(|field| {
                     if let AtomField::Conditional(cond) = field {
-                        Some(cond.as_async_state(generics, generic_collection, payload_len))
+                        Some(cond.as_async_state(
+                            generics,
+                            generic_collection,
+                            payload_len.as_ref(),
+                        ))
                     } else {
                         None
                     }

@@ -159,8 +159,15 @@ impl AtomFields {
         payload_len: Option<&syn::Type>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
+        let payload_len = AtomFields::nested_payload_len(payload_len, fields);
         let inline_definitions = fields.iter().filter_map(|field| {
-            field.as_inline_definition(version, attrs, generics, generic_collection, payload_len)
+            field.as_inline_definition(
+                version,
+                attrs,
+                generics,
+                generic_collection,
+                payload_len.as_ref(),
+            )
         });
 
         if inline_definitions.clone().count() == 0 {
@@ -214,6 +221,17 @@ impl AtomFields {
         }
 
         ty
+    }
+    pub fn nested_payload_len(
+        existing: Option<&syn::Type>,
+        fields: &[AtomField],
+    ) -> Option<syn::Type> {
+        match (existing, Self::payload_len(fields)) {
+            (Some(_), Some(new)) => Some(new),
+            (Some(existing), None) => Some(existing.clone()),
+            (None, Some(new)) => Some(new),
+            (None, None) => None,
+        }
     }
 }
 
@@ -445,9 +463,10 @@ impl AtomField {
 
                 let conditional = cond.format_conditional(
                     |name, fields, exhaustive| {
-                        let sync_parse = fields
-                            .iter()
-                            .filter_map(|f| f.as_sync_parse(atom_mod, version_mod, None));
+                        let payload_len = AtomFields::nested_payload_len(payload_len, fields);
+                        let sync_parse = fields.iter().filter_map(|f| {
+                            f.as_sync_parse(atom_mod, version_mod, payload_len.as_ref())
+                        });
                         let collection = fields.iter().filter_map(|f| f.as_collection());
 
                         let collection = if let Some(e) = enum_name.as_ref() {
@@ -768,6 +787,7 @@ impl AtomField {
 
                 match cond.group().unwrap() {
                     GroupedConditionals::Struct { name, fields } => {
+                        let payload_len = AtomFields::nested_payload_len(payload_len, &fields);
                         let helper_fns = crate::conditional::ConditionalVariant::format_helper_fns(
                             &name, &fields, generics,
                         );
@@ -780,7 +800,7 @@ impl AtomField {
                                 }
                                 r => r.clone(),
                             })
-                            .filter_map(|f| f.as_field_decl(None, payload_len, generics));
+                            .filter_map(|f| f.as_field_decl(None, payload_len.as_ref(), generics));
 
                         let definitions = fields.iter().filter_map(|field| {
                             field.as_inline_definition(
@@ -788,7 +808,7 @@ impl AtomField {
                                 attrs,
                                 generics,
                                 generic_collection,
-                                payload_len,
+                                payload_len.as_ref(),
                             )
                         });
 
@@ -830,13 +850,14 @@ impl AtomField {
 
                         let variant_defs = variants.iter().map(|v| {
                             let name = &v.variant_name;
+                            let payload_len = AtomFields::nested_payload_len(payload_len, &v.fields);
                             let helper_fns = crate::conditional::ConditionalVariant::format_helper_fns(&v.variant_name, &v.fields, generics);
                             let fs = v.fields.iter().map(|f| {
                                 match f {
                                     AtomField::Struct(field, StructFieldAttr::ReuseCondition) => AtomField::Struct(field.clone(), StructFieldAttr::Normal),
                                     r => r.clone(),
                                 }
-                            }).filter_map(|f| f.as_field_decl(None, payload_len, generics));
+                            }).filter_map(|f| f.as_field_decl(None, payload_len.as_ref(), generics));
 
                             let mut generics = generics.clone();
                             generics.params.push(syn::parse_quote!(__Offset = usize));
@@ -861,13 +882,15 @@ impl AtomField {
                         });
 
                         let field_defs = variants.iter().flat_map(|v| {
-                            v.fields.iter().filter_map(|f| {
+                            let payload_len =
+                                AtomFields::nested_payload_len(payload_len, &v.fields);
+                            v.fields.iter().filter_map(move |f| {
                                 f.as_inline_definition(
                                     version,
                                     attrs,
                                     generics,
                                     generic_collection,
-                                    payload_len,
+                                    payload_len.as_ref(),
                                 )
                             })
                         });
@@ -1571,11 +1594,12 @@ impl FieldKind<'_> {
 
                 cond.format_conditional(
                     |name, fields, exhaustive| {
+                        let payload_len = AtomFields::nested_payload_len(payload_len, fields);
                         let typed = prepare_fields_for_statemachine(
                             fields,
                             generics.clone(),
                             mod_name,
-                            payload_len,
+                            payload_len.as_ref(),
                         );
                         let parse_name = quote::format_ident!("Async{}Parse", name);
                         if let Some((nested_next_name, nested_next_ty, nested_next_kind)) =
@@ -1586,7 +1610,7 @@ impl FieldKind<'_> {
                                 generics,
                                 mod_name,
                                 generic_collection,
-                                payload_len,
+                                payload_len.as_ref(),
                             );
 
                             let name = if !exhaustive {
@@ -1846,8 +1870,10 @@ pub fn format_variant_state_change<'a>(
 
     let parent_typed_fields = &typed_fields;
 
+    let payload_len = AtomFields::nested_payload_len(payload_len, fields);
+
     let typed_fields =
-        prepare_fields_for_statemachine(fields, generics.clone(), mod_name, payload_len);
+        prepare_fields_for_statemachine(fields, generics.clone(), mod_name, payload_len.as_ref());
 
     let format_nested_conditional = |toks| {
         let match_fields = match_fields.clone();
@@ -1871,7 +1897,13 @@ pub fn format_variant_state_change<'a>(
     };
 
     let format_state_transition = |toks| {
-        let finished = typed_fields.iter().map(|(f, _, _)| f);
+        let finished = typed_fields.iter().filter_map(|(f, _, kind)| match kind {
+            FieldKind::PayloadLength
+            | FieldKind::Reserved
+            | FieldKind::Expected(_)
+            | FieldKind::Condition => None,
+            _ => Some(f),
+        });
 
         let parse_variant = if !exhaustive {
             quote::format_ident!("Some{}", variant)
@@ -1903,7 +1935,7 @@ pub fn format_variant_state_change<'a>(
             let (_, next_fut, state) = format_statemachine_next_state(
                 parent_typed_fields,
                 idx,
-                payload_len,
+                payload_len.as_ref(),
                 parse_name,
                 mod_name,
                 generic_collection,
@@ -1925,7 +1957,7 @@ pub fn format_variant_state_change<'a>(
         format_statemachine_fields(
             fields,
             &typed_fields,
-            payload_len,
+            payload_len.as_ref(),
             struct_name,
             &parse_name,
             &generics,
@@ -2019,6 +2051,8 @@ pub fn format_statemachine_fields(
     let mut state_machine_variant_parsing = vec![];
     let mut borrow_reader_variants = vec![];
 
+    let payload_len = AtomFields::nested_payload_len(payload_len, fields);
+
     for idx in 0..typed_fields.len() {
         let completed = &typed_fields[0..idx];
         let in_progress = &typed_fields[idx];
@@ -2053,7 +2087,7 @@ pub fn format_statemachine_fields(
             let (name, ty, kind) = in_progress;
             match kind {
                 FieldKind::Payload => {
-                    if let Some(len) = payload_len {
+                    if let Some(len) = payload_len.as_ref() {
                         quote!(#name: ::#KRATE::payload::PayloadParse<'__parse_options, __Offset, __Reader, #len>)
                     } else {
                         quote!(#name: ::#KRATE::payload::PayloadParse<'__parse_options, __Offset, __Reader>)
@@ -2064,7 +2098,7 @@ pub fn format_statemachine_fields(
                         unreachable!();
                     };
                     let trailing_ty = &field.ty;
-                    if let Some(len) = payload_len {
+                    if let Some(len) = payload_len.as_ref() {
                         quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty, #len>)
                     } else {
                         quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty>)
@@ -2121,7 +2155,7 @@ pub fn format_statemachine_fields(
             let (_, next_fut, state) = format_statemachine_next_state(
                 typed_fields,
                 idx,
-                payload_len,
+                payload_len.as_ref(),
                 parse_name,
                 mod_name,
                 generic_collection,
@@ -2154,7 +2188,7 @@ pub fn format_statemachine_fields(
         };
 
         let match_fields = completed.iter().filter_map(|(name, _, kind)| {
-            if matches!(kind, FieldKind::Reserved) {
+            if matches!(kind, FieldKind::Reserved | FieldKind::Expected(_)) {
                 return None;
             }
 
@@ -2186,7 +2220,7 @@ pub fn format_statemachine_fields(
                         mod_name,
                         generic_collection,
                         root,
-                        payload_len,
+                        payload_len.as_ref(),
                         struct_name,
                         idx,
                         parse_name,
@@ -2236,7 +2270,7 @@ pub fn format_statemachine_fields(
                             mod_name,
                             generic_collection,
                             root,
-                            payload_len,
+                            payload_len.as_ref(),
                             struct_name,
                             idx,
                             parse_name,
@@ -2352,7 +2386,7 @@ pub fn format_statemachine_next_state(
     let (next_name, next_ty, next_kind) = &typed_fields[idx + 1];
     let next_state = quote::format_ident!("S{}", idx + 1);
     let new_completed = typed_fields[..=idx].iter().filter_map(|(name, _, kind)| {
-        if matches!(kind, FieldKind::Reserved) {
+        if matches!(kind, FieldKind::Reserved | FieldKind::Expected(_)) {
             return None;
         }
         Some(name)
@@ -2396,9 +2430,14 @@ pub fn format_async_statemachine(
     generic_collection: Option<&proc_macro2::TokenStream>,
     payload_len: Option<&syn::Type>,
 ) -> proc_macro2::TokenStream {
+    let payload_len = AtomFields::nested_payload_len(payload_len, fields);
     let mod_name = atom_mod.map(|name| quote!(#name::));
-    let typed_fields =
-        prepare_fields_for_statemachine(fields, generics.clone(), mod_name.as_ref(), payload_len);
+    let typed_fields = prepare_fields_for_statemachine(
+        fields,
+        generics.clone(),
+        mod_name.as_ref(),
+        payload_len.as_ref(),
+    );
     use quote::quote;
 
     let parse_name = quote::format_ident!("Async{}Parse", struct_name);
@@ -2426,7 +2465,7 @@ pub fn format_async_statemachine(
         format_statemachine_fields(
             fields,
             &typed_fields,
-            payload_len,
+            payload_len.as_ref(),
             struct_name,
             &parse_name,
             &generics,
@@ -2442,7 +2481,7 @@ pub fn format_async_statemachine(
         &generics,
         mod_name.as_ref(),
         generic_collection,
-        payload_len,
+        payload_len.as_ref(),
         &format_state_transition,
     );
 
