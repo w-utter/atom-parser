@@ -458,14 +458,14 @@ impl ConditionalVariant {
             pub enum #parse_name #parse_generics {
                 #(#state_machine_variants,)*
                 #nop_variant
-                PdStorage(::core::convert::Infallible, ::core::marker::PhantomData<( O, #(#pd_generics,)* )>),
+                PdStorage(::core::convert::Infallible, ::core::marker::PhantomData<( __Offset, #(#pd_generics,)* )>),
             }
 
-            impl #parse_impl_generics ::#KRATE::reader::TakeReader<'a, R> for #parse_name #parse_ty_generics #parse_where_clause {
-                fn take_reader(self) -> (R, &'a ::#KRATE::parse_options::ParseOptions) {
+            impl #parse_impl_generics ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #parse_name #parse_ty_generics #parse_where_clause {
+                fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                     unreachable!("reader should not be taken from nested state")
                 }
-                fn borrow_reader(&mut self) -> (&mut R, &'a ::#KRATE::parse_options::ParseOptions) {
+                fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                     match self {
                         #(#borrow_reader_variants)*
                         #nop_borrow
@@ -476,7 +476,7 @@ impl ConditionalVariant {
 
             pub struct #storage_name #storage_generics {
                 #(#storage_fields,)*
-                pub(super) _pd: ::core::marker::PhantomData<( O, #(#pd_generics,)* )>,
+                pub(super) _pd: ::core::marker::PhantomData<( __Offset, #(#pd_generics,)* )>,
             }
         }.into()
     }
@@ -497,7 +497,7 @@ impl ConditionalVariant {
 
             (
                 Some(quote! {
-                    None(R, &'a ::#KRATE::parse_options::ParseOptions, ::core::marker::PhantomData<(#( #pd_generics,)* )>),
+                    None(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions, ::core::marker::PhantomData<(#( #pd_generics,)* )>),
                 }),
                 Some(quote! {
                     None,
@@ -628,12 +628,12 @@ impl ConditionalVariant {
         let mut sync_generics = generics.clone();
         sync_generics
             .params
-            .push(syn::parse_quote!(O: ::#KRATE::reader::Offset = usize));
+            .push(syn::parse_quote!(__Offset: ::#KRATE::reader::Offset = usize));
 
         let mut async_generics = generics.clone();
-        async_generics
-            .params
-            .push(syn::parse_quote!(O: ::#KRATE::reader::Offset + ::core::marker::Unpin = usize));
+        async_generics.params.push(
+            syn::parse_quote!(__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin = usize),
+        );
 
         let sync_helper_fns = fields.iter().filter_map(|f| f.as_sync_helper_fn(None));
         let async_helper_fns = fields.iter().filter_map(|f| f.as_async_helper_fn(None));
@@ -729,16 +729,18 @@ impl Conditionals {
         let mut parse_generics = generics.clone();
         let mut storage_generics = generics.clone();
         {
-            parse_generics.params.push(syn::parse_quote!('a));
             parse_generics
                 .params
-                .push(syn::parse_quote!(O: ::#KRATE::reader::Offset + ::core::marker::Unpin));
+                .push(syn::parse_quote!('__parse_options));
             parse_generics.params.push(
-                syn::parse_quote!(R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin),
+                syn::parse_quote!(__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin),
+            );
+            parse_generics.params.push(
+                syn::parse_quote!(__Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin),
             );
         }
         {
-            storage_generics.params.push(syn::parse_quote!(O));
+            storage_generics.params.push(syn::parse_quote!(__Offset));
         }
 
         let (parse_impl_generics, parse_ty_generics, parse_where_clause) =
@@ -808,11 +810,11 @@ impl Conditionals {
                         #none_parse_variant
                     }
 
-                    impl #parse_impl_generics ::#KRATE::reader::TakeReader<'a, R> for #parse_name #parse_ty_generics #parse_where_clause {
-                        fn take_reader(self) -> (R, &'a ::#KRATE::parse_options::ParseOptions) {
+                    impl #parse_impl_generics ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #parse_name #parse_ty_generics #parse_where_clause {
+                        fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                             unreachable!("reader should not be taken from nested state")
                         }
-                        fn borrow_reader(&mut self) -> (&mut R, &'a ::#KRATE::parse_options::ParseOptions) {
+                        fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                             match self {
                                 #(#variant_borrows)*
                                 #none_variant_borrow
@@ -875,11 +877,11 @@ impl Conditionals {
                         #none_parse_variant
                     }
 
-                    impl #parse_impl_generics ::#KRATE::reader::TakeReader<'a, R> for #parse_name #parse_ty_generics #parse_where_clause {
-                        fn take_reader(self) -> (R, &'a ::#KRATE::parse_options::ParseOptions) {
+                    impl #parse_impl_generics ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #parse_name #parse_ty_generics #parse_where_clause {
+                        fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                             unreachable!("reader should not be taken from nested state")
                         }
-                        fn borrow_reader(&mut self) -> (&mut R, &'a ::#KRATE::parse_options::ParseOptions) {
+                        fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                             match self {
                                 #variant_borrow
                                 #none_variant_borrow

@@ -303,11 +303,11 @@ impl AtomField {
             Self::Children { size_ty, .. } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        pub children: ::#KRATE::children::SizedChildren<O, #size_ty, #mod_name Child<O>>
+                        pub children: ::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name Child<__Offset>>
                     }
                 } else {
                     quote! {
-                        pub children: ::#KRATE::children::Children<O, #mod_name Child<O>>
+                        pub children: ::#KRATE::children::Children<__Offset, #mod_name Child<__Offset>>
                     }
                 }
             }
@@ -320,7 +320,7 @@ impl AtomField {
                 };
 
                 let mut generics = generics.clone();
-                generics.params.push(syn::parse_quote!(O = usize));
+                generics.params.push(syn::parse_quote!(__Offset = usize));
 
                 let (_, ty_generics, _) = generics.split_for_impl();
 
@@ -364,13 +364,13 @@ impl AtomField {
             Self::Children { size_ty, .. } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        pub fn children<'a, R: ::#KRATE::reader::Reader<O>>(&self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::DynamicArrayIter<'a, O, R, #size_ty, #mod_name Child<O>, false> {
+                        pub fn children<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::DynamicArrayIter<'__parse_options, __Offset, __Reader, #size_ty, #mod_name Child<__Offset>, false> {
                             ::#KRATE::array::DynamicArrayIter::from_sized_children(&self.children, reader, opts)
                         }
                     }
                 } else {
                     quote! {
-                        pub fn children<'a, R: ::#KRATE::reader::Reader<O>>(&self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::children::ChildrenIter<'a, O, R, #mod_name Child<O>> {
+                        pub fn children<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::children::ChildrenIter<'__parse_options, __Offset, __Reader, #mod_name Child<__Offset>> {
                             ::#KRATE::children::ChildrenIter::from_children(&self.children, reader, opts)
                         }
                     }
@@ -392,13 +392,13 @@ impl AtomField {
             Self::Children { size_ty, .. } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        pub fn children_async<'a, R: ::#KRATE::reader::SwapOffsets<O> + ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin>(&self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::AsyncDynamicArrayIter<'a, O, R, #size_ty, #mod_name Child, false> {
+                        pub fn children_async<'__parse_options, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::AsyncDynamicArrayIter<'__parse_options, __Offset, __Reader, #size_ty, #mod_name Child, false> {
                             ::#KRATE::array::AsyncDynamicArrayIter::from_sized_children(&self.children, reader, opts)
                         }
                     }
                 } else {
                     quote! {
-                        pub fn children_async<'a, R: ::#KRATE::reader::SwapOffsets<O> + ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin>(&self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::children::AsyncChildrenIter<'a, O, R, #mod_name Child> {
+                        pub fn children_async<'__parse_options, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::children::AsyncChildrenIter<'__parse_options, __Offset, __Reader, #mod_name Child> {
                             ::#KRATE::children::AsyncChildrenIter::from_children(&self.children, reader, opts)
                         }
                     }
@@ -427,11 +427,11 @@ impl AtomField {
             Self::Children { size_ty, .. } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        let children = <::#KRATE::children::SizedChildren<O, #size_ty, #mod_name::Child>>::parse(reader, opts)?;
+                        let children = <::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name::Child>>::parse(reader, opts)?;
                     }
                 } else {
                     quote! {
-                        let children = <::#KRATE::children::Children<O, #mod_name::Child>>::parse(reader, opts)?;
+                        let children = <::#KRATE::children::Children<__Offset, #mod_name::Child>>::parse(reader, opts)?;
                     }
                 }
             }
@@ -576,19 +576,19 @@ impl AtomField {
                 let krate = &KRATE;
                 quote! {
                     #(#attrs)*
-                    pub enum Child<O = usize> {
+                    pub enum Child<__Offset = usize> {
                         #(
-                            #variants(#variants<O>),
+                            #variants(#variants<__Offset>),
                         )*
-                        Unsupported(::#KRATE::children::UnknownChild<O>),
+                        Unsupported(::#KRATE::children::UnknownChild<__Offset>),
                     }
 
                     impl ::#KRATE::parse::Parsed for Child {
-                        type Output<O> = Child<O>;
+                        type Output<__Offset> = Child<__Offset>;
                     }
 
-                    impl <O: ::#KRATE::reader::Offset> ::#KRATE::parse::Parse<O> for Child {
-                        fn parse<T: ::#KRATE::reader::Reader<O>>(reader: &mut T, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<O>, ::#KRATE::error::ParseError> {
+                    impl <__Offset: ::#KRATE::reader::Offset> ::#KRATE::parse::Parse<__Offset> for Child {
+                        fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>>(reader: &mut __Reader, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
                             let atom = ::#KRATE::atom_header::AtomHeader::parse(reader, opts)?;
                             let atom_size = atom.size.size()
                                 .map(|size| size.try_into())
@@ -600,7 +600,7 @@ impl AtomField {
                             Ok(match atom.fcc {
                                 #(
                                     <#variants as ::#krate::Atom>::FCC => {
-                                        let atom = <#variants as ::#krate::parse::Parse<O>>::parse(&mut r, opts)?;
+                                        let atom = <#variants as ::#krate::parse::Parse<__Offset>>::parse(&mut r, opts)?;
                                         ::#krate::reader::Reader::seek_remaining(&mut r)?;
                                         Child::#variants(atom)
                                     }
@@ -614,25 +614,25 @@ impl AtomField {
                         }
                     }
 
-                    pub enum AsyncChildParse<'a, O: ::#KRATE::reader::Offset + ::core::marker::Unpin, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin> {
-                        AtomHeader(<::#KRATE::atom_header::AtomHeader as ::#KRATE::parse::AsyncParse<O>>::Fut<'a, R>),
+                    pub enum AsyncChildParse<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
+                        AtomHeader(<::#KRATE::atom_header::AtomHeader as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
                         #(
-                            #variants(<#variants as ::#krate::parse::AsyncParse<O>>::Fut<'a, ::#krate::reader::TrailingReader<O, R>>),
+                            #variants(<#variants as ::#krate::parse::AsyncParse<__Offset>>::Fut<'__parse_options, ::#krate::reader::TrailingReader<__Offset, __Reader>>),
                         )*
-                        Seek(Child<O>, ::#KRATE::reader::AsyncSeek<O, ::#KRATE::reader::TrailingReader<O, R>>, &'a ::#KRATE::parse_options::ParseOptions),
-                        Done(::#KRATE::reader::TrailingReader<O, R>, &'a ::#KRATE::parse_options::ParseOptions),
+                        Seek(Child<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                        Done(::#KRATE::reader::TrailingReader<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
                         Empty,
                     }
 
-                    impl <O: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<O> for Child {
-                        type Fut<'a, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin> = AsyncChildParse<'a, O, R>;
-                        fn create_fut<'a, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin>(reader: R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'a, R> {
+                    impl <__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<__Offset> for Child {
+                        type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = AsyncChildParse<'__parse_options, __Offset, __Reader>;
+                        fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
                             AsyncChildParse::AtomHeader(::#KRATE::atom_header::AtomHeader::create_fut(reader, opts))
                         }
                     }
 
-                    impl <'a, O: ::#KRATE::reader::Offset + ::core::marker::Unpin, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin> Future for AsyncChildParse<'a, O, R> {
-                        type Output = ::core::result::Result<<Child as ::#KRATE::parse::Parsed>::Output<O>, ::#KRATE::error::ParseError>;
+                    impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> Future for AsyncChildParse<'__parse_options, __Offset, __Reader> {
+                        type Output = ::core::result::Result<<Child as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError>;
                         fn poll(mut self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
                             loop {
                                 let mut this = ::core::mem::replace(&mut*self, Self::Empty);
@@ -676,7 +676,7 @@ impl AtomField {
                                                 *self = match atom.fcc {
                                                     #(
                                                         <#variants as ::#krate::Atom>::FCC => {
-                                                            Self::#variants(<#variants as ::#krate::parse::AsyncParse<O>>::create_fut(reader, opts))
+                                                            Self::#variants(<#variants as ::#krate::parse::AsyncParse<__Offset>>::create_fut(reader, opts))
                                                         }
                                                     )*
                                                     u => {
@@ -732,8 +732,8 @@ impl AtomField {
                         }
                     }
 
-                    impl <'a, O: ::#KRATE::reader::Offset + ::core::marker::Unpin, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin> AsyncChildParse<'a, O, R> {
-                        pub fn reader(&mut self) -> &mut ::#KRATE::reader::TrailingReader<O, R> {
+                    impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> AsyncChildParse<'__parse_options, __Offset, __Reader> {
+                        pub fn reader(&mut self) -> &mut ::#KRATE::reader::TrailingReader<__Offset, __Reader> {
                             match self {
                                 Self::Done(reader, _) => reader,
                                 _ => unreachable!("should not be able to access mid future")
@@ -741,14 +741,14 @@ impl AtomField {
                         }
                     }
 
-                    impl <'a, O: ::#KRATE::reader::Offset + ::core::marker::Unpin, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'a, R> for AsyncChildParse<'a, O, R> {
-                        fn take_reader(self) -> (R, &'a ::#KRATE::parse_options::ParseOptions) {
+                    impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for AsyncChildParse<'__parse_options, __Offset, __Reader> {
+                        fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                             match self {
                                 Self::Done(reader, opts) => (reader.reader, opts),
                                 _ => unreachable!("invalid state of AsyncChildParse")
                             }
                         }
-                        fn borrow_reader(&mut self) -> (&mut R, &'a ::#KRATE::parse_options::ParseOptions) {
+                        fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                             match self {
                                 Self::AtomHeader(fut) => fut.borrow_reader(),
                                 #(Self::#variants(fut) => {
@@ -793,7 +793,7 @@ impl AtomField {
                         });
 
                         let mut generics = generics.clone();
-                        generics.params.push(syn::parse_quote!(O = usize));
+                        generics.params.push(syn::parse_quote!(__Offset = usize));
                         let (_, _, where_clause) = generics.split_for_impl();
 
                         let pd_generics = generics.params.iter().filter_map(|p| match p {
@@ -819,7 +819,7 @@ impl AtomField {
                         let vs = variants.iter().map(|v| {
                             let name = &v.variant_name;
                             let mut generics = generics.clone();
-                            generics.params.push(syn::parse_quote!(O = usize));
+                            generics.params.push(syn::parse_quote!(__Offset = usize));
 
                             let (_, ty_generics, _) = generics.split_for_impl();
 
@@ -839,7 +839,7 @@ impl AtomField {
                             }).filter_map(|f| f.as_field_decl(None, payload_len, generics));
 
                             let mut generics = generics.clone();
-                            generics.params.push(syn::parse_quote!(O = usize));
+                            generics.params.push(syn::parse_quote!(__Offset = usize));
 
                             let (_, ty_generics, where_clause) = generics.split_for_impl();
                             let pd_generics = generics.params.iter().filter_map(|p| {
@@ -873,7 +873,7 @@ impl AtomField {
                         });
 
                         let mut generics = generics.clone();
-                        generics.params.push(syn::parse_quote!(O = usize));
+                        generics.params.push(syn::parse_quote!(__Offset = usize));
                         let (_, _, where_clause) = generics.split_for_impl();
                         quote! {
                             #nested_defs
@@ -1238,7 +1238,7 @@ impl StructFieldAttr {
         Some(match self {
             Self::Reserved => {
                 quote! {
-                    let _reserved = <#ty as ::#KRATE::parse::Parse<O>>::parse(reader, opts)?;
+                    let _reserved = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
                     if opts.error_on_used_reserved_fields && (_reserved != unsafe { ::core::mem::zeroed::<#ty>() }) {
                         return Err(::#KRATE::error::ParseError::UsedReservedField);
                     }
@@ -1248,7 +1248,7 @@ impl StructFieldAttr {
                 val,
             } => {
                 quote! {
-                    let _expected = <#ty as ::#KRATE::parse::Parse<O>>::parse(reader, opts)?;
+                    let _expected = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
                     if _expected != #val {
                         return Err(::#KRATE::error::ParseError::UnexpectedValue);
                     }
@@ -1259,7 +1259,7 @@ impl StructFieldAttr {
                 zero_relative,
             } => {
                 quote! {
-                    let #name = <::#KRATE::array::DynamicArray::<O, #length_ty, #ty, #zero_relative> as ::#KRATE::parse::Parse<O>>::parse(reader, opts)?;
+                    let #name = <::#KRATE::array::DynamicArray::<__Offset, #length_ty, #ty, #zero_relative> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
                 }
             }
             Self::TrailingArray => {
@@ -1275,7 +1275,7 @@ impl StructFieldAttr {
             }
             Self::PayloadLength => {
                 quote! {
-                    let _payload_len = <#ty as ::#KRATE::parse::Parse<O>>::parse(reader, opts)?;
+                    let _payload_len = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
                 }
             }
             Self::Payload => {
@@ -1291,19 +1291,19 @@ impl StructFieldAttr {
             }
             Self::Normal | Self::Condition => {
                 quote! {
-                    let #name = <#ty as ::#KRATE::parse::Parse<O>>::parse(reader, opts)?;
+                    let #name = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
                 }.into()
             }
             Self::PascalString {
                 length_ty
             } => {
                 quote! {
-                    let #name = <::#KRATE::string::PascalString::<O, #length_ty> as ::#KRATE::parse::Parse<O>>::parse(reader, opts)?;
+                    let #name = <::#KRATE::string::PascalString::<__Offset, #length_ty> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
                 }
             }
             Self::NullTerminatedString => {
                 quote! {
-                    let #name = <::#KRATE::string::NullTerminatedString<O> as ::#KRATE::parse::Parse<O>>::parse(reader, opts)?;
+                    let #name = <::#KRATE::string::NullTerminatedString<__Offset> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
                 }
             }
             // builtin parsing in versioned impl
@@ -1355,7 +1355,7 @@ impl StructFieldAttr {
             | Self::ReuseCondition => return None,
             Self::Normal => {
                 quote! {
-                    pub #name: <#ty as ::#KRATE::parse::Parsed>::Output<O>
+                    pub #name: <#ty as ::#KRATE::parse::Parsed>::Output<__Offset>
                 }
             }
             Self::DynamicArray {
@@ -1363,39 +1363,39 @@ impl StructFieldAttr {
                 length_ty,
             } => {
                 quote! {
-                    pub #name: ::#KRATE::array::DynamicArray<O, #length_ty, #ty, #zero_relative>
+                    pub #name: ::#KRATE::array::DynamicArray<__Offset, #length_ty, #ty, #zero_relative>
                 }
             }
             Self::TrailingArray => {
                 if let Some(len_ty) = payload_len {
                     quote! {
-                        pub #name: ::#KRATE::trailing::Trailing<O, #ty, #len_ty>
+                        pub #name: ::#KRATE::trailing::Trailing<__Offset, #ty, #len_ty>
                     }
                 } else {
                     quote! {
-                        pub #name: ::#KRATE::trailing::Trailing<O, #ty>
+                        pub #name: ::#KRATE::trailing::Trailing<__Offset, #ty>
                     }
                 }
             }
             Self::Payload => {
                 if let Some(len_ty) = payload_len {
                     quote! {
-                        pub #name: ::#KRATE::payload::Payload<O, #len_ty>
+                        pub #name: ::#KRATE::payload::Payload<__Offset, #len_ty>
                     }
                 } else {
                     quote! {
-                        pub #name: ::#KRATE::payload::Payload<O>
+                        pub #name: ::#KRATE::payload::Payload<__Offset>
                     }
                 }
             }
             Self::PascalString { length_ty } => {
                 quote! {
-                    pub #name: ::#KRATE::string::PascalString<O, #length_ty>
+                    pub #name: ::#KRATE::string::PascalString<__Offset, #length_ty>
                 }
             }
             Self::NullTerminatedString => {
                 quote! {
-                    pub #name: ::#KRATE::string::NullTerminatedString<O>
+                    pub #name: ::#KRATE::string::NullTerminatedString<__Offset>
                 }
             }
         })
@@ -1422,7 +1422,7 @@ impl StructFieldAttr {
             }
             Self::TrailingArray => {
                 quote! {
-                    pub fn #name<'a, R: ::#KRATE::reader::Reader<O>>(&self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<::#KRATE::trailing::TrailingIterator<'a, O, R, #ty>, ::#KRATE::error::ParseError> {
+                    pub fn #name<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<::#KRATE::trailing::TrailingIterator<'__parse_options, __Offset, __Reader, #ty>, ::#KRATE::error::ParseError> {
                         ::#KRATE::trailing::TrailingIterator::from_trailing(&self.#name, reader, opts)
                     }
                 }
@@ -1432,7 +1432,7 @@ impl StructFieldAttr {
                 length_ty,
             } => {
                 quote! {
-                    pub fn #name<'a, R: ::#KRATE::reader::Reader<O>>(&'a self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::DynamicArrayIter<'a, O, R, #length_ty, #ty, #zero_relative> {
+                    pub fn #name<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&'__parse_options self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::DynamicArrayIter<'__parse_options, __Offset, __Reader, #length_ty, #ty, #zero_relative> {
                         ::#KRATE::array::DynamicArrayIter::from_dynamic_array(&self.#name, reader, opts)
                     }
                 }
@@ -1463,7 +1463,7 @@ impl StructFieldAttr {
                 let async_name = quote::format_ident!("{name}_async");
 
                 quote! {
-                    pub fn #async_name<'a, R: ::#KRATE::reader::SwapOffsets<O> + ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin>(&self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<::#KRATE::trailing::AsyncTrailingIterator<'a, O, R, #ty>, ::#KRATE::error::ParseError> {
+                    pub fn #async_name<'__parse_options, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<::#KRATE::trailing::AsyncTrailingIterator<'__parse_options, __Offset, __Reader, #ty>, ::#KRATE::error::ParseError> {
                         ::#KRATE::trailing::AsyncTrailingIterator::from_trailing(&self.#name, reader, opts)
                     }
                 }
@@ -1475,7 +1475,7 @@ impl StructFieldAttr {
                 let async_name = quote::format_ident!("{name}_async");
 
                 quote! {
-                    pub fn #async_name<'a, R: ::#KRATE::reader::SwapOffsets<O> + ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin>(&'a self, reader: &'a mut R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::AsyncDynamicArrayIter<'a, O, R, #length_ty, #ty, #zero_relative> {
+                    pub fn #async_name<'__parse_options, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&'__parse_options self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::AsyncDynamicArrayIter<'__parse_options, __Offset, __Reader, #length_ty, #ty, #zero_relative> {
                         ::#KRATE::array::AsyncDynamicArrayIter::from_dynamic_array(&self.#name, reader, opts)
                     }
                 }
@@ -1495,7 +1495,8 @@ pub fn format_parse_impl(
 
     for param in &mut generics.params {
         if let syn::GenericParam::Type(ty) = param {
-            ty.bounds.push(syn::parse_quote!(::#KRATE::parse::Parse<O>));
+            ty.bounds
+                .push(syn::parse_quote!(::#KRATE::parse::Parse<__Offset>));
         }
     }
 
@@ -1503,14 +1504,14 @@ pub fn format_parse_impl(
 
     generics
         .params
-        .push(syn::parse_quote!(O: ::#KRATE::reader::Offset = usize));
+        .push(syn::parse_quote!(__Offset: ::#KRATE::reader::Offset = usize));
 
     let (impl_generics, _, where_clause) = generics.split_for_impl();
     let (_, parse_generics, _) = parsed_generics.split_for_impl();
 
     quote::quote! {
-        impl #impl_generics ::#KRATE::parse::Parse<O> for #name #parse_generics #where_clause {
-            fn parse<T: ::#KRATE::reader::Reader<O>>(reader: &mut T, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<O>, ::#KRATE::error::ParseError> {
+        impl #impl_generics ::#KRATE::parse::Parse<__Offset> for #name #parse_generics #where_clause {
+            fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>>(reader: &mut __Reader, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
                 #(#sync_parsing)*
                 Ok(#name {
                     #(#field_collection)*
@@ -1621,7 +1622,7 @@ impl FieldKind<'_> {
                 )
             }
             _ => {
-                quote!(<#next_ty as ::#KRATE::parse::AsyncParse<O>>::create_fut(reader, opts))
+                quote!(<#next_ty as ::#KRATE::parse::AsyncParse<__Offset>>::create_fut(reader, opts))
             }
         }
     }
@@ -1643,7 +1644,7 @@ pub fn prepare_fields_for_statemachine<'a>(
     for param in &generics.params {
         if let syn::GenericParam::Type(ty) = param {
             let name = &ty.ident;
-            where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<O>: ::core::marker::Unpin));
+            where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<__Offset>: ::core::marker::Unpin));
         }
     }
 
@@ -1672,9 +1673,9 @@ pub fn prepare_fields_for_statemachine<'a>(
                 let name = syn::Ident::new("children", proc_macro2::Span::call_site());
 
                 let ty = if let Some(size_ty) = size_ty {
-                    quote!(::#KRATE::children::SizedChildren<O, #size_ty, #mod_name Child>)
+                    quote!(::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name Child>)
                 } else {
-                    quote!(::#KRATE::children::Children<O, #mod_name Child>)
+                    quote!(::#KRATE::children::Children<__Offset, #mod_name Child>)
                 };
                 (name, ty, FieldKind::Regular)
             }
@@ -1699,7 +1700,7 @@ pub fn prepare_fields_for_statemachine<'a>(
                 StructFieldAttr::Payload => {
                     let name = field.ident.clone().unwrap();
                     let display_ty = if let Some(len_ty) = payload_len {
-                        quote!(::#KRATE::payload::Payload<O, #len_ty>)
+                        quote!(::#KRATE::payload::Payload<__Offset, #len_ty>)
                     } else {
                         quote!(::#KRATE::payload::Payload)
                     };
@@ -1709,7 +1710,7 @@ pub fn prepare_fields_for_statemachine<'a>(
                     let name = field.ident.clone().unwrap();
                     (
                         name,
-                        quote!(::#KRATE::string::PascalString<O, #length_ty>),
+                        quote!(::#KRATE::string::PascalString<__Offset, #length_ty>),
                         FieldKind::Regular,
                     )
                 }
@@ -1717,7 +1718,7 @@ pub fn prepare_fields_for_statemachine<'a>(
                     let name = field.ident.clone().unwrap();
                     (
                         name,
-                        quote!(::#KRATE::string::NullTerminatedString<O>),
+                        quote!(::#KRATE::string::NullTerminatedString<__Offset>),
                         FieldKind::Regular,
                     )
                 }
@@ -1739,7 +1740,7 @@ pub fn prepare_fields_for_statemachine<'a>(
                     let name = field.ident.clone().unwrap();
                     (
                         name,
-                        quote!(::#KRATE::array::DynamicArray<O, #length_ty, #ty, #zero_relative>),
+                        quote!(::#KRATE::array::DynamicArray<__Offset, #length_ty, #ty, #zero_relative>),
                         FieldKind::Regular,
                     )
                 }
@@ -1747,9 +1748,9 @@ pub fn prepare_fields_for_statemachine<'a>(
                     let ty = &field.ty;
                     let name = field.ident.clone().unwrap();
                     let display_ty = if let Some(len_ty) = payload_len {
-                        quote!(::#KRATE::trailing::Trailing<O, #ty, #len_ty>)
+                        quote!(::#KRATE::trailing::Trailing<__Offset, #ty, #len_ty>)
                     } else {
-                        quote!(::#KRATE::trailing::Trailing<O, #ty>)
+                        quote!(::#KRATE::trailing::Trailing<__Offset, #ty>)
                     };
                     (name, display_ty, FieldKind::Trailing)
                 }
@@ -1804,7 +1805,7 @@ pub fn format_statemachine_nop_impl(
                 nop: (reader, opts, ::core::marker::PhantomData)
             },
             Some(quote! {
-                S0 { nop: (R, &'a ::#KRATE::parse_options::ParseOptions, ::core::marker::PhantomData<( O, #(#pd_generics,)* )>) },
+                S0 { nop: (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions, ::core::marker::PhantomData<( __Offset, #(#pd_generics,)* )>) },
             }),
             Some(quote! {
                 Self::S0 { nop: (reader, opts, _) } => {
@@ -1882,7 +1883,7 @@ pub fn format_variant_state_change<'a>(
         let variant_storage_name = quote::format_ident!("Async{}Storage", variant);
 
         let mut generics = generics.clone();
-        generics.params.push(syn::parse_quote!(O));
+        generics.params.push(syn::parse_quote!(__Offset));
         let (_, ty_generics, _) = generics.split_for_impl();
 
         let var = quote! {
@@ -1947,7 +1948,7 @@ pub fn format_variant_state_change<'a>(
         let variant_storage_name = quote::format_ident!("Async{}Storage", vname);
 
         let mut generics = generics.clone();
-        generics.params.push(syn::parse_quote!(O));
+        generics.params.push(syn::parse_quote!(__Offset));
         let (_, ty_generics, _) = generics.split_for_impl();
 
         Some(quote! {
@@ -2036,7 +2037,7 @@ pub fn format_statemachine_fields(
                 };
 
                 let mut storage_generics = generics.clone();
-                storage_generics.params.push(syn::parse_quote!(O));
+                storage_generics.params.push(syn::parse_quote!(__Offset));
                 let (_, storage_ty_generics, _) = storage_generics.split_for_impl();
 
                 Some(quote! {
@@ -2044,7 +2045,7 @@ pub fn format_statemachine_fields(
                 })
             }
             _ => Some(quote! {
-                #name: <#ty as ::#KRATE::parse::Parsed>::Output<O>,
+                #name: <#ty as ::#KRATE::parse::Parsed>::Output<__Offset>,
             }),
         });
 
@@ -2053,9 +2054,9 @@ pub fn format_statemachine_fields(
             match kind {
                 FieldKind::Payload => {
                     if let Some(len) = payload_len {
-                        quote!(#name: ::#KRATE::payload::PayloadParse<'a, O, R, #len>)
+                        quote!(#name: ::#KRATE::payload::PayloadParse<'__parse_options, __Offset, __Reader, #len>)
                     } else {
-                        quote!(#name: ::#KRATE::payload::PayloadParse<'a, O, R>)
+                        quote!(#name: ::#KRATE::payload::PayloadParse<'__parse_options, __Offset, __Reader>)
                     }
                 }
                 FieldKind::Trailing => {
@@ -2064,9 +2065,9 @@ pub fn format_statemachine_fields(
                     };
                     let trailing_ty = &field.ty;
                     if let Some(len) = payload_len {
-                        quote!(#name: ::#KRATE::trailing::TrailingParse<'a, O, R, #trailing_ty, #len>)
+                        quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty, #len>)
                     } else {
-                        quote!(#name: ::#KRATE::trailing::TrailingParse<'a, O, R, #trailing_ty>)
+                        quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty>)
                     }
                 }
                 FieldKind::Conditional(cond) => {
@@ -2081,16 +2082,18 @@ pub fn format_statemachine_fields(
                     };
 
                     let mut parse_generics = generics.clone();
-                    parse_generics.params.push(syn::parse_quote!('a));
-                    parse_generics.params.push(syn::parse_quote!(O));
-                    parse_generics.params.push(syn::parse_quote!(R));
+                    parse_generics
+                        .params
+                        .push(syn::parse_quote!('__parse_options));
+                    parse_generics.params.push(syn::parse_quote!(__Offset));
+                    parse_generics.params.push(syn::parse_quote!(__Reader));
                     let (_, parse_ty_generics, _) = parse_generics.split_for_impl();
 
                     quote!(#field_name: #mod_name #parse_name #parse_ty_generics)
                 }
                 _ => {
                     quote! {
-                        #name: <#ty as ::#KRATE::parse::AsyncParse<O>>::Fut<'a, R>,
+                        #name: <#ty as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>,
                     }
                 }
             }
@@ -2194,7 +2197,7 @@ pub fn format_statemachine_fields(
                     );
 
                     let mut generics = generics.clone();
-                    generics.params.push(syn::parse_quote!(O));
+                    generics.params.push(syn::parse_quote!(__Offset));
                     let (_, ty_generics, _) = generics.split_for_impl();
                     let none_variant = format_none_variant_state_change(
                         exhaustive,
@@ -2245,7 +2248,7 @@ pub fn format_statemachine_fields(
                     });
 
                     let mut generics = generics.clone();
-                    generics.params.push(syn::parse_quote!(O));
+                    generics.params.push(syn::parse_quote!(__Offset));
                     let (_, ty_generics, _) = generics.split_for_impl();
                     let none_variant = format_none_variant_state_change(
                         exhaustive,
@@ -2453,7 +2456,7 @@ pub fn format_async_statemachine(
     for param in &generics.params {
         if let syn::GenericParam::Type(ty) = param {
             let name = &ty.ident;
-            where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<O>: ::core::marker::Unpin));
+            where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<__Offset>: ::core::marker::Unpin));
         }
     }
 
@@ -2461,26 +2464,26 @@ pub fn format_async_statemachine(
         if let syn::GenericParam::Type(ty) = param {
             ty.bounds.push(syn::parse_quote!(::core::marker::Unpin));
             ty.bounds
-                .push(syn::parse_quote!(::#KRATE::parse::AsyncParse<O>));
+                .push(syn::parse_quote!(::#KRATE::parse::AsyncParse<__Offset>));
         }
     }
 
     let mut parse_generics = generics.clone();
     parse_generics
         .params
-        .push(syn::parse_quote!(O: ::#KRATE::reader::Offset + ::core::marker::Unpin));
+        .push(syn::parse_quote!(__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin));
     let (parse_impl_generics, _, _) = parse_generics.split_for_impl();
 
     let struct_generics = generics.clone();
     let (_, struct_ty_generics, struct_where_clause) = struct_generics.split_for_impl();
 
-    generics.params.push(syn::parse_quote!('a));
+    generics.params.push(syn::parse_quote!('__parse_options));
     generics
         .params
-        .push(syn::parse_quote!(O: ::#KRATE::reader::Offset + ::core::marker::Unpin));
-    generics
-        .params
-        .push(syn::parse_quote!(R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin));
+        .push(syn::parse_quote!(__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin));
+    generics.params.push(
+        syn::parse_quote!(__Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin),
+    );
 
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
 
@@ -2488,12 +2491,12 @@ pub fn format_async_statemachine(
         pub enum #parse_name #generics #where_clause {
             #(#state_machine_variants,)*
             #nop_variant
-            Done(R, &'a ::#KRATE::parse_options::ParseOptions),
+            Done(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions),
             Empty,
         }
 
         impl #impl_generics Future for #parse_name #type_generics #where_clause {
-            type Output = ::core::result::Result<<#struct_name #struct_ty_generics as ::#KRATE::parse::Parsed>::Output<O>, ::#KRATE::error::ParseError>;
+            type Output = ::core::result::Result<<#struct_name #struct_ty_generics as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError>;
             fn poll(mut self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
                 loop {
                     let mut this = ::core::mem::replace(&mut *self, Self::Empty);
@@ -2507,24 +2510,24 @@ pub fn format_async_statemachine(
             }
         }
 
-        impl #parse_impl_generics ::#KRATE::parse::AsyncParse<O> for #struct_name #struct_ty_generics #struct_where_clause {
-            type Fut<'a, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin> = #parse_name #type_generics ;
-            fn create_fut<'a, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin>(reader: R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'a, R> {
+        impl #parse_impl_generics ::#KRATE::parse::AsyncParse<__Offset> for #struct_name #struct_ty_generics #struct_where_clause {
+            type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #parse_name #type_generics ;
+            fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
                 #parse_name ::S0 {
                     #start
                 }
             }
         }
 
-        impl #impl_generics ::#KRATE::reader::TakeReader<'a, R> for #parse_name #type_generics #where_clause {
-            fn take_reader(self) -> (R, &'a ::#KRATE::parse_options::ParseOptions) {
+        impl #impl_generics ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #parse_name #type_generics #where_clause {
+            fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                 match self {
                     Self::Done(reader, opts) => return (reader, opts),
                     _ => unreachable!("invalid state"),
                 }
             }
 
-            fn borrow_reader(&mut self) -> (&mut R, &'a ::#KRATE::parse_options::ParseOptions) {
+            fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                 match self {
                     #(#borrow_reader_variants)*
                     #nop_borrow
@@ -2540,12 +2543,12 @@ pub fn format_parsed_ty(name: &syn::Ident, generics: &syn::Generics) -> proc_mac
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let mut output_generics = generics.clone();
-    output_generics.params.push(syn::parse_quote!(O));
+    output_generics.params.push(syn::parse_quote!(__Offset));
     let (_, output_generics, _) = output_generics.split_for_impl();
 
     quote::quote! {
         impl #impl_generics ::#KRATE::parse::Parsed for #name #ty_generics #where_clause {
-            type Output<O> = #name #output_generics;
+            type Output<__Offset> = #name #output_generics;
         }
     }
     .into()

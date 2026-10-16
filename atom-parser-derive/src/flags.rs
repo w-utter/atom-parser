@@ -293,11 +293,11 @@ impl FlagList {
     pub fn async_parse_impl(name: &syn::Ident, parse_repr: &syn::Type) -> proc_macro2::TokenStream {
         let parse_name = quote::format_ident!("Async{}Parse", name);
         quote::quote! {
-            pub struct #parse_name<'a, O: ::#KRATE::reader::Offset + ::core::marker::Unpin, R: ::#KRATE::reader::PollReader<O> + ::core::marker::Unpin> {
-                inner: <#parse_repr as ::#KRATE::parse::AsyncParse<O>>::Fut<'a, R>,
+            pub struct #parse_name<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
+                inner: <#parse_repr as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>,
             }
 
-            impl <'a, O: ::#KRATE::reader::Offset + ::core::marker::Unpin, R: ::#KRATE::reader::PollReader<O> + Unpin> Future for #parse_name <'a, O, R> {
+            impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + Unpin> Future for #parse_name <'__parse_options, __Offset, __Reader> {
                 type Output = ::core::result::Result<#name, ::#KRATE::error::ParseError>;
                 fn poll(mut self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
                     let bits = ::core::task::ready!(::core::pin::Pin::new(&mut self.inner).poll(cx))?;
@@ -308,23 +308,23 @@ impl FlagList {
             }
 
             impl ::#KRATE::parse::Parsed for #name {
-                type Output<O> = #name;
+                type Output<__Offset> = #name;
             }
 
-            impl <O: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<O> for #name {
-                type Fut<'a, R: ::#KRATE::reader::PollReader<O> + Unpin> = #parse_name<'a, O, R>;
-                fn create_fut<'a, R: ::#KRATE::reader::PollReader<O> + Unpin>(reader: R, opts: &'a ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'a, R> {
+            impl <__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<__Offset> for #name {
+                type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + Unpin> = #parse_name<'__parse_options, __Offset, __Reader>;
+                fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
                     #parse_name {
-                        inner: <#parse_repr as ::#KRATE::parse::AsyncParse<O>>::create_fut(reader, opts)
+                        inner: <#parse_repr as ::#KRATE::parse::AsyncParse<__Offset>>::create_fut(reader, opts)
                     }
                 }
             }
 
-            impl <'a, O: ::#KRATE::reader::Offset + ::core::marker::Unpin, R: ::#KRATE::reader::PollReader<O> + Unpin> ::#KRATE::reader::TakeReader<'a, R> for #parse_name<'a, O, R> {
-                fn take_reader(self) -> (R, &'a ::#KRATE::parse_options::ParseOptions) {
+            impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + Unpin> ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #parse_name<'__parse_options, __Offset, __Reader> {
+                fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                     self.inner.take_reader()
                 }
-                fn borrow_reader(&mut self) -> (&mut R, &'a ::#KRATE::parse_options::ParseOptions) {
+                fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                     self.inner.borrow_reader()
                 }
             }
