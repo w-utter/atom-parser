@@ -1,3 +1,4 @@
+use crate::field::PayloadLength;
 use crate::{AtomField, AtomFields, KRATE, StructFieldAttr};
 
 #[derive(Clone)]
@@ -402,7 +403,7 @@ impl ConditionalVariant {
         generic_collection: Option<&proc_macro2::TokenStream>,
         parse_generics: &syn::Generics,
         storage_generics: &syn::Generics,
-        payload_len: Option<&syn::Type>,
+        payload_len: Option<&PayloadLength>,
     ) -> proc_macro2::TokenStream {
         let (parse_impl_generics, parse_ty_generics, parse_where_clause) =
             parse_generics.split_for_impl();
@@ -724,7 +725,7 @@ impl Conditionals {
         &self,
         generics: &syn::Generics,
         generic_collection: Option<&proc_macro2::TokenStream>,
-        payload_len: Option<&syn::Type>,
+        payload_len: Option<&PayloadLength>,
     ) -> proc_macro2::TokenStream {
         use quote::quote;
 

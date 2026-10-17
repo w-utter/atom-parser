@@ -156,7 +156,7 @@ impl AtomFields {
         generics: &syn::Generics,
 
         generic_collection: Option<&proc_macro2::TokenStream>,
-        payload_len: Option<&syn::Type>,
+        payload_len: Option<&PayloadLength>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
         let payload_len = AtomFields::nested_payload_len(payload_len, fields);
@@ -182,9 +182,11 @@ impl AtomFields {
         })
     }
 
-    pub fn payload_len(fields: &[AtomField]) -> Option<syn::Type> {
+    pub fn payload_len(fields: &[AtomField]) -> Option<PayloadLength> {
         let mut tys = fields.iter().filter_map(|field| match &field {
-            AtomField::Struct(field, StructFieldAttr::PayloadLength) => Some(&field.ty),
+            AtomField::Struct(field, StructFieldAttr::PayloadLength { offset }) => {
+                Some((&field.ty, offset))
+            }
             _ => None,
         });
 
@@ -192,7 +194,7 @@ impl AtomFields {
             panic!("more than one payload length specified");
         }
 
-        let ty = tys.next().cloned();
+        let ty = tys.next();
         let mut trailing = fields.iter().enumerate().filter(|(_, field)| {
             matches!(
                 field,
@@ -209,7 +211,7 @@ impl AtomFields {
             panic!("more than 1 trailing collection")
         }
 
-        match (ty.as_ref(), trailing.next()) {
+        let ty = match (ty, trailing.next()) {
             (Some(_), Some((_, AtomField::Children { .. }))) => panic!(
                 "length specified with children is unsupported (it is gotten from the atom size)"
             ),
@@ -217,15 +219,19 @@ impl AtomFields {
                 panic!("trailing field is not the last field declared")
             }
             (Some(_), None) => panic!("trailing length specified but no trailing field"),
-            _ => (),
-        }
+            (Some((ty, offset)), Some(_)) => Some(PayloadLength {
+                ty: ty.clone(),
+                offset: offset.clone(),
+            }),
+            (None, _) => None,
+        };
 
         ty
     }
     pub fn nested_payload_len(
-        existing: Option<&syn::Type>,
+        existing: Option<&PayloadLength>,
         fields: &[AtomField],
-    ) -> Option<syn::Type> {
+    ) -> Option<PayloadLength> {
         match (existing, Self::payload_len(fields)) {
             (Some(_), Some(new)) => Some(new),
             (Some(existing), None) => Some(existing.clone()),
@@ -309,7 +315,7 @@ impl AtomField {
     pub fn as_field_decl(
         &self,
         atom_mod: Option<&syn::Ident>,
-        payload_len: Option<&syn::Type>,
+        payload_len: Option<&PayloadLength>,
         generics: &syn::Generics,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
@@ -431,7 +437,7 @@ impl AtomField {
         &self,
         atom_mod: &syn::Ident,
         version_mod: Option<&syn::Ident>,
-        payload_len: Option<&syn::Type>,
+        payload_len: Option<&PayloadLength>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
 
@@ -572,7 +578,7 @@ impl AtomField {
         generics: &syn::Generics,
 
         generic_collection: Option<&proc_macro2::TokenStream>,
-        payload_len: Option<&syn::Type>,
+        payload_len: Option<&PayloadLength>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
         Some(match self {
@@ -1167,7 +1173,13 @@ pub enum StructFieldAttr {
     // at the moment it only supports non-inclusive length
     // e.g, if a headers length includes itself,
     // it does not calculate the offset
-    PayloadLength,
+    PayloadLength {
+        // specifies an offset from the length given, e.g if a headers
+        // length includes itself
+        //
+        // #[payload_length(offset = 8)]
+        offset: Option<syn::Expr>,
+    },
     // definition of trailing payload at the end of the atom
     //
     // #[payload]
@@ -1238,7 +1250,27 @@ impl StructFieldAttr {
         } else if path.is_ident("payload") {
             Self::Payload
         } else if path.is_ident("payload_length") {
-            Self::PayloadLength
+            use syn::Meta;
+            let offset = match &attr.meta {
+                Meta::Path(_) => None,
+                Meta::List(list) => {
+                    let parser = |input: syn::parse::ParseStream| {
+                        let name: syn::Path = input.parse()?;
+                        if !name.is_ident("offset") {
+                            panic!(
+                                "only the `offset` meta is supported in the payload_length attr"
+                            );
+                        }
+                        let _: syn::Token![=] = input.parse()?;
+                        Ok(Some(input.parse()?))
+                    };
+                    use syn::parse::Parser;
+                    parser.parse2(list.tokens.clone())?
+                }
+                Meta::NameValue(_) => panic!("name-value pair for conditional is not supported"),
+            };
+
+            Self::PayloadLength { offset }
         } else if path.is_ident("version") {
             Self::VersionIdentifier
         } else if path.is_ident("condition") {
@@ -1253,7 +1285,7 @@ impl StructFieldAttr {
     pub fn as_sync_parse(
         &self,
         field: &syn::Field,
-        payload_len: Option<&syn::Type>,
+        payload_len: Option<&PayloadLength>,
     ) -> Option<proc_macro2::TokenStream> {
         let name = &field.ident;
         let ty = &field.ty;
@@ -1286,9 +1318,15 @@ impl StructFieldAttr {
                 }
             }
             Self::TrailingArray => {
-                if let Some(_) = payload_len {
+                if let Some(PayloadLength { offset, ..}) = payload_len {
+                    let len = if let Some(offset) = offset {
+                        quote!(_payload_len.checked_sub(#offset).ok_or(::#KRATE::error::ParseError::AtomSizeTooSmall)?)
+                    } else {
+                        quote!(_payload_len)
+                    };
+
                     quote! {
-                        let #name = ::#KRATE::trailing::Trailing::parse_from_len(_payload_len, reader, opts)?;
+                        let #name = ::#KRATE::trailing::Trailing::parse_from_len(#len, reader, opts)?;
                     }
                 } else {
                     quote! {
@@ -1296,15 +1334,21 @@ impl StructFieldAttr {
                     }
                 }
             }
-            Self::PayloadLength => {
+            Self::PayloadLength{..} => {
                 quote! {
                     let _payload_len = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
                 }
             }
             Self::Payload => {
-                if let Some(_) = payload_len {
+                if let Some(PayloadLength { offset, ..}) = payload_len {
+                    let len = if let Some(offset) = offset {
+                        quote!(_payload_len.checked_sub(#offset).ok_or(::#KRATE::error::ParseError::AtomSizeTooSmall)?)
+                    } else {
+                        quote!(_payload_len)
+                    };
+
                     quote! {
-                        let #name = ::#KRATE::payload::Payload::parse_from_len(_payload_len, reader, opts)?;
+                        let #name = ::#KRATE::payload::Payload::parse_from_len(#len, reader, opts)?;
                     }
                 } else {
                     quote! {
@@ -1343,7 +1387,7 @@ impl StructFieldAttr {
             Self::Reserved
             | Self::Expected { .. }
             | Self::VersionIdentifier
-            | Self::PayloadLength
+            | Self::PayloadLength { .. }
             | Self::Condition => {
                 return None;
             }
@@ -1363,7 +1407,7 @@ impl StructFieldAttr {
     pub fn as_field_decl(
         &self,
         field: &syn::Field,
-        payload_len: Option<&syn::Type>,
+        payload_len: Option<&PayloadLength>,
     ) -> Option<proc_macro2::TokenStream> {
         let name = &field.ident;
         let ty = &field.ty;
@@ -1373,7 +1417,7 @@ impl StructFieldAttr {
             Self::Reserved
             | Self::Expected { .. }
             | Self::VersionIdentifier
-            | Self::PayloadLength
+            | Self::PayloadLength { .. }
             | Self::Condition
             | Self::ReuseCondition => return None,
             Self::Normal => {
@@ -1390,7 +1434,7 @@ impl StructFieldAttr {
                 }
             }
             Self::TrailingArray => {
-                if let Some(len_ty) = payload_len {
+                if let Some(PayloadLength { ty: len_ty, .. }) = payload_len {
                     quote! {
                         pub #name: ::#KRATE::trailing::Trailing<__Offset, #ty, #len_ty>
                     }
@@ -1401,7 +1445,7 @@ impl StructFieldAttr {
                 }
             }
             Self::Payload => {
-                if let Some(len_ty) = payload_len {
+                if let Some(PayloadLength { ty: len_ty, .. }) = payload_len {
                     quote! {
                         pub #name: ::#KRATE::payload::Payload<__Offset, #len_ty>
                     }
@@ -1435,7 +1479,7 @@ impl StructFieldAttr {
             | Self::Reserved
             | Self::Expected { .. }
             | Self::VersionIdentifier
-            | Self::PayloadLength
+            | Self::PayloadLength { .. }
             | Self::Payload
             | Self::Condition
             | Self::ReuseCondition
@@ -1474,7 +1518,7 @@ impl StructFieldAttr {
             | Self::Reserved
             | Self::Expected { .. }
             | Self::VersionIdentifier
-            | Self::PayloadLength
+            | Self::PayloadLength { .. }
             | Self::Payload
             | Self::Condition
             | Self::ReuseCondition
@@ -1546,6 +1590,12 @@ pub fn format_parse_impl(
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct PayloadLength {
+    ty: syn::Type,
+    offset: Option<syn::Expr>,
+}
+
 pub enum FieldKind<'a> {
     PayloadLength,
     Payload,
@@ -1564,20 +1614,32 @@ impl FieldKind<'_> {
         generics: &syn::Generics,
         mod_name: Option<&proc_macro2::TokenStream>,
         generic_collection: Option<&proc_macro2::TokenStream>,
-        payload_len: Option<&syn::Type>,
+        payload_len: Option<&PayloadLength>,
     ) -> proc_macro2::TokenStream {
         use quote::quote;
         match self {
             Self::Trailing => {
-                if let Some(_) = payload_len {
-                    quote!(::#KRATE::trailing::Trailing::create_fut_from_len(_payload_len, reader, opts))
+                if let Some(PayloadLength { offset, .. }) = payload_len {
+                    let len = if let Some(offset) = offset {
+                        quote!(_payload_len.checked_sub(#offset).ok_or(::#KRATE::error::ParseError::AtomSizeTooSmall)?)
+                    } else {
+                        quote!(_payload_len)
+                    };
+
+                    quote!(::#KRATE::trailing::Trailing::create_fut_from_len(#len, reader, opts))
                 } else {
                     quote!(::#KRATE::trailing::Trailing::create_fut(reader, opts))
                 }
             }
             Self::Payload => {
-                if let Some(_) = payload_len {
-                    quote!(::#KRATE::payload::Payload::create_fut_from_len(_payload_len, reader, opts))
+                if let Some(PayloadLength { offset, .. }) = payload_len {
+                    let len = if let Some(offset) = offset {
+                        quote!(_payload_len.checked_sub(#offset).ok_or(::#KRATE::error::ParseError::AtomSizeTooSmall)?)
+                    } else {
+                        quote!(_payload_len)
+                    };
+
+                    quote!(::#KRATE::payload::Payload::create_fut_from_len(#len, reader, opts))
                 } else {
                     quote!(::#KRATE::payload::Payload::create_fut(reader, opts))
                 }
@@ -1656,7 +1718,7 @@ pub fn prepare_fields_for_statemachine<'a>(
     fields: &'a [AtomField],
     mut generics: syn::Generics,
     mod_name: Option<&proc_macro2::TokenStream>,
-    payload_len: Option<&syn::Type>,
+    payload_len: Option<&PayloadLength>,
 ) -> Vec<(syn::Ident, proc_macro2::TokenStream, FieldKind<'a>)> {
     let where_clause = generics
         .where_clause
@@ -1715,7 +1777,7 @@ pub fn prepare_fields_for_statemachine<'a>(
                     (name, quote!(#ty), FieldKind::Regular)
                 }
                 StructFieldAttr::VersionIdentifier => unreachable!(),
-                StructFieldAttr::PayloadLength => {
+                StructFieldAttr::PayloadLength{..} => {
                     let name = quote::format_ident!("_payload_len");
                     let ty = &field.ty;
 
@@ -1723,7 +1785,7 @@ pub fn prepare_fields_for_statemachine<'a>(
                 }
                 StructFieldAttr::Payload => {
                     let name = field.ident.clone().unwrap();
-                    let display_ty = if let Some(len_ty) = payload_len {
+                    let display_ty = if let Some(PayloadLength { ty: len_ty,  ..}) = payload_len {
                         quote!(::#KRATE::payload::Payload<__Offset, #len_ty>)
                     } else {
                         quote!(::#KRATE::payload::Payload)
@@ -1771,7 +1833,7 @@ pub fn prepare_fields_for_statemachine<'a>(
                 StructFieldAttr::TrailingArray => {
                     let ty = &field.ty;
                     let name = field.ident.clone().unwrap();
-                    let display_ty = if let Some(len_ty) = payload_len {
+                    let display_ty = if let Some(PayloadLength { ty: len_ty, ..}) = payload_len {
                         quote!(::#KRATE::trailing::Trailing<__Offset, #ty, #len_ty>)
                     } else {
                         quote!(::#KRATE::trailing::Trailing<__Offset, #ty>)
@@ -1796,7 +1858,7 @@ pub fn format_statemachine_nop_impl(
     generics: &syn::Generics,
     mod_name: Option<&proc_macro2::TokenStream>,
     generic_collection: Option<&proc_macro2::TokenStream>,
-    payload_len: Option<&syn::Type>,
+    payload_len: Option<&PayloadLength>,
     format_state_transition: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream,
 ) -> (
     proc_macro2::TokenStream,
@@ -1856,7 +1918,7 @@ pub fn format_variant_state_change<'a>(
     mod_name: Option<&proc_macro2::TokenStream>,
     generic_collection: Option<&proc_macro2::TokenStream>,
     root: bool,
-    payload_len: Option<&syn::Type>,
+    payload_len: Option<&PayloadLength>,
     struct_name: &syn::Ident,
     idx: usize,
     parse_name: &syn::Ident,
@@ -2032,7 +2094,7 @@ fn format_none_variant_state_change(
 pub fn format_statemachine_fields(
     fields: &[AtomField],
     typed_fields: &[(syn::Ident, proc_macro2::TokenStream, FieldKind)],
-    payload_len: Option<&syn::Type>,
+    payload_len: Option<&PayloadLength>,
     struct_name: &syn::Ident,
     parse_name: &syn::Ident,
     generics: &syn::Generics,
@@ -2087,7 +2149,7 @@ pub fn format_statemachine_fields(
             let (name, ty, kind) = in_progress;
             match kind {
                 FieldKind::Payload => {
-                    if let Some(len) = payload_len.as_ref() {
+                    if let Some(PayloadLength { ty: len, .. }) = payload_len.as_ref() {
                         quote!(#name: ::#KRATE::payload::PayloadParse<'__parse_options, __Offset, __Reader, #len>)
                     } else {
                         quote!(#name: ::#KRATE::payload::PayloadParse<'__parse_options, __Offset, __Reader>)
@@ -2098,7 +2160,7 @@ pub fn format_statemachine_fields(
                         unreachable!();
                     };
                     let trailing_ty = &field.ty;
-                    if let Some(len) = payload_len.as_ref() {
+                    if let Some(PayloadLength { ty: len, .. }) = payload_len.as_ref() {
                         quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty, #len>)
                     } else {
                         quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty>)
@@ -2369,7 +2431,7 @@ pub fn format_statemachine_fields(
 pub fn format_statemachine_next_state(
     typed_fields: &[(syn::Ident, proc_macro2::TokenStream, FieldKind)],
     idx: usize,
-    payload_len: Option<&syn::Type>,
+    payload_len: Option<&PayloadLength>,
     parse_name: &syn::Ident,
     mod_name: Option<&proc_macro2::TokenStream>,
     generic_collection: Option<&proc_macro2::TokenStream>,
@@ -2428,7 +2490,7 @@ pub fn format_async_statemachine(
     mut generics: syn::Generics,
     atom_mod: Option<&syn::Ident>,
     generic_collection: Option<&proc_macro2::TokenStream>,
-    payload_len: Option<&syn::Type>,
+    payload_len: Option<&PayloadLength>,
 ) -> proc_macro2::TokenStream {
     let payload_len = AtomFields::nested_payload_len(payload_len, fields);
     let mod_name = atom_mod.map(|name| quote!(#name::));
