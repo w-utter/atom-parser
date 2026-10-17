@@ -143,7 +143,7 @@ mod trailing_reader {
         fn remaining_size(&self) -> O {
             self.max_offset
                 .checked_sub(&self.reader.offset())
-                .unwrap_or(O::zero())
+                .unwrap_or(O::ZERO)
         }
 
         fn offset(&self) -> O {
@@ -246,7 +246,7 @@ mod trailing_reader {
         fn remaining_size(&self) -> O {
             self.max_offset
                 .checked_sub(&self.reader.offset())
-                .unwrap_or(O::zero())
+                .unwrap_or(O::ZERO)
         }
 
         #[cfg(feature = "alloc")]

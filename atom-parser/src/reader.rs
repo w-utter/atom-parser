@@ -21,13 +21,38 @@ macro_rules! offset_trait {
 offset_trait! {
     core::cmp::PartialOrd,
     core::cmp::PartialEq,
-    num_traits::CheckedSub,
-    num_traits::CheckedAdd,
-    core::ops::Add,
-    num_traits::Zero,
+    core::ops::Add<Output = Self>,
+    CheckedArithmetic,
     TryFrom<usize>,
+    TryInto<usize>,
     TryFromArraySize,
     Copy,
+}
+
+macro_rules! checked_arithmetic {
+    ($($t:ty),* $(,)?) => {
+        pub trait CheckedArithmetic: Sized {
+            const ZERO: Self;
+            fn checked_add(&self, rhs: &Self) -> Option<Self>;
+            fn checked_sub(&self, rhs: &Self) -> Option<Self>;
+        }
+
+        $(
+            impl CheckedArithmetic for $t {
+                const ZERO: Self = 0;
+                fn checked_add(&self, rhs: &Self) -> Option<Self> {
+                    <$t>::checked_add(*self, *rhs)
+                }
+                fn checked_sub(&self, rhs: &Self) -> Option<Self> {
+                    <$t>::checked_sub(*self, *rhs)
+                }
+            }
+        )*
+    }
+}
+
+checked_arithmetic! {
+    u8, u16, u32, u64, usize,
 }
 
 /// used for nested parsing

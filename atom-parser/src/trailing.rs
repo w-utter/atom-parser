@@ -140,7 +140,7 @@ impl<'a, O: Offset, R: SwapOffsets<O> + Reader<O>, T> TrailingIterator<'a, O, R,
 impl<'a, O: Offset, T: Parse<O>, R: Reader<O>> Iterator for TrailingIterator<'a, O, R, T> {
     type Item = Result<<T as Parsed>::Output<O>, ParseError>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.reader.remaining_size() == O::zero() {
+        if self.reader.remaining_size() == O::ZERO {
             return None;
         }
 
@@ -183,7 +183,7 @@ where
         let max_offset = offset.add(size);
         let reader = BacktrackReader::new(TrailingReader::new(reader, max_offset), *offset);
 
-        let state = if PollReader::remaining_size(&reader) > O::zero() {
+        let state = if PollReader::remaining_size(&reader) > O::ZERO {
             AsyncIterState::Iterating(T::create_fut(reader, opts))
         } else {
             AsyncIterState::Done(reader, opts)
@@ -224,7 +224,7 @@ where
                 }
                 Poll::Ready(res) => {
                     let (reader, opts) = i.take_reader();
-                    self.state = if reader.remaining_size() > O::zero() {
+                    self.state = if reader.remaining_size() > O::ZERO {
                         AsyncIterState::Iterating(T::create_fut(reader, opts))
                     } else {
                         AsyncIterState::Done(reader, opts)

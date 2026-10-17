@@ -98,7 +98,7 @@ mod sync_impl {
     impl<'a, O: Offset, R: Reader<O>, C: Parse<O>> Iterator for ChildrenIter<'a, O, R, C> {
         type Item = Result<<C as Parsed>::Output<O>, ParseError>;
         fn next(&mut self) -> Option<Self::Item> {
-            if self.reader.remaining_size() > O::zero() {
+            if self.reader.remaining_size() > O::ZERO {
                 Some(C::parse(&mut self.reader, self.opts))
             } else {
                 None
@@ -143,7 +143,7 @@ mod async_impl {
                 BacktrackReader::new(TrailingReader::new(reader, max_offset), children.offset);
             let remaining = PollReader::remaining_size(&reader);
 
-            let state = if remaining > O::zero() {
+            let state = if remaining > O::ZERO {
                 AsyncIterState::Iterating(C::create_fut(reader, opts))
             } else {
                 AsyncIterState::Done(reader, opts)
@@ -195,7 +195,7 @@ mod async_impl {
                     }
                     Poll::Ready(res) => {
                         let (reader, opts) = i.take_reader();
-                        self.state = if reader.remaining_size() > O::zero() {
+                        self.state = if reader.remaining_size() > O::ZERO {
                             AsyncIterState::Iterating(C::create_fut(reader, opts))
                         } else {
                             AsyncIterState::Done(reader, opts)
