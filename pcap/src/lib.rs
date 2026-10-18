@@ -41,22 +41,15 @@ make_atom! {
 #[cfg(test)]
 const TEST_FILE: &str = "../telnet-raw.pcap";
 
-#[cfg(test)]
-fn create_reader() -> atom_parser::InMemoryReader<'static> {
-    #[cfg(not(feature = "std"))]
-    {
-        let bytes = std::fs::read(TEST_FILE).unwrap();
-        atom_parser::InMemoryReader::from_buf(bytes)
-    }
-    #[cfg(feature = "std")]
-    {
-        atom_parser::InMemoryReader::from_path(TEST_FILE).unwrap()
-    }
-}
-
 #[test]
 fn pcap() {
-    let mut r = create_reader();
+    #[cfg(feature = "std")]
+    let mut r = atom_parser::FileReader::<_, 1024>::from_path(TEST_FILE).unwrap();
+    #[cfg(not(feature = "std"))]
+    let mut r = {
+        let bytes = std::fs::read(TEST_FILE).unwrap();
+        atom_parser::InMemoryReader::from_buf(bytes)
+    };
     let opts = atom_parser::ParseOptions {
         endianess: atom_parser::Endianess::Little,
         ..Default::default()
@@ -77,7 +70,18 @@ fn pcap() {
 
 #[tokio::test]
 async fn pcap_async() {
-    let mut r = create_reader();
+    #[cfg(feature = "std")]
+    let mut r = {
+        let file = tokio::fs::File::open(TEST_FILE).await.unwrap();
+        let size = file.metadata().await.unwrap().len();
+        let file = std::sync::Arc::new(file.into_std().await);
+        atom_parser::reader::AsyncFileReader::<_, 1024>::new(file, size)
+    };
+    #[cfg(not(feature = "std"))]
+    let mut r = {
+        let bytes = std::fs::read(TEST_FILE).unwrap();
+        atom_parser::InMemoryReader::from_buf(bytes)
+    };
     let opts = atom_parser::ParseOptions {
         endianess: atom_parser::Endianess::Little,
         ..Default::default()

@@ -14,4 +14,4 @@ tokio-stream = "0.1"
 atom-parser = { path = "../atom-parser", features = ["provided_readers", "alloc"] }
 
 # only for async runtime and for `StreamExt`
-tokio = {version = "1.53", features = ["rt", "macros"]}
+tokio = {version = "1.53", features = ["rt", "macros", "fs"]}

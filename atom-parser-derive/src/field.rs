@@ -327,11 +327,11 @@ impl AtomField {
             Self::Children { size_ty, .. } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        pub children: ::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name Child<__Offset>>
+                        pub children: ::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name Child>
                     }
                 } else {
                     quote! {
-                        pub children: ::#KRATE::children::Children<__Offset, #mod_name Child<__Offset>>
+                        pub children: ::#KRATE::children::Children<__Offset, #mod_name Child>
                     }
                 }
             }
@@ -388,13 +388,13 @@ impl AtomField {
             Self::Children { size_ty, .. } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        pub fn children<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::DynamicArrayIter<'__parse_options, __Offset, __Reader, #size_ty, #mod_name Child<__Offset>, false> {
+                        pub fn children<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::DynamicArrayIter<'__parse_options, __Offset, __Reader, #size_ty, #mod_name Child, false> {
                             ::#KRATE::array::DynamicArrayIter::from_sized_children(&self.children, reader, opts)
                         }
                     }
                 } else {
                     quote! {
-                        pub fn children<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::children::ChildrenIter<'__parse_options, __Offset, __Reader, #mod_name Child<__Offset>> {
+                        pub fn children<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::children::ChildrenIter<'__parse_options, __Offset, __Reader, #mod_name Child> {
                             ::#KRATE::children::ChildrenIter::from_children(&self.children, reader, opts)
                         }
                     }

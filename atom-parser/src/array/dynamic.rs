@@ -202,7 +202,7 @@ where
     }
 
     pub fn from_sized_children(
-        children: &SizedChildren<O, S, <I as Parsed>::Output<O>>,
+        children: &SizedChildren<O, S, I>,
         reader: &'a mut R,
         opts: &'a ParseOptions,
     ) -> Self {

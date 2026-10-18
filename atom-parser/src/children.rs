@@ -12,7 +12,7 @@ pub struct Children<O, T> {
 }
 
 impl<U, T: Parsed> Parsed for Children<U, T> {
-    type Output<O> = Children<U, <T as Parsed>::Output<O>>;
+    type Output<O> = Children<U, T>;
 }
 
 pub struct SizedChildren<O, S: Parsed, T> {
@@ -34,7 +34,7 @@ where
 }
 
 impl<U, S: Parsed, T: Parsed> Parsed for SizedChildren<U, S, T> {
-    type Output<O> = SizedChildren<U, S, <T as Parsed>::Output<O>>;
+    type Output<O> = SizedChildren<U, S, T>;
 }
 
 mod sync_impl {
@@ -132,7 +132,7 @@ mod async_impl {
         <C as Parsed>::Output<O>: Unpin,
     {
         pub fn from_children(
-            children: &Children<O, <C as Parsed>::Output<O>>,
+            children: &Children<O, C>,
             reader: &'a mut R,
             opts: &'a ParseOptions,
         ) -> Self {

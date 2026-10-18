@@ -2272,7 +2272,6 @@ pub struct DiscoveredMediaInformation<O> {
 
 impl<O: atom_parser::Offset> DiscoveredMediaInformation<O>
 where
-    minf::Child<O>: atom_parser::Parse<O, Output<O> = minf::Child<O>>,
     atom_parser::children::UnknownChild<O>: core::fmt::Debug,
 {
     pub fn from_children<R: atom_parser::Reader<O>>(
@@ -2667,22 +2666,15 @@ pub struct PlayableTrack<O = usize> {
 #[cfg(test)]
 const TEST_FILE: &str = "../raw_codec_test.mov";
 
-#[cfg(test)]
-fn create_reader() -> atom_parser::InMemoryReader<'static> {
-    #[cfg(not(feature = "std"))]
-    {
-        let bytes = std::fs::read(TEST_FILE).unwrap();
-        atom_parser::InMemoryReader::from_buf(bytes)
-    }
-    #[cfg(feature = "std")]
-    {
-        atom_parser::InMemoryReader::from_path(TEST_FILE).unwrap()
-    }
-}
-
 #[test]
 fn ftyp() {
-    let mut r = create_reader();
+    #[cfg(feature = "std")]
+    let mut r = atom_parser::reader::FileReader::<_, 1024>::from_path(TEST_FILE).unwrap();
+    #[cfg(not(feature = "std"))]
+    let mut r = {
+        let bytes = std::fs::read(TEST_FILE).unwrap();
+        atom_parser::InMemoryReader::from_buf(bytes)
+    };
     let opts = Default::default();
 
     use atom_parser::Parse;
@@ -3381,7 +3373,18 @@ fn ftyp() {
 
 #[tokio::test]
 async fn ftyp_async() {
-    let mut r = create_reader();
+    #[cfg(feature = "std")]
+    let mut r = {
+        let file = tokio::fs::File::open(TEST_FILE).await.unwrap();
+        let size = file.metadata().await.unwrap().len();
+        let file = std::sync::Arc::new(file.into_std().await);
+        atom_parser::reader::AsyncFileReader::<_, 1024>::new(file, size)
+    };
+    #[cfg(not(feature = "std"))]
+    let mut r = {
+        let bytes = std::fs::read(TEST_FILE).unwrap();
+        atom_parser::InMemoryReader::from_buf(bytes)
+    };
     let opts = Default::default();
 
     use atom_parser::AsyncParse;

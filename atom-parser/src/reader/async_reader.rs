@@ -120,6 +120,7 @@ impl<
                 }
                 Self::Reading(mut r) => match Pin::new(&mut r).poll(cx) {
                     core::task::Poll::Pending => {
+                        *self = Self::Reading(r);
                         return core::task::Poll::Pending;
                     }
                     core::task::Poll::Ready(res) => {

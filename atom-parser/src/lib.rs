@@ -24,6 +24,8 @@ pub mod reader;
 // impl_take_reader is also exported from here
 #[cfg(all(feature = "provided_readers", feature = "alloc"))]
 pub use reader::InMemoryReader;
+#[cfg(all(feature = "provided_readers", feature = "std", unix))]
+pub use reader::{AsyncFileReader, FileReader};
 pub use reader::{
     AsyncReadCstr, AsyncReader, AsyncSeek, BacktrackReader, Offset, PollReader, Reader,
     SwapOffsets, TakeReader, TrailingReader,

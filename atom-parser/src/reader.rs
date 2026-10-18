@@ -11,6 +11,9 @@ pub mod provided;
 #[cfg(all(feature = "provided_readers", feature = "alloc"))]
 pub use provided::InMemoryReader;
 
+#[cfg(all(feature = "provided_readers", feature = "std", unix))]
+pub use provided::{AsyncFileReader, FileReader};
+
 macro_rules! offset_trait {
    ($($t:path),+ $(,)?) => {
        pub trait Offset: $($t+)+ {}
