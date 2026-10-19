@@ -2237,12 +2237,14 @@ pub fn format_statemachine_fields(
                 let ty = &in_progress.1;
                 Some(quote! {
                     if opts.error_on_used_reserved_fields && (#name != unsafe { ::core::mem::zeroed::<#ty>() }) {
+                        *self = Self::Done(reader, opts);
                         return ::core::task::Poll::Ready(Err(::#KRATE::error::ParseError::UsedReservedField));
                     }
                 })
             }
             FieldKind::Expected(val) => Some(quote! {
                 if #name != #val {
+                    *self = Self::Done(reader, opts);
                     return ::core::task::Poll::Ready(Err(::#KRATE::error::ParseError::UnexpectedValue));
                 }
             }),
