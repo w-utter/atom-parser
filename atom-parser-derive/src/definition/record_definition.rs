@@ -36,12 +36,8 @@ impl StructDefinition {
         input: syn::parse::ParseStream,
         attrs: Vec<syn::Attribute>,
         name: syn::Ident,
+        generics: syn::Generics,
     ) -> syn::Result<Self> {
-        let mut generics = input.parse::<syn::Generics>()?;
-        let lookahead = input.lookahead1();
-        if lookahead.peek(syn::Token![where]) {
-            generics.where_clause = Some(input.parse()?);
-        }
         let fields = input.parse::<AtomFields>()?.inner;
 
         if fields.iter().any(|field| {

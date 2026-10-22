@@ -4,6 +4,8 @@ mod enum_definition;
 pub use enum_definition::EnumDefinition;
 mod record_definition;
 pub use record_definition::{AtomDefinition, StructDefinition};
+mod newtype;
+pub use newtype::NewTypeDefinition;
 
 pub struct Definition {
     pub version: Option<syn::LitInt>,
@@ -53,13 +55,28 @@ impl syn::parse::Parse for Definition {
             let _: syn::Token![struct] = input.parse()?;
             let name = input.parse()?;
 
-            let kind = match fcc {
-                Some(fcc) => {
+            let mut generics = input.parse::<syn::Generics>()?;
+            let lookahead = input.lookahead1();
+            if lookahead.peek(syn::Token![where]) {
+                generics.where_clause = Some(input.parse()?);
+            }
+
+            let lookahead = input.lookahead1();
+
+            let kind = match (lookahead.peek(syn::token::Paren), fcc) {
+                (false, Some(fcc)) => {
+                    if generics != Default::default() {
+                        panic!("generics are not supported for atoms")
+                    }
                     DefinitionKind::Atom(AtomDefinition::parse_from_syn(input, fcc, attrs, name)?)
                 }
-                None => {
-                    DefinitionKind::Struct(StructDefinition::parse_from_syn(input, attrs, name)?)
-                }
+                (false, None) => DefinitionKind::Struct(StructDefinition::parse_from_syn(
+                    input, attrs, name, generics,
+                )?),
+                (true, None) => DefinitionKind::NewType(NewTypeDefinition::parse_from_syn(
+                    input, attrs, name, generics,
+                )?),
+                (true, Some(_)) => panic!("fourcc specified for newtype"),
             };
 
             Ok(Self { version, kind })
@@ -83,6 +100,7 @@ impl syn::parse::Parse for Definition {
 pub enum DefinitionKind {
     Struct(StructDefinition),
     Atom(AtomDefinition),
+    NewType(NewTypeDefinition),
     Enum(EnumDefinition),
 }
 
