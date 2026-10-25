@@ -201,7 +201,7 @@ impl AtomFields {
                 AtomField::Children { .. }
                     | AtomField::Struct(
                         _,
-                        StructFieldAttr::Payload | StructFieldAttr::TrailingArray
+                        StructFieldAttr::Payload { .. } | StructFieldAttr::TrailingArray { .. }
                     )
             )
         });
@@ -1088,7 +1088,14 @@ pub enum StructFieldAttr {
     //
     // #[trailing_array]
     // trailing: u32
-    TrailingArray,
+    TrailingArray {
+        // specifies the length from other fields or a constant expr
+        //
+        // #[trailing_array(u8, 8)]
+        // or
+        // #[trailing_array(u32, some_other_field * 2)]
+        from_expr: Option<LenFromExpr>,
+    },
     // declaration of the length of the trailing payload
     // at the moment it only supports non-inclusive length
     // e.g, if a headers length includes itself,
@@ -1104,7 +1111,14 @@ pub enum StructFieldAttr {
     //
     // #[payload]
     // some_field: [u8],
-    Payload,
+    Payload {
+        // specifies the length from other fields or a constant expr
+        //
+        // #[payload(u8, 8)]
+        // or
+        // #[payload(u32, some_other_field * 2)]
+        from_expr: Option<LenFromExpr>,
+    },
     // the field that identifies the version number
     //
     // #[version]
@@ -1166,9 +1180,11 @@ impl StructFieldAttr {
             let length_ty = attr.parse_args::<syn::Type>()?;
             Self::PascalString { length_ty }
         } else if path.is_ident("trailing_array") {
-            Self::TrailingArray
+            let from_expr = LenFromExpr::parse_from_attr(attr)?;
+            Self::TrailingArray { from_expr }
         } else if path.is_ident("payload") {
-            Self::Payload
+            let from_expr = LenFromExpr::parse_from_attr(attr)?;
+            Self::Payload { from_expr }
         } else if path.is_ident("payload_length") {
             use syn::Meta;
             let offset = match &attr.meta {
@@ -1237,8 +1253,12 @@ impl StructFieldAttr {
                     let #name = <::#KRATE::array::DynamicArray::<__Offset, #length_ty, #ty, #zero_relative> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
                 }
             }
-            Self::TrailingArray => {
-                if let Some(PayloadLength { offset, ..}) = payload_len {
+            Self::TrailingArray { from_expr } => {
+                if let Some(LenFromExpr { size_expr, .. }) = from_expr {
+                    quote! {
+                        let #name = ::#KRATE::trailing::Trailing::parse_from_len(#size_expr, reader, opts)?;
+                    }
+                } else if let Some(PayloadLength { offset, ..}) = payload_len {
                     let len = if let Some(offset) = offset {
                         quote!(_payload_len.checked_sub(#offset).ok_or(::#KRATE::error::ParseError::AtomSizeTooSmall)?)
                     } else {
@@ -1259,8 +1279,12 @@ impl StructFieldAttr {
                     let _payload_len = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
                 }
             }
-            Self::Payload => {
-                if let Some(PayloadLength { offset, ..}) = payload_len {
+            Self::Payload { from_expr } => {
+                if let Some(LenFromExpr { size_expr, .. }) = from_expr {
+                    quote! {
+                        let #name = ::#KRATE::payload::Payload::parse_from_len(#size_expr, reader, opts)?;
+                    }
+                } else if let Some(PayloadLength { offset, ..}) = payload_len {
                     let len = if let Some(offset) = offset {
                         quote!(_payload_len.checked_sub(#offset).ok_or(::#KRATE::error::ParseError::AtomSizeTooSmall)?)
                     } else {
@@ -1313,8 +1337,8 @@ impl StructFieldAttr {
             }
             Self::Normal
             | Self::DynamicArray { .. }
-            | Self::TrailingArray
-            | Self::Payload
+            | Self::TrailingArray { .. }
+            | Self::Payload { .. }
             | Self::PascalString { .. }
             | Self::ReuseCondition
             | Self::NullTerminatedString => quote! {
@@ -1353,8 +1377,12 @@ impl StructFieldAttr {
                     pub #name: ::#KRATE::array::DynamicArray<__Offset, #length_ty, #ty, #zero_relative>
                 }
             }
-            Self::TrailingArray => {
-                if let Some(PayloadLength { ty: len_ty, .. }) = payload_len {
+            Self::TrailingArray { from_expr } => {
+                if let Some(LenFromExpr { ty: len_ty, .. }) = from_expr {
+                    quote! {
+                        pub #name: ::#KRATE::trailing::Trailing<__Offset, #ty, #len_ty>
+                    }
+                } else if let Some(PayloadLength { ty: len_ty, .. }) = payload_len {
                     quote! {
                         pub #name: ::#KRATE::trailing::Trailing<__Offset, #ty, #len_ty>
                     }
@@ -1364,8 +1392,12 @@ impl StructFieldAttr {
                     }
                 }
             }
-            Self::Payload => {
-                if let Some(PayloadLength { ty: len_ty, .. }) = payload_len {
+            Self::Payload { from_expr } => {
+                if let Some(LenFromExpr { ty: len_ty, .. }) = from_expr {
+                    quote! {
+                        pub #name: ::#KRATE::payload::Payload<__Offset, #len_ty>
+                    }
+                } else if let Some(PayloadLength { ty: len_ty, .. }) = payload_len {
                     quote! {
                         pub #name: ::#KRATE::payload::Payload<__Offset, #len_ty>
                     }
@@ -1400,14 +1432,14 @@ impl StructFieldAttr {
             | Self::Expected { .. }
             | Self::VersionIdentifier
             | Self::PayloadLength { .. }
-            | Self::Payload
+            | Self::Payload { .. }
             | Self::Condition
             | Self::ReuseCondition
             | Self::PascalString { .. }
             | Self::NullTerminatedString => {
                 return None;
             }
-            Self::TrailingArray => {
+            Self::TrailingArray { .. } => {
                 quote! {
                     pub fn #name<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<::#KRATE::trailing::TrailingIterator<'__parse_options, __Offset, __Reader, #ty>, ::#KRATE::error::ParseError> {
                         ::#KRATE::trailing::TrailingIterator::from_trailing(&self.#name, reader, opts)
@@ -1439,14 +1471,14 @@ impl StructFieldAttr {
             | Self::Expected { .. }
             | Self::VersionIdentifier
             | Self::PayloadLength { .. }
-            | Self::Payload
+            | Self::Payload { .. }
             | Self::Condition
             | Self::ReuseCondition
             | Self::PascalString { .. }
             | Self::NullTerminatedString => {
                 return None;
             }
-            Self::TrailingArray => {
+            Self::TrailingArray { .. } => {
                 let async_name = quote::format_ident!("{name}_async");
 
                 quote! {
@@ -1516,10 +1548,37 @@ pub struct PayloadLength {
     offset: Option<syn::Expr>,
 }
 
+#[derive(Clone, Debug)]
+pub struct LenFromExpr {
+    ty: syn::Type,
+    size_expr: syn::Expr,
+}
+
+impl LenFromExpr {
+    fn parse_from_attr(attr: &syn::Attribute) -> syn::Result<Option<LenFromExpr>> {
+        use syn::Meta;
+        let from_expr = match &attr.meta {
+            Meta::Path(_) => None,
+            Meta::List(list) => {
+                let parser = |input: syn::parse::ParseStream| {
+                    let ty = input.parse()?;
+                    let _: syn::Token![,] = input.parse()?;
+                    let size_expr = input.parse()?;
+                    Ok(Some(LenFromExpr { ty, size_expr }))
+                };
+                use syn::parse::Parser;
+                parser.parse2(list.tokens.clone())?
+            }
+            Meta::NameValue(_) => panic!("name-value pair for conditional is not supported"),
+        };
+        Ok(from_expr)
+    }
+}
+
 pub enum FieldKind<'a> {
     PayloadLength,
-    Payload,
-    Trailing,
+    Payload(Option<&'a LenFromExpr>),
+    Trailing(Option<&'a LenFromExpr>),
     Reserved,
     Expected(&'a syn::Expr),
     Regular,
@@ -1538,8 +1597,10 @@ impl FieldKind<'_> {
     ) -> proc_macro2::TokenStream {
         use quote::quote;
         match self {
-            Self::Trailing => {
-                if let Some(PayloadLength { offset, .. }) = payload_len {
+            Self::Trailing(expr_len) => {
+                if let Some(LenFromExpr { size_expr, .. }) = expr_len {
+                    quote!(::#KRATE::trailing::Trailing::create_fut_from_len(#size_expr, reader, opts))
+                } else if let Some(PayloadLength { offset, .. }) = payload_len {
                     let len = if let Some(offset) = offset {
                         quote!(_payload_len.checked_sub(#offset).ok_or(::#KRATE::error::ParseError::AtomSizeTooSmall)?)
                     } else {
@@ -1551,8 +1612,10 @@ impl FieldKind<'_> {
                     quote!(::#KRATE::trailing::Trailing::create_fut(reader, opts))
                 }
             }
-            Self::Payload => {
-                if let Some(PayloadLength { offset, .. }) = payload_len {
+            Self::Payload(expr_len) => {
+                if let Some(LenFromExpr { size_expr, .. }) = expr_len {
+                    quote!(::#KRATE::payload::Payload::create_fut_from_len(#size_expr, reader, opts))
+                } else if let Some(PayloadLength { offset, .. }) = payload_len {
                     let len = if let Some(offset) = offset {
                         quote!(_payload_len.checked_sub(#offset).ok_or(::#KRATE::error::ParseError::AtomSizeTooSmall)?)
                     } else {
@@ -1697,20 +1760,22 @@ pub fn prepare_fields_for_statemachine<'a>(
                     (name, quote!(#ty), FieldKind::Regular)
                 }
                 StructFieldAttr::VersionIdentifier => unreachable!(),
-                StructFieldAttr::PayloadLength{..} => {
+                StructFieldAttr::PayloadLength{ .. } => {
                     let name = quote::format_ident!("_payload_len");
                     let ty = &field.ty;
 
                     (name, quote!(#ty), FieldKind::PayloadLength)
                 }
-                StructFieldAttr::Payload => {
+                StructFieldAttr::Payload { from_expr } => {
                     let name = field.ident.clone().unwrap();
-                    let display_ty = if let Some(PayloadLength { ty: len_ty,  ..}) = payload_len {
+                    let display_ty = if let Some(LenFromExpr { ty: len_ty, .. }) = from_expr {
+                        quote!(::#KRATE::payload::Payload<__Offset, #len_ty>)
+                    } else if let Some(PayloadLength { ty: len_ty,  ..}) = payload_len {
                         quote!(::#KRATE::payload::Payload<__Offset, #len_ty>)
                     } else {
                         quote!(::#KRATE::payload::Payload)
                     };
-                    (name, display_ty, FieldKind::Payload)
+                    (name, display_ty, FieldKind::Payload(from_expr.as_ref()))
                 }
                 StructFieldAttr::PascalString { length_ty } => {
                     let name = field.ident.clone().unwrap();
@@ -1750,15 +1815,17 @@ pub fn prepare_fields_for_statemachine<'a>(
                         FieldKind::Regular,
                     )
                 }
-                StructFieldAttr::TrailingArray => {
+                StructFieldAttr::TrailingArray { from_expr } => {
                     let ty = &field.ty;
                     let name = field.ident.clone().unwrap();
-                    let display_ty = if let Some(PayloadLength { ty: len_ty, ..}) = payload_len {
+                    let display_ty = if let Some(LenFromExpr { ty: len_ty, .. }) = from_expr {
+                        quote!(::#KRATE::trailing::Trailing<__Offset, #ty, #len_ty>)
+                    } else if let Some(PayloadLength { ty: len_ty, ..}) = payload_len {
                         quote!(::#KRATE::trailing::Trailing<__Offset, #ty, #len_ty>)
                     } else {
                         quote!(::#KRATE::trailing::Trailing<__Offset, #ty>)
                     };
-                    (name, display_ty, FieldKind::Trailing)
+                    (name, display_ty, FieldKind::Trailing(from_expr.as_ref()))
                 }
                 StructFieldAttr::Condition => {
                     let name = field.ident.clone().unwrap();
@@ -2068,19 +2135,23 @@ pub fn format_statemachine_fields(
         let in_progress_fut = {
             let (name, ty, kind) = in_progress;
             match kind {
-                FieldKind::Payload => {
-                    if let Some(PayloadLength { ty: len, .. }) = payload_len.as_ref() {
+                FieldKind::Payload(expr_len) => {
+                    if let Some(LenFromExpr { ty: len_ty, .. }) = expr_len {
+                        quote!(#name: ::#KRATE::payload::PayloadParse<'__parse_options, __Offset, __Reader, #len_ty>)
+                    } else if let Some(PayloadLength { ty: len, .. }) = payload_len.as_ref() {
                         quote!(#name: ::#KRATE::payload::PayloadParse<'__parse_options, __Offset, __Reader, #len>)
                     } else {
                         quote!(#name: ::#KRATE::payload::PayloadParse<'__parse_options, __Offset, __Reader>)
                     }
                 }
-                FieldKind::Trailing => {
+                FieldKind::Trailing(expr_len) => {
                     let AtomField::Struct(field, _) = &fields[idx] else {
                         unreachable!();
                     };
                     let trailing_ty = &field.ty;
-                    if let Some(PayloadLength { ty: len, .. }) = payload_len.as_ref() {
+                    if let Some(LenFromExpr { ty: len_ty, .. }) = expr_len {
+                        quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty, #len_ty>)
+                    } else if let Some(PayloadLength { ty: len, .. }) = payload_len.as_ref() {
                         quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty, #len>)
                     } else {
                         quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty>)
