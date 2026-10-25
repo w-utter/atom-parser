@@ -25,6 +25,7 @@ offset_trait! {
     core::cmp::PartialOrd,
     core::cmp::PartialEq,
     core::ops::Add<Output = Self>,
+    core::ops::Sub<Output = Self>,
     CheckedArithmetic,
     TryFrom<usize>,
     TryInto<usize>,

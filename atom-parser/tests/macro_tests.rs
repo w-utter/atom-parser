@@ -98,3 +98,29 @@ make_atom! {
 
 #[test]
 fn test_compile() {}
+
+#[cfg(all(feature = "alloc", feature = "provided_readers"))]
+#[test]
+fn null_terminated() {
+    make_atom! {
+        struct A {
+            #[null_terminated_array]
+            null_terminated: u32,
+            after: u8,
+        }
+    }
+
+    let bytes = vec![
+        0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0, 128,
+    ];
+    let mut r = atom_parser::InMemoryReader::from_buf(bytes);
+    let opts = Default::default();
+    use atom_parser::Parse;
+    let a = A::parse(&mut r, &opts).unwrap();
+    let nums = a
+        .null_terminated(&mut r, &opts)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(nums, vec![1, 2, 3, 4]);
+    assert_eq!(a.after, 128);
+}

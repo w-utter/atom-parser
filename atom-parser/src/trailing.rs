@@ -1,7 +1,7 @@
 use crate::{
-    AsyncIterState, AsyncIterator, AsyncParse, BacktrackReader, Offset, Parse, ParseError,
-    ParseOptions, Parsed, PollReader, Reader, SwapOffsets, TakeReader, TrailingReader,
-    TryFromIntError,
+    AsyncIterState, AsyncIterator, AsyncParse, BacktrackReader, Extent, NullTerminated, Offset,
+    Parse, ParseError, ParseOptions, Parsed, PollReader, Reader, SwapOffsets, TakeReader,
+    TrailingReader, TryFromIntError,
 };
 
 #[derive(Debug)]
@@ -132,6 +132,21 @@ impl<'a, O: Offset, R: SwapOffsets<O> + Reader<O>, T> TrailingIterator<'a, O, R,
         })
     }
 
+    pub fn from_null_terminated(
+        null_terminated: &NullTerminated<O, T>,
+        reader: &'a mut R,
+        opts: &'a ParseOptions,
+    ) -> Self {
+        let Extent { offset, len } = null_terminated.extent();
+        let max_offset = offset + len;
+        let reader = BacktrackReader::new(TrailingReader::new(reader, max_offset), offset);
+        Self {
+            reader,
+            opts,
+            _pd: core::marker::PhantomData,
+        }
+    }
+
     pub fn reader(&mut self) -> &mut BacktrackReader<O, TrailingReader<O, &'a mut R>> {
         &mut self.reader
     }
@@ -189,6 +204,23 @@ where
             AsyncIterState::Done(reader, opts)
         };
         Ok(Self { state })
+    }
+
+    pub fn from_null_terminated(
+        trailing: &NullTerminated<O, T>,
+        reader: &'a mut R,
+        opts: &'a ParseOptions,
+    ) -> Self {
+        let Extent { offset, len } = trailing.extent();
+        let max_offset = offset + len;
+        let reader = BacktrackReader::new(TrailingReader::new(reader, max_offset), offset);
+
+        let state = if PollReader::remaining_size(&reader) > O::ZERO {
+            AsyncIterState::Iterating(T::create_fut(reader, opts))
+        } else {
+            AsyncIterState::Done(reader, opts)
+        };
+        Self { state }
     }
 }
 

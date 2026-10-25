@@ -95,6 +95,7 @@ fn is_struct_attr(path: &syn::Path) -> bool {
         || path.is_ident("expected")
         || path.is_ident("pascal_string")
         || path.is_ident("null_terminated_string")
+        || path.is_ident("null_terminated_array")
         || path.is_ident("trailing_array")
         || path.is_ident("payload")
         || path.is_ident("payload_length")
@@ -1096,6 +1097,11 @@ pub enum StructFieldAttr {
         // #[trailing_array(u32, some_other_field * 2)]
         from_expr: Option<LenFromExpr>,
     },
+    // declaration of a null terminated array
+    //
+    // #[null_terminated_array]
+    // null_terminated: u32
+    NullTerminatedArray,
     // declaration of the length of the trailing payload
     // at the moment it only supports non-inclusive length
     // e.g, if a headers length includes itself,
@@ -1182,6 +1188,8 @@ impl StructFieldAttr {
         } else if path.is_ident("trailing_array") {
             let from_expr = LenFromExpr::parse_from_attr(attr)?;
             Self::TrailingArray { from_expr }
+        } else if path.is_ident("null_terminated_array") {
+            Self::NullTerminatedArray
         } else if path.is_ident("payload") {
             let from_expr = LenFromExpr::parse_from_attr(attr)?;
             Self::Payload { from_expr }
@@ -1251,6 +1259,11 @@ impl StructFieldAttr {
             } => {
                 quote! {
                     let #name = <::#KRATE::array::DynamicArray::<__Offset, #length_ty, #ty, #zero_relative> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
+                }
+            }
+            Self::NullTerminatedArray => {
+                quote! {
+                    let #name = <::#KRATE::array::NullTerminated::<__Offset, #ty> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
                 }
             }
             Self::TrailingArray { from_expr } => {
@@ -1341,6 +1354,7 @@ impl StructFieldAttr {
             | Self::Payload { .. }
             | Self::PascalString { .. }
             | Self::ReuseCondition
+            | Self::NullTerminatedArray
             | Self::NullTerminatedString => quote! {
                 #name,
             }
@@ -1375,6 +1389,11 @@ impl StructFieldAttr {
             } => {
                 quote! {
                     pub #name: ::#KRATE::array::DynamicArray<__Offset, #length_ty, #ty, #zero_relative>
+                }
+            }
+            Self::NullTerminatedArray => {
+                quote! {
+                    pub #name: ::#KRATE::array::NullTerminated<__Offset, #ty>
                 }
             }
             Self::TrailingArray { from_expr } => {
@@ -1446,6 +1465,13 @@ impl StructFieldAttr {
                     }
                 }
             }
+            Self::NullTerminatedArray => {
+                quote! {
+                    pub fn #name<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::trailing::TrailingIterator<'__parse_options, __Offset, __Reader, #ty> {
+                        ::#KRATE::trailing::TrailingIterator::from_null_terminated(&self.#name, reader, opts)
+                    }
+                }
+            }
             Self::DynamicArray {
                 zero_relative,
                 length_ty,
@@ -1484,6 +1510,14 @@ impl StructFieldAttr {
                 quote! {
                     pub fn #async_name<'__parse_options, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<::#KRATE::trailing::AsyncTrailingIterator<'__parse_options, __Offset, __Reader, #ty>, ::#KRATE::error::ParseError> {
                         ::#KRATE::trailing::AsyncTrailingIterator::from_trailing(&self.#name, reader, opts)
+                    }
+                }
+            }
+            Self::NullTerminatedArray => {
+                let async_name = quote::format_ident!("{name}_async");
+                quote! {
+                    pub fn #async_name<'__parse_options, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::trailing::AsyncTrailingIterator<'__parse_options, __Offset, __Reader, #ty> {
+                        ::#KRATE::trailing::AsyncTrailingIterator::from_null_terminated(&self.#name, reader, opts)
                     }
                 }
             }
@@ -1812,6 +1846,15 @@ pub fn prepare_fields_for_statemachine<'a>(
                     (
                         name,
                         quote!(::#KRATE::array::DynamicArray<__Offset, #length_ty, #ty, #zero_relative>),
+                        FieldKind::Regular,
+                    )
+                }
+                StructFieldAttr::NullTerminatedArray => {
+                    let ty = &field.ty;
+                    let name = field.ident.clone().unwrap();
+                    (
+                        name,
+                        quote!(::#KRATE::array::NullTerminated<__Offset, #ty>),
                         FieldKind::Regular,
                     )
                 }

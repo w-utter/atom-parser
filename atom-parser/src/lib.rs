@@ -12,7 +12,7 @@ pub use integer_parse::IntegerParse;
 pub mod array;
 pub use array::{
     ArrayGuard, ArrayParse, ArraySize, AsyncDynamicArrayIter, DynamicArray, DynamicArrayIter,
-    DynamicArrayParse, TryFromArraySize,
+    DynamicArrayParse, NullTerminated, TryFromArraySize,
 };
 pub mod async_iter_state;
 pub use async_iter_state::AsyncIterState;
