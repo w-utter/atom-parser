@@ -9,6 +9,15 @@ pub struct NullTerminated<O, T> {
     _pd: core::marker::PhantomData<T>,
 }
 
+impl<O: core::fmt::Debug, T> core::fmt::Debug for NullTerminated<O, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NullTerminated")
+            .field("offset", &self.offset)
+            .field("len", &self.size)
+            .finish()
+    }
+}
+
 impl<O: Copy, T> NullTerminated<O, T> {
     pub fn extent(&self) -> Extent<O, O> {
         let Self { offset, size, .. } = self;
