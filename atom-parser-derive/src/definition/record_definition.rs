@@ -58,19 +58,6 @@ impl StructDefinition {
     }
 
     pub fn module_name(&self) -> syn::Ident {
-        let name = self.name.to_string();
-
-        let mut snake = String::default();
-        for (i, ch) in name.chars().enumerate() {
-            if ch.is_uppercase() {
-                if i > 0 {
-                    snake.push('_');
-                }
-                snake.push(ch.to_ascii_lowercase());
-            } else {
-                snake.push(ch);
-            }
-        }
-        syn::Ident::new(&snake, proc_macro2::Span::call_site())
+        super::ident_to_snake_case(&self.name)
     }
 }

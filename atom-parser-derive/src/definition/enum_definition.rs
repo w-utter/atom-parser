@@ -8,25 +8,9 @@ pub struct EnumDefinition {
 impl EnumDefinition {
     pub fn parse_from_syn(
         input: syn::parse::ParseStream,
-        mut attrs: Vec<syn::Attribute>,
+        attrs: Vec<syn::Attribute>,
+        repr: syn::Type,
     ) -> syn::Result<Self> {
-        let mut repr = attrs
-            .iter()
-            .enumerate()
-            .filter(|(_, attr)| attr.path().is_ident("enum_repr"));
-
-        if repr.clone().count() > 1 {
-            panic!("more than 1 repr attr specified");
-        }
-
-        let repr = repr
-            .next()
-            .map(|(pos, _)| pos)
-            .map(|pos| attrs.swap_remove(pos))
-            .map(|attr| attr.parse_args::<syn::Type>())
-            .transpose()?
-            .expect("no size attr specified for enum");
-
         let name = input.parse()?;
         let variants = input.parse::<EnumVariantList>()?.variants;
         Ok(Self {
@@ -38,8 +22,8 @@ impl EnumDefinition {
     }
 }
 
-struct EnumVariantList {
-    variants: Vec<EnumVariant>,
+pub struct EnumVariantList {
+    pub variants: Vec<EnumVariant>,
 }
 
 impl syn::parse::Parse for EnumVariantList {

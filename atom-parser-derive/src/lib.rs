@@ -3,8 +3,8 @@ use proc_macro::TokenStream;
 
 mod definition;
 use definition::{
-    AtomDefinition, DefinitionKind, DefinitionList, EnumDefinition, NewTypeDefinition,
-    StructDefinition,
+    AtomDefinition, BitFieldDefinition, BitFieldList, DefinitionKind, DefinitionList,
+    EnumDefinition, FlagsDefinition, NewTypeDefinition, StructDefinition,
 };
 mod field;
 use field::{
@@ -99,7 +99,15 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                     let variant = quote::format_ident!("VARIANT_{}", i);
                     let name = &v.name;
                     quote!{
-                        #variant => Self::#name
+                        Self::#variant => Self::#name
+                    }
+                }).collect::<Vec<_>>();
+
+                let try_into_impl = variants.iter().enumerate().map(|(i, v)| {
+                    let variant = quote::format_ident!("VARIANT_{}", i);
+                    let name = &v.name;
+                    quote!{
+                        Self::#name => Self::#variant
                     }
                 });
 
@@ -113,11 +121,28 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                     }
 
                     impl #name {
+                        #(#const_bindings)*
                         pub fn try_from_bits(bits: #repr) -> Self {
-                            #(#const_bindings)*
                             match bits {
                                 #(#try_from_impl,)*
                                 u => Self::Unknown(u),
+                            }
+                        }
+                    }
+
+                    impl ::#KRATE::bits::Bits for #name {
+                        type Repr = #repr;
+                        fn from_bits(repr: Self::Repr) -> Self {
+                            match repr {
+                                #(#try_from_impl,)*
+                                u => Self::Unknown(u),
+                            }
+                        }
+
+                        fn to_bits(self) -> Self::Repr {
+                            match self {
+                                #(#try_into_impl,)*
+                                Self::Unknown(u) => u,
                             }
                         }
                     }
@@ -431,6 +456,169 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                             #async_parse_name ::S0 {
                                 #async_parse_start
                             }
+                        }
+                    }
+                }
+            }
+            DefinitionKind::Flags(flags) => {
+                let FlagsDefinition {
+                    name,
+                    parse_repr,
+                    flags,
+                    attrs,
+                } = flags;
+
+                let can_elide_storage = crate::FlagList::can_elide_flag_storage(&flags, None);
+                let flags_impl = crate::FlagList::flags_impl(&name, &flags, &parse_repr, None);
+                let flags_trait_impl = crate::FlagList::flags_trait_impl(&name, &flags, &parse_repr, None, can_elide_storage);
+                let bitops_impl = crate::FlagList::flags_bitops_impl(&name);
+                let debug_impl = crate::FlagList::debug_impl(&flags, &name, None, can_elide_storage);
+                let async_parse_impl = crate::FlagList::async_parse_impl(&name, &parse_repr);
+
+                let flag_storage_elision =
+                    can_elide_storage.then(|| quote! { #[cfg(feature = "store_unknown_fields")] });
+
+                let to_bits_impl = crate::FlagList::to_bits_impl(&flags, None, can_elide_storage);
+                let bits_impl = crate::FlagList::bits_impl(&name, &parse_repr);
+
+                quote! {
+                    #(#attrs)*
+                    #[derive(Clone, Copy, PartialEq, Eq)]
+                    pub struct #name {
+                        #flag_storage_elision
+                        inner: #parse_repr,
+                    }
+
+                    impl #name {
+                        #(#flags_impl)*
+
+                        const fn from_bits_(bits: #parse_repr) -> Self {
+                            Self {
+                                #flag_storage_elision
+                                inner: bits,
+                            }
+                        }
+
+                        const fn to_bits_(self) -> #parse_repr {
+                            #to_bits_impl
+                        }
+                    }
+
+                    #flags_trait_impl
+                    #debug_impl
+                    #bitops_impl
+                    #async_parse_impl
+                    #bits_impl
+
+                    impl <__Offset: ::#KRATE::reader::Offset> ::#KRATE::parse::Parse<__Offset> for #name {
+                        fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>>(reader: &mut __Reader, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
+                            let bytes = <#parse_repr as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
+                            <#name as ::#KRATE::flags::FlagsParse<#parse_repr>>::try_from_bits(bytes, opts)
+                        }
+                    }
+                }
+            }
+            DefinitionKind::BitField(bitfield) => {
+                let mod_name = bitfield.module_name();
+                let BitFieldDefinition {
+                    attrs,
+                    name,
+                    parse_repr,
+                    fields,
+                } = bitfield;
+
+                let bit_size = syn::Index::from(fields.iter().map(|field| field.bits).sum::<usize>());
+
+                let reserved_check = BitFieldList::check_reserved_fields(&fields);
+
+                let async_statemachine = quote::format_ident!("Async{}Parse", name);
+
+                let inline_definitions = BitFieldList::inline_definitions(&fields, &mod_name, &attrs);
+                let field_helpers = BitFieldList::field_helpers(&fields, &name, &mod_name);
+                let debug_impl = BitFieldList::debug_impl(&fields, &name);
+
+                quote! {
+                    #(#attrs)*
+                    pub struct #name (#parse_repr);
+
+                    const _: () = assert!(::core::mem::size_of::<#name>() * 8 == #bit_size);
+                    impl #name {
+                        pub fn try_from_bits(bits: #parse_repr, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<Self, ::#KRATE::error::ParseError> {
+                            #reserved_check
+                            Ok(Self(bits))
+                        }
+                    }
+
+                    #inline_definitions
+                    #field_helpers
+                    #debug_impl
+
+                    impl ::#KRATE::parse::Parsed for #name {
+                        type Output<__Offset> = #name;
+                    }
+
+                    impl <__Offset: ::#KRATE::reader::Offset> ::#KRATE::parse::Parse<__Offset> for #name {
+                        fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>>(reader: &mut __Reader, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
+                            let bytes = <#parse_repr as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
+                            #name::try_from_bits(bytes, opts)
+                        }
+                    }
+
+                    pub enum #async_statemachine <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
+                        Repr(<#parse_repr as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
+                        Done(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                        Empty,
+                    }
+
+                    impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> Future for #async_statemachine<'__parse_options, __Offset, __Reader> {
+                        type Output = ::core::result::Result<<#name as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError>;
+
+                        fn poll(mut self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
+                            loop {
+                                let mut this = ::core::mem::replace(&mut*self, Self::Empty);
+                                match this {
+                                    Self::Repr(mut fut) => {
+                                        match ::core::pin::Pin::new(&mut fut).poll(cx) {
+                                            ::core::task::Poll::Pending => {
+                                                *self = Self::Repr(fut);
+                                                return ::core::task::Poll::Pending;
+                                            }
+                                            ::core::task::Poll::Ready(repr) => {
+                                                let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(fut);
+                                                *self = Self::Done(reader, opts);
+                                                let repr = repr?;
+                                                return ::core::task::Poll::Ready(Ok(#name::try_from_bits(repr, opts)?));
+                                            }
+                                        }
+                                    }
+                                    Self::Done(..) => panic!("poll after completion"),
+                                    Self::Empty => unreachable!(),
+                                }
+                            }
+                        }
+                    }
+
+                    impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #async_statemachine<'__parse_options, __Offset, __Reader> {
+                        fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                            match self {
+                                Self::Done(reader, opts) => (reader, opts),
+                                _ => unreachable!("invalid state")
+                            }
+                        }
+
+                        fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                            match self {
+                                Self::Repr(f) => f.borrow_reader(),
+                                Self::Done(reader, opts) => (reader, opts),
+                                Self::Empty => unreachable!(),
+                            }
+                        }
+                    }
+
+                    impl <__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<__Offset> for #name {
+                        type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #async_statemachine<'__parse_options, __Offset, __Reader>;
+                        fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
+                            #async_statemachine::Repr(<#parse_repr as ::#KRATE::parse::AsyncParse<__Offset>>::create_fut(reader, opts))
                         }
                     }
                 }

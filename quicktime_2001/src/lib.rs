@@ -1024,6 +1024,19 @@ impl<O: atom_parser::Offset> mvhd::v0::MovieHeaderV0<O> {
     }
 }
 
+make_atom! {
+    #[flags_repr(u16)]
+    struct TextFaceFlags {
+        const BOLD = 1 << 0;
+        const ITALIC = 1 << 1;
+        const UNDERLINE = 1 << 2;
+        const OUTLINE = 1 << 3;
+        const SHADOW = 1 << 4;
+        const CONDENSE = 1 << 5;
+        const EXTEND = 1 << 6;
+    }
+}
+
 // media information
 make_atom! {
     #[derive(Debug)]
@@ -1081,16 +1094,7 @@ make_atom! {
             // empty
         },
         text_font: u16,
-        #[flags(u16)]
-        text_face: struct TextFace {
-            const BOLD = 1 << 0;
-            const ITALIC = 1 << 1;
-            const UNDERLINE = 1 << 2;
-            const OUTLINE = 1 << 3;
-            const SHADOW = 1 << 4;
-            const CONDENSE = 1 << 5;
-            const EXTEND = 1 << 6;
-        },
+        text_face: TextFaceFlags,
         text_size: u16,
         text_color: [u16; 3],
         background_color: [u16; 3],
@@ -1862,16 +1866,7 @@ pub mod sample_description {
             #[reserved]
             reserved: [u8; 8],
             font_number: u16,
-            #[flags(u16)]
-            font_face: struct FontFace {
-                const BOLD = 1 << 0;
-                const ITALIC = 1 << 1;
-                const UNDERLINE = 1 << 2;
-                const OUTLINE = 1 << 3;
-                const SHADOW = 1 << 4;
-                const CONDENSE = 1 << 5;
-                const EXTEND = 1 << 6;
-            },
+            font_face: TextFaceFlags,
             #[reserved]
             reserved: u8,
             #[reserved]
@@ -1906,16 +1901,7 @@ pub mod sample_description {
             height: u16,
             ascent: u16,
             font_id: u16,
-            #[flags(u16)]
-            flags: struct Flags {
-                const BOLD = 1 << 0;
-                const ITALIC = 1 << 1;
-                const UNDERLINE = 1 << 2;
-                const OUTLINE = 1 << 3;
-                const SHADOW = 1 << 4;
-                const CONDENSE = 1 << 5;
-                const EXTEND = 1 << 6;
-            },
+            font_face: TextFaceFlags,
             font_size: u16,
             fg_color: [u16; 3],
         }

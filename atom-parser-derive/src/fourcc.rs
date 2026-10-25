@@ -1,4 +1,4 @@
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FourCC([u8; 4]);
 
 impl FourCC {

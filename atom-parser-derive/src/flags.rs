@@ -131,28 +131,28 @@ impl FlagList {
             impl ::core::ops::BitAnd<#name> for #name {
                 type Output = #name;
                 fn bitand(self, rhs: #name) -> Self::Output {
-                    ::#KRATE::flags::Flags::from_bits(::#KRATE::flags::Flags::to_bits(self) & ::#KRATE::flags::Flags::to_bits(rhs))
+                    <Self as ::#KRATE::bits::Bits>::from_bits(<Self as ::#KRATE::bits::Bits>::to_bits(self) & <Self as ::#KRATE::bits::Bits>::to_bits(rhs))
                 }
             }
 
             impl ::core::ops::BitOr<#name> for #name {
                 type Output = #name;
                 fn bitor(self, rhs: #name) -> Self::Output {
-                    ::#KRATE::flags::Flags::from_bits(::#KRATE::flags::Flags::to_bits(self) | ::#KRATE::flags::Flags::to_bits(rhs))
+                    <Self as ::#KRATE::bits::Bits>::from_bits(<Self as ::#KRATE::bits::Bits>::to_bits(self) | <Self as ::#KRATE::bits::Bits>::to_bits(rhs))
                 }
             }
 
             impl ::core::ops::BitXor<#name> for #name {
                 type Output = #name;
                 fn bitxor(self, rhs: #name) -> Self::Output {
-                    ::#KRATE::flags::Flags::from_bits(::#KRATE::flags::Flags::to_bits(self) ^ ::#KRATE::flags::Flags::to_bits(rhs))
+                    <Self as ::#KRATE::bits::Bits>::from_bits(<Self as ::#KRATE::bits::Bits>::to_bits(self) ^ <Self as ::#KRATE::bits::Bits>::to_bits(rhs))
                 }
             }
 
             impl ::core::ops::Not for #name {
                 type Output = #name;
                 fn not(self) -> Self::Output {
-                    ::#KRATE::flags::Flags::from_bits(!::#KRATE::flags::Flags::to_bits(self))
+                    <Self as ::#KRATE::bits::Bits>::from_bits(!<Self as ::#KRATE::bits::Bits>::to_bits(self))
                 }
             }
         }
@@ -279,7 +279,7 @@ impl FlagList {
         quote! {
             impl ::core::fmt::Debug for #name {
                 fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    let val = ::#KRATE::flags::Flags::to_bits(*self);
+                    let val = <Self as ::#KRATE::bits::Bits>::to_bits(*self);
                     let mut first = true;
                     write!(f, "{}(", stringify!(#name))?;
                     #debug_impl
@@ -328,6 +328,87 @@ impl FlagList {
                     self.inner.borrow_reader()
                 }
             }
+        }
+    }
+
+    pub fn bits_impl(name: &syn::Ident, parse_repr: &syn::Type) -> proc_macro2::TokenStream {
+        quote::quote! {
+            impl ::#KRATE::bits::Bits for #name {
+                type Repr = #parse_repr;
+
+                fn from_bits(bits: Self::Repr) -> Self {
+                    Self::from_bits_(bits)
+                }
+
+                fn to_bits(self) -> Self::Repr {
+                    self.to_bits_()
+                }
+            }
+            impl ::#KRATE::flags::Flags<#parse_repr> for #name { }
+        }
+    }
+
+    pub fn to_bits_impl(
+        flags: &[Flag],
+        version: Option<&syn::LitInt>,
+        can_elide_storage: bool,
+    ) -> proc_macro2::TokenStream {
+        Self::to_bits_impl_(flags, version, can_elide_storage, quote::quote!(self.inner))
+    }
+
+    pub fn to_bits_impl_fullbox(
+        flags: &[Flag],
+        version: Option<&syn::LitInt>,
+        can_elide_storage: bool,
+    ) -> proc_macro2::TokenStream {
+        Self::to_bits_impl_(
+            flags,
+            version,
+            can_elide_storage,
+            quote::quote! {
+                let [b0, b1, b2] = self.inner;
+                u32::from_be_bytes([b0, b1, b2, 0])
+            },
+        )
+    }
+
+    fn to_bits_impl_(
+        flags: &[Flag],
+        version: Option<&syn::LitInt>,
+        can_elide_storage: bool,
+        bits_from_inner: proc_macro2::TokenStream,
+    ) -> proc_macro2::TokenStream {
+        use quote::quote;
+        if can_elide_storage {
+            let expected_vals = flags.iter().filter_map(|flag| {
+                if let Some(v) = version {
+                    if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
+                        return None;
+                    }
+                } else if !flag.version_num.is_empty() {
+                    panic!("version specified for flags but no version identifier")
+                }
+                Some(&flag.val)
+            });
+
+            let flag_bits = if expected_vals.clone().count() == 0 {
+                quote!(0)
+            } else {
+                quote!(#((#expected_vals))|*)
+            };
+
+            quote! {
+                #[cfg(not(feature = "store_unknown_fields"))]
+                {
+                    #flag_bits
+                }
+                #[cfg(feature = "store_unknown_fields")]
+                {
+                    #bits_from_inner
+                }
+            }
+        } else {
+            bits_from_inner
         }
     }
 }

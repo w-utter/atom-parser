@@ -1,9 +1,7 @@
-use crate::{ParseError, ParseOptions};
+use crate::{Bits, ParseError, ParseOptions};
 pub trait FlagsParse<B>: Sized {
     fn try_from_bits(bits: B, options: &ParseOptions) -> Result<Self, ParseError>;
 }
 
-pub trait Flags<B> {
-    fn from_bits(bits: B) -> Self;
-    fn to_bits(self) -> B;
-}
+// marker trait for types that are represented by flags
+pub trait Flags<B>: Bits<Repr = B> {}

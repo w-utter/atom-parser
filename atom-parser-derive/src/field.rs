@@ -933,41 +933,8 @@ impl AtomField {
                 let async_parse_repr = syn::parse_quote!([u8; 3]);
                 let async_parse_impl = FlagList::async_parse_impl(name, &async_parse_repr);
 
-                let to_bits_impl = if can_elide_flags {
-                    let expected_vals = flags.iter().filter_map(|flag| {
-                        if let Some(v) = version {
-                            if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
-                                return None;
-                            }
-                        } else if !flag.version_num.is_empty() {
-                            panic!("version specified for flags but no version identifier")
-                        }
-                        Some(&flag.val)
-                    });
-
-                    let flag_bits = if expected_vals.clone().count() == 0 {
-                        quote!(0)
-                    } else {
-                        quote!(#((#expected_vals))|*)
-                    };
-
-                    quote! {
-                        #[cfg(not(feature = "store_unknown_fields"))]
-                        {
-                            #flag_bits
-                        }
-                        #[cfg(feature = "store_unknown_fields")]
-                        {
-                            let [b0, b1, b2] = self.inner;
-                            u32::from_be_bytes([b0, b1, b2, 0])
-                        }
-                    }
-                } else {
-                    quote! {
-                        let [b0, b1, b2] = self.inner;
-                        u32::from_be_bytes([b0, b1, b2, 0])
-                    }
-                };
+                let to_bits_impl = FlagList::to_bits_impl_fullbox(&flags, version, can_elide_flags);
+                let bits_impl = FlagList::bits_impl(name, &syn::parse_quote!(u32));
 
                 quote! {
                     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1012,16 +979,7 @@ impl AtomField {
                         }
                     }
 
-                    impl ::#KRATE::flags::Flags<u32> for #name {
-                        fn from_bits(bits: u32) -> Self {
-                            Self::from_bits_(bits)
-                        }
-
-                        fn to_bits(self) -> u32 {
-                            self.to_bits_()
-                        }
-                    }
-
+                    #bits_impl
                     #async_parse_impl
 
                     #bitops_impl
@@ -1046,37 +1004,8 @@ impl AtomField {
                 let flag_storage_elision =
                     can_elide_flags.then(|| quote! { #[cfg(feature = "store_unknown_fields")] });
 
-                let to_bits_impl = if can_elide_flags {
-                    let expected_vals = flags.iter().filter_map(|flag| {
-                        if let Some(v) = version {
-                            if !flag.version_num.is_empty() && !flag.version_num.contains(v) {
-                                return None;
-                            }
-                        } else if !flag.version_num.is_empty() {
-                            panic!("version specified for flags but no version identifier")
-                        }
-                        Some(&flag.val)
-                    });
-
-                    let flag_bits = if expected_vals.clone().count() == 0 {
-                        quote!(0)
-                    } else {
-                        quote!(#((#expected_vals))|*)
-                    };
-
-                    quote! {
-                        #[cfg(not(feature = "store_unknown_fields"))]
-                        {
-                            #flag_bits
-                        }
-                        #[cfg(feature = "store_unknown_fields")]
-                        {
-                            self.inner
-                        }
-                    }
-                } else {
-                    quote!(self.inner)
-                };
+                let to_bits_impl = FlagList::to_bits_impl(&flags, version, can_elide_flags);
+                let bits_impl = FlagList::bits_impl(name, parse_repr);
 
                 quote! {
                     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1104,16 +1033,7 @@ impl AtomField {
                     #flags_debug
                     #bitops_impl
                     #async_parse_impl
-
-                    impl ::#KRATE::flags::Flags<#parse_repr> for #name {
-                        fn from_bits(bits: #parse_repr) -> Self {
-                            Self::from_bits_(bits)
-                        }
-
-                        fn to_bits(self) -> #parse_repr {
-                            self.to_bits_()
-                        }
-                    }
+                    #bits_impl
                 }
             }
             Self::Version { .. } => return None,
