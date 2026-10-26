@@ -222,6 +222,10 @@ where
         };
         Self { state }
     }
+
+    pub fn reader(&mut self) -> &mut BacktrackReader<O, TrailingReader<O, &'a mut R>> {
+        self.borrow_reader().0
+    }
 }
 
 impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncParse<O> + Unpin>
