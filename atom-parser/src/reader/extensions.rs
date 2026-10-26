@@ -61,6 +61,14 @@ mod backtrack_reader {
         ) -> Result<alloc::boxed::Box<[u8], A>, crate::ExtentError> {
             self.reader.read_extent_in(extent, alloc)
         }
+
+        fn read_extent_with(
+            &self,
+            extent: crate::Extent<O, O>,
+            buf: &mut [u8],
+        ) -> Result<(), IoError> {
+            self.reader.read_extent_with(extent, buf)
+        }
     }
 
     impl<O: Offset + Unpin, R: PollReader<O> + SwapOffsets<O> + Unpin> PollReader<O>
@@ -112,6 +120,15 @@ mod backtrack_reader {
             cx: &mut Context<'_>,
         ) -> Poll<Result<(), crate::ExtentError>> {
             Pin::new(&mut self.reader).poll_read_extent(extent, buf, cx)
+        }
+
+        fn poll_read_extent_with(
+            mut self: Pin<&mut Self>,
+            extent: &crate::Extent<O, O>,
+            buf: &mut [u8],
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), crate::IoError>> {
+            Pin::new(&mut self.reader).poll_read_extent_with(extent, buf, cx)
         }
     }
 }
@@ -190,6 +207,14 @@ mod trailing_reader {
         ) -> Result<alloc::boxed::Box<[u8], A>, crate::ExtentError> {
             self.reader.read_extent_in(extent, alloc)
         }
+
+        fn read_extent_with(
+            &self,
+            extent: crate::Extent<O, O>,
+            buf: &mut [u8],
+        ) -> Result<(), IoError> {
+            self.reader.read_extent_with(extent, buf)
+        }
     }
 
     impl<O: Offset + Unpin, R: PollReader<O> + Unpin> PollReader<O> for TrailingReader<O, R> {
@@ -257,6 +282,15 @@ mod trailing_reader {
             cx: &mut Context<'_>,
         ) -> Poll<Result<(), crate::ExtentError>> {
             Pin::new(&mut self.reader).poll_read_extent(extent, buf, cx)
+        }
+
+        fn poll_read_extent_with(
+            mut self: Pin<&mut Self>,
+            extent: &crate::Extent<O, O>,
+            buf: &mut [u8],
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), crate::IoError>> {
+            Pin::new(&mut self.reader).poll_read_extent_with(extent, buf, cx)
         }
     }
 }

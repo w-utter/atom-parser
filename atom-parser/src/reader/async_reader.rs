@@ -36,6 +36,13 @@ pub trait PollReader<O: Offset> {
         buf: &mut alloc::vec::Vec<u8, A>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), crate::ExtentError>>;
+
+    fn poll_read_extent_with(
+        self: Pin<&mut Self>,
+        extent: &crate::Extent<O, O>,
+        buf: &mut [u8],
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), crate::IoError>>;
 }
 
 #[cfg(feature = "alloc")]
@@ -175,6 +182,15 @@ impl<'a, O: Offset, R: Unpin + PollReader<O>> PollReader<O> for &'a mut R {
     ) -> Poll<Result<(), crate::ExtentError>> {
         Pin::new(&mut **self).poll_read_extent(extent, buf, cx)
     }
+
+    fn poll_read_extent_with(
+        mut self: Pin<&mut Self>,
+        extent: &crate::Extent<O, O>,
+        buf: &mut [u8],
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), crate::IoError>> {
+        Pin::new(&mut **self).poll_read_extent_with(extent, buf, cx)
+    }
 }
 
 pub trait AsyncReader<O: Offset>: SwapOffsets<O> + PollReader<O> + Unpin + Sized {
@@ -217,6 +233,18 @@ pub trait AsyncReader<O: Offset>: SwapOffsets<O> + PollReader<O> + Unpin + Sized
         extent: crate::Extent<S1, S2>,
     ) -> AsyncReadExtent<O, &mut Self, alloc::alloc::Global, S1, S2> {
         self.async_read_bytes_in(extent, alloc::alloc::Global)
+    }
+
+    fn async_read_extent<'a, S1: TryInto<O>, S2: TryInto<O>>(
+        &mut self,
+        extent: crate::Extent<S1, S2>,
+        buf: &'a mut [u8],
+    ) -> AsyncReadExtentWith<'a, O, &mut Self, S1, S2> {
+        AsyncReadExtentWith::Setup {
+            extent,
+            buf,
+            reader: self,
+        }
     }
 }
 
@@ -308,6 +336,79 @@ impl<O: Offset, R: PollReader<O> + Unpin> Future for AsyncSeek<O, R> {
                 }
             }
             None => Pin::new(&mut *me.reader).poll_seek_complete(cx),
+        }
+    }
+}
+
+pub enum AsyncReadExtentWith<'a, O: Offset, R: PollReader<O>, S1: TryInto<O>, S2: TryInto<O>> {
+    Setup {
+        extent: crate::Extent<S1, S2>,
+        buf: &'a mut [u8],
+        reader: R,
+    },
+    Reading {
+        extent: crate::Extent<O, O>,
+        buf: &'a mut [u8],
+        reader: R,
+    },
+    Done,
+}
+
+impl<
+    'a,
+    O: Offset + Unpin,
+    R: PollReader<O> + Unpin,
+    S1: TryInto<O> + Unpin,
+    S2: TryInto<O> + Unpin,
+> Future for AsyncReadExtentWith<'a, O, R, S1, S2>
+{
+    type Output = Result<(), IoError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            let this = core::mem::replace(&mut *self, Self::Done);
+            match this {
+                Self::Setup {
+                    extent,
+                    buf,
+                    reader,
+                } => {
+                    let offset = extent
+                        .offset
+                        .try_into()
+                        .map_err(|_| IoError::Io(core::io::ErrorKind::FileTooLarge.into()))?;
+                    let len: O = extent
+                        .len
+                        .try_into()
+                        .map_err(|_| IoError::Io(core::io::ErrorKind::FileTooLarge.into()))?;
+
+                    let extent = crate::Extent { offset, len };
+
+                    *self = Self::Reading {
+                        reader,
+                        extent,
+                        buf,
+                    }
+                }
+                Self::Reading {
+                    mut reader,
+                    extent,
+                    buf,
+                } => match Pin::new(&mut reader).poll_read_extent_with(&extent, buf, cx) {
+                    core::task::Poll::Pending => {
+                        *self = Self::Reading {
+                            reader,
+                            extent,
+                            buf,
+                        };
+                        return core::task::Poll::Pending;
+                    }
+                    core::task::Poll::Ready(res) => {
+                        let _ = res?;
+                        return core::task::Poll::Ready(Ok(()));
+                    }
+                },
+                Self::Done => panic!("poll after future complete"),
+            }
         }
     }
 }

@@ -50,6 +50,25 @@ pub trait Reader<O: Offset>: SwapOffsets<O> {
     ) -> Result<alloc::boxed::Box<[u8]>, crate::ExtentError> {
         self.read_bytes_in(extent, alloc::alloc::Global)
     }
+
+    fn read_extent_with(&self, extent: crate::Extent<O, O>, buf: &mut [u8]) -> Result<(), IoError>;
+
+    fn read_extent<S1: TryInto<O>, S2: TryInto<O>>(
+        &self,
+        extent: crate::Extent<S1, S2>,
+        buf: &mut [u8],
+    ) -> Result<(), IoError> {
+        let offset = extent
+            .offset
+            .try_into()
+            .map_err(|_| IoError::Io(core::io::ErrorKind::FileTooLarge.into()))?;
+        let len = extent
+            .len
+            .try_into()
+            .map_err(|_| IoError::Io(core::io::ErrorKind::FileTooLarge.into()))?;
+        let extent = crate::Extent { offset, len };
+        self.read_extent_with(extent, buf)
+    }
 }
 
 impl<'a, O: Offset, R: Reader<O>> Reader<O> for &'a mut R {
@@ -80,5 +99,9 @@ impl<'a, O: Offset, R: Reader<O>> Reader<O> for &'a mut R {
         alloc: A,
     ) -> Result<alloc::boxed::Box<[u8], A>, crate::ExtentError> {
         R::read_extent_in(self, extent, alloc)
+    }
+
+    fn read_extent_with(&self, extent: crate::Extent<O, O>, buf: &mut [u8]) -> Result<(), IoError> {
+        R::read_extent_with(self, extent, buf)
     }
 }

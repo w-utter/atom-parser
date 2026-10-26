@@ -114,6 +114,22 @@ mod in_memory {
             v.extend_from_slice(bytes);
             Ok(v.into_boxed_slice())
         }
+
+        fn read_extent_with(
+            &self,
+            extent: crate::Extent<usize, usize>,
+            buf: &mut [u8],
+        ) -> Result<(), IoError> {
+            if extent.offset + extent.len > self.bytes.bytes().len() {
+                return Err(IoError::UnexpectedEndOfData);
+            }
+            let bytes = &self.bytes.bytes()[extent.offset..(extent.offset + extent.len)];
+            if bytes.len() > buf.len() {
+                return Err(IoError::Io(core::io::ErrorKind::InvalidData.into()));
+            }
+            buf[..bytes.len()].copy_from_slice(bytes);
+            Ok(())
+        }
     }
 
     impl PollReader<usize> for InMemoryReader<'_> {
@@ -193,6 +209,25 @@ mod in_memory {
 
             let bytes = &self.bytes.bytes()[extent.offset..(extent.offset + extent.len)];
             buf.extend_from_slice(bytes);
+            core::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_read_extent_with(
+            self: core::pin::Pin<&mut Self>,
+            extent: &crate::Extent<usize, usize>,
+            buf: &mut [u8],
+            _: &mut core::task::Context<'_>,
+        ) -> core::task::Poll<Result<(), crate::IoError>> {
+            if extent.offset + extent.len > self.bytes.bytes().len() {
+                return core::task::Poll::Ready(Err(IoError::UnexpectedEndOfData));
+            } else if extent.len > buf.len() {
+                return core::task::Poll::Ready(Err(IoError::Io(
+                    core::io::ErrorKind::InvalidData.into(),
+                )));
+            }
+            let bytes = &self.bytes.bytes()[extent.offset..(extent.offset + extent.len)];
+
+            buf[..bytes.len()].copy_from_slice(bytes);
             core::task::Poll::Ready(Ok(()))
         }
     }
@@ -389,6 +424,27 @@ mod file_backed {
                 .map_err(|e| crate::IoError::Io(e))?;
 
             Ok(v.into_boxed_slice())
+        }
+
+        fn read_extent_with(
+            &self,
+            extent: crate::Extent<u64, u64>,
+            buf: &mut [u8],
+        ) -> Result<(), IoError> {
+            if extent.offset + extent.len > self.file_len {
+                return Err(IoError::UnexpectedEndOfData);
+            } else if extent.len > buf.len() as u64 {
+                return Err(IoError::Io(core::io::ErrorKind::InvalidData.into()));
+            }
+
+            let bytes = &mut buf[..extent.len as usize];
+
+            let fd = self.fd.borrow();
+            use std::os::unix::fs::FileExt;
+            fd.read_exact_at(bytes, extent.offset)
+                .map_err(|e| crate::IoError::Io(e))?;
+
+            Ok(())
         }
     }
 
@@ -674,6 +730,60 @@ mod file_backed {
             if extent.offset + extent.len > self.file_len {
                 return core::task::Poll::Ready(Err(crate::ExtentError::Io(
                     IoError::UnexpectedEndOfData,
+                )));
+            }
+
+            let extent = extent.clone();
+            let waker = cx.waker().clone();
+            let fd = self.fd.clone();
+            let len = extent.len;
+            let tasks_finished = self.tasks_finished.clone();
+
+            self.extent_task = Some(std::thread::spawn(move || {
+                let mut v = vec![0; len as usize];
+                use std::os::unix::fs::FileExt;
+                fd.read_exact_at(v.as_mut_slice(), extent.offset)
+                    .map_err(|e| crate::IoError::Io(e))?;
+                tasks_finished.fetch_or(Self::EXTENT_TASK, std::sync::atomic::Ordering::SeqCst);
+                waker.wake_by_ref();
+                Ok(v)
+            }));
+            core::task::Poll::Pending
+        }
+
+        fn poll_read_extent_with(
+            mut self: core::pin::Pin<&mut Self>,
+            extent: &crate::Extent<u64, u64>,
+            buf: &mut [u8],
+            cx: &mut core::task::Context<'_>,
+        ) -> core::task::Poll<Result<(), crate::IoError>> {
+            if self.extent_task.is_some() {
+                if self
+                    .tasks_finished
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    & Self::EXTENT_TASK
+                    == 0
+                {
+                    return core::task::Poll::Pending;
+                }
+                // clear bit
+                self.tasks_finished
+                    .fetch_and(!Self::EXTENT_TASK, std::sync::atomic::Ordering::SeqCst);
+
+                let bytes = core::mem::take(&mut self.extent_task)
+                    .unwrap()
+                    .join()
+                    .unwrap()?;
+
+                buf[..bytes.len()].copy_from_slice(&bytes);
+                return core::task::Poll::Ready(Ok(()));
+            }
+
+            if extent.offset + extent.len > self.file_len {
+                return core::task::Poll::Ready(Err(IoError::UnexpectedEndOfData));
+            } else if extent.len > buf.len() as u64 {
+                return core::task::Poll::Ready(Err(IoError::Io(
+                    core::io::ErrorKind::InvalidData.into(),
                 )));
             }
 
