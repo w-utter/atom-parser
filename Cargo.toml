@@ -3,4 +3,4 @@ resolver = "3"
 members = [
   "atom-parser",
   "atom-parser-derive"
-, "pcap", "quicktime_2001"]
+, "gif", "pcap", "quicktime_2001"]
