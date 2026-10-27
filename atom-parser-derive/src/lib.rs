@@ -701,6 +701,24 @@ fn format_struct_impl(
 
                 let mut parse_generics = generics.clone();
                 let mut async_parse_generics = generics.clone();
+                {
+                    let where_clause = async_parse_generics
+                        .where_clause
+                        .get_or_insert_with(|| syn::WhereClause {
+                            where_token: <syn::Token![where]>::default(),
+                            predicates: syn::punctuated::Punctuated::new(),
+                        });
+                    for param in &mut async_parse_generics.params {
+                        if let syn::GenericParam::Type(ty) = param {
+                            ty.bounds
+                                .push(syn::parse_quote!(::#KRATE::parse::AsyncParse<__Offset>));
+
+                            let name = &ty.ident;
+                            where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<__Offset>: ::core::marker::Unpin));
+                        }
+                    }
+                }
+
                 let mut storage_generics = generics.clone();
 
                 parse_generics.params.push(syn::parse_quote!(__Offset: ::#KRATE::reader::Offset = usize));
@@ -829,6 +847,7 @@ fn format_struct_impl(
                 .iter()
                 .filter_map(|f| f.as_sync_helper_fn(Some(&mod_name)))
                 .collect::<Vec<_>>();
+
             let async_helper_fns = fields
                 .iter()
                 .filter_map(|f| f.as_async_helper_fn(Some(&mod_name)))
@@ -850,6 +869,24 @@ fn format_struct_impl(
             let mut storage_generics = generics.clone();
 
             let mut async_generics = generics.clone();
+            {
+                let where_clause = async_generics
+                    .where_clause
+                    .get_or_insert_with(|| syn::WhereClause {
+                        where_token: <syn::Token![where]>::default(),
+                        predicates: syn::punctuated::Punctuated::new(),
+                    });
+                for param in &mut async_generics.params {
+                    if let syn::GenericParam::Type(ty) = param {
+                        ty.bounds
+                            .push(syn::parse_quote!(::#KRATE::parse::AsyncParse<__Offset>));
+
+                        let name = &ty.ident;
+                        where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<__Offset>: ::core::marker::Unpin));
+                    }
+                }
+            }
+
             generics
                 .params
                 .push(syn::parse_quote!(__Offset: ::#KRATE::reader::Offset = usize));

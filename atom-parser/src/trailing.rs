@@ -78,7 +78,7 @@ where
     }
 }
 
-impl<O: Offset + Unpin, T: AsyncParse<O> + Unpin> Trailing<O, T>
+impl<O: Offset + Unpin, T: AsyncParse<O>> Trailing<O, T>
 where
     <T as Parsed>::Output<O>: Unpin,
 {
@@ -91,7 +91,7 @@ where
     }
 }
 
-impl<O: Offset + Unpin, T: AsyncParse<O> + Unpin, S: Unpin> Trailing<O, T, S>
+impl<O: Offset + Unpin, T: AsyncParse<O>, S: Unpin> Trailing<O, T, S>
 where
     <T as Parsed>::Output<O>: Unpin,
 {
@@ -168,7 +168,7 @@ pub struct AsyncTrailingIterator<
     'a,
     O: Offset + Unpin,
     R: SwapOffsets<O> + PollReader<O> + Unpin,
-    T: AsyncParse<O> + Unpin,
+    T: AsyncParse<O>,
 > where
     <T as Parsed>::Output<O>: Unpin,
 {
@@ -179,7 +179,7 @@ pub struct AsyncTrailingIterator<
     >,
 }
 
-impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncParse<O> + Unpin>
+impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncParse<O>>
     AsyncTrailingIterator<'a, O, R, T>
 where
     <T as Parsed>::Output<O>: Unpin,
@@ -228,7 +228,7 @@ where
     }
 }
 
-impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncParse<O> + Unpin>
+impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncParse<O>>
     AsyncIterator for AsyncTrailingIterator<'a, O, R, T>
 where
     <T as Parsed>::Output<O>: Unpin,
@@ -273,7 +273,7 @@ where
     }
 }
 
-impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncParse<O> + Unpin>
+impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, T: AsyncParse<O>>
     TakeReader<'a, BacktrackReader<O, TrailingReader<O, &'a mut R>>>
     for AsyncTrailingIterator<'a, O, R, T>
 where

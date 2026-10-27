@@ -820,6 +820,14 @@ impl AtomField {
                         });
 
                         let mut generics = generics.clone();
+
+                        for param in &mut generics.params {
+                            if let syn::GenericParam::Type(ty) = param {
+                                ty.bounds
+                                    .push(syn::parse_quote!(::#KRATE::parse::Parsed));
+                            }
+                        }
+
                         generics.params.push(syn::parse_quote!(__Offset = usize));
                         let (_, _, where_clause) = generics.split_for_impl();
 
@@ -869,7 +877,7 @@ impl AtomField {
                             let mut generics = generics.clone();
                             generics.params.push(syn::parse_quote!(__Offset = usize));
 
-                            let (_, ty_generics, where_clause) = generics.split_for_impl();
+                            let (_, _, where_clause) = generics.split_for_impl();
                             let pd_generics = generics.params.iter().filter_map(|p| {
                                 match p {
                                     syn::GenericParam::Type(t) => Some(&t.ident),
@@ -879,8 +887,8 @@ impl AtomField {
 
                             quote! {
                                 #(#attrs)*
-                                pub struct #name #ty_generics #where_clause {
-                                    pub(super) _pd: ::core::marker::PhantomData <(( #(#pd_generics,)* ))>,
+                                pub struct #name #generics #where_clause {
+                                    pub(super) _pd: ::core::marker::PhantomData <( #(#pd_generics,)* )>,
                                     #(#fs,)*
                                 }
 
