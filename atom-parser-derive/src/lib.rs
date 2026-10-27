@@ -881,6 +881,7 @@ fn format_struct_impl(
                     if let syn::GenericParam::Type(ty) = param {
                         ty.bounds
                             .push(syn::parse_quote!(::#KRATE::parse::AsyncParse<__Offset>));
+                        ty.bounds.push(syn::parse_quote!(::core::marker::Unpin));
 
                         let name = &ty.ident;
                         where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<__Offset>: ::core::marker::Unpin));
