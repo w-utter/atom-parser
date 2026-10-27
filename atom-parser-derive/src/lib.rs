@@ -870,12 +870,13 @@ fn format_struct_impl(
 
             let mut async_generics = generics.clone();
             {
-                let where_clause = async_generics
-                    .where_clause
-                    .get_or_insert_with(|| syn::WhereClause {
-                        where_token: <syn::Token![where]>::default(),
-                        predicates: syn::punctuated::Punctuated::new(),
-                    });
+                let where_clause =
+                    async_generics
+                        .where_clause
+                        .get_or_insert_with(|| syn::WhereClause {
+                            where_token: <syn::Token![where]>::default(),
+                            predicates: syn::punctuated::Punctuated::new(),
+                        });
                 for param in &mut async_generics.params {
                     if let syn::GenericParam::Type(ty) = param {
                         ty.bounds

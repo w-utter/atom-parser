@@ -823,8 +823,7 @@ impl AtomField {
 
                         for param in &mut generics.params {
                             if let syn::GenericParam::Type(ty) = param {
-                                ty.bounds
-                                    .push(syn::parse_quote!(::#KRATE::parse::Parsed));
+                                ty.bounds.push(syn::parse_quote!(::#KRATE::parse::Parsed));
                             }
                         }
 
@@ -1690,7 +1689,7 @@ impl FieldKind<'_> {
                         );
                         let parse_name = quote::format_ident!("Async{}Parse", name);
                         if let Some((nested_next_name, nested_next_ty, nested_next_kind)) =
-                            typed.get(0)
+                            typed.iter().find_map(|f| f.as_ref())
                         {
                             let fut = nested_next_kind.as_next_fut(
                                 nested_next_ty,
@@ -1706,8 +1705,11 @@ impl FieldKind<'_> {
                                 name.clone()
                             };
 
+                            let starting_idx = typed.iter().position(|f| f.is_some()).unwrap();
+                            let starting_state = quote::format_ident!("S{}", starting_idx);
+
                             quote! {
-                                #mod_name #enum_name:: #name (#mod_name #parse_name::S0 {
+                                #mod_name #enum_name:: #name (#mod_name #parse_name::#starting_state {
                                     #nested_next_name: #fut,
                                 })
                             }
@@ -1744,7 +1746,7 @@ pub fn prepare_fields_for_statemachine<'a>(
     mut generics: syn::Generics,
     mod_name: Option<&proc_macro2::TokenStream>,
     payload_len: Option<&PayloadLength>,
-) -> Vec<(syn::Ident, proc_macro2::TokenStream, FieldKind<'a>)> {
+) -> Vec<Option<(syn::Ident, proc_macro2::TokenStream, FieldKind<'a>)>> {
     let where_clause = generics
         .where_clause
         .get_or_insert_with(|| syn::WhereClause {
@@ -1764,7 +1766,7 @@ pub fn prepare_fields_for_statemachine<'a>(
     fields
         .iter()
         .enumerate()
-        .filter_map(|(i, field)| Some(match field {
+        .map(|(i, field)| Some(match field {
             AtomField::FullBox { name, .. } => {
                 let ty = quote!(#mod_name #name);
                 let name = syn::Ident::new("atom_flags", proc_macro2::Span::call_site());
@@ -1892,7 +1894,7 @@ pub fn prepare_fields_for_statemachine<'a>(
 }
 
 pub fn format_statemachine_nop_impl(
-    typed_fields: &[(syn::Ident, proc_macro2::TokenStream, FieldKind)],
+    typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind)>],
     generics: &syn::Generics,
     mod_name: Option<&proc_macro2::TokenStream>,
     generic_collection: Option<&proc_macro2::TokenStream>,
@@ -1905,7 +1907,7 @@ pub fn format_statemachine_nop_impl(
     Option<proc_macro2::TokenStream>,
 ) {
     use quote::quote;
-    if let Some((name, ty, kind)) = typed_fields.get(0) {
+    if let Some((name, ty, kind)) = typed_fields.iter().find_map(|f| f.as_ref()) {
         let next_fut = kind.as_next_fut(ty, generics, mod_name, generic_collection, payload_len);
 
         (
@@ -1949,7 +1951,7 @@ pub fn format_variant_state_change<'a>(
     enum_name: &syn::Ident,
     variant_parse_name: &syn::Ident,
     fields: &[AtomField],
-    typed_fields: &[(syn::Ident, proc_macro2::TokenStream, FieldKind)],
+    typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind)>],
     exhaustive: bool,
     generics: &syn::Generics,
     match_fields: impl Iterator<Item = &'a syn::Ident> + Clone,
@@ -1997,12 +1999,15 @@ pub fn format_variant_state_change<'a>(
     };
 
     let format_state_transition = |toks| {
-        let finished = typed_fields.iter().filter_map(|(f, _, kind)| match kind {
-            FieldKind::PayloadLength
-            | FieldKind::Reserved
-            | FieldKind::Expected(_)
-            | FieldKind::Condition => None,
-            _ => Some(f),
+        let finished = typed_fields.iter().filter_map(|f| {
+            let (f, _, kind) = f.as_ref()?;
+            match kind {
+                FieldKind::PayloadLength
+                | FieldKind::Reserved
+                | FieldKind::Expected(_)
+                | FieldKind::Condition => None,
+                _ => Some(f),
+            }
         });
 
         let parse_variant = if !exhaustive {
@@ -2029,12 +2034,13 @@ pub fn format_variant_state_change<'a>(
             });
         };
 
-        if idx == parent_typed_fields.len() - 1 {
-            format_state_transition(var)
-        } else {
+        if let Some(next_pos) = parent_typed_fields[(idx + 1)..]
+            .iter()
+            .position(|f| f.is_some())
+        {
             let (_, next_fut, state) = format_statemachine_next_state(
                 parent_typed_fields,
-                idx,
+                idx + 1 + next_pos,
                 payload_len.as_ref(),
                 parse_name,
                 mod_name,
@@ -2043,12 +2049,13 @@ pub fn format_variant_state_change<'a>(
                 &generics,
                 root,
             );
-
             quote! {
                 #var
                 #next_fut
                 *self = #state;
             }
+        } else {
+            format_state_transition(var)
         }
     };
 
@@ -2075,7 +2082,7 @@ pub fn format_variant_state_change<'a>(
         variant.clone()
     };
 
-    let nop_variant = if typed_fields.is_empty() {
+    let nop_variant = if typed_fields.iter().all(|f| f.is_none()) {
         let storage_name = quote::format_ident!("Async{}Storage", enum_name);
         let variant_storage_name = quote::format_ident!("Async{}Storage", vname);
 
@@ -2131,7 +2138,7 @@ fn format_none_variant_state_change(
 
 pub fn format_statemachine_fields(
     fields: &[AtomField],
-    typed_fields: &[(syn::Ident, proc_macro2::TokenStream, FieldKind)],
+    typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind)>],
     payload_len: Option<&PayloadLength>,
     struct_name: &syn::Ident,
     parse_name: &syn::Ident,
@@ -2155,32 +2162,37 @@ pub fn format_statemachine_fields(
 
     for idx in 0..typed_fields.len() {
         let completed = &typed_fields[0..idx];
-        let in_progress = &typed_fields[idx];
+        let Some(in_progress) = &typed_fields[idx] else {
+            continue;
+        };
         let state = quote::format_ident!("S{}", idx);
 
-        let variant_fields = completed.iter().filter_map(|(name, ty, kind)| match kind {
-            FieldKind::Reserved | FieldKind::Expected { .. } => None,
-            FieldKind::Conditional(cond) => {
-                let storage_name = match cond.group().unwrap() {
-                    GroupedConditionals::Struct { name, .. } => {
-                        quote::format_ident!("AsyncOptional{}Storage", name)
-                    }
-                    GroupedConditionals::Enum { name, .. } => {
-                        quote::format_ident!("Async{}Storage", name)
-                    }
-                };
+        let variant_fields = completed.iter().filter_map(|f| {
+            let (name, ty, kind) = f.as_ref()?;
+            match kind {
+                FieldKind::Reserved | FieldKind::Expected { .. } => None,
+                FieldKind::Conditional(cond) => {
+                    let storage_name = match cond.group().unwrap() {
+                        GroupedConditionals::Struct { name, .. } => {
+                            quote::format_ident!("AsyncOptional{}Storage", name)
+                        }
+                        GroupedConditionals::Enum { name, .. } => {
+                            quote::format_ident!("Async{}Storage", name)
+                        }
+                    };
 
-                let mut storage_generics = generics.clone();
-                storage_generics.params.push(syn::parse_quote!(__Offset));
-                let (_, storage_ty_generics, _) = storage_generics.split_for_impl();
+                    let mut storage_generics = generics.clone();
+                    storage_generics.params.push(syn::parse_quote!(__Offset));
+                    let (_, storage_ty_generics, _) = storage_generics.split_for_impl();
 
-                Some(quote! {
-                    #name: #mod_name #storage_name #storage_ty_generics,
-                })
+                    Some(quote! {
+                        #name: #mod_name #storage_name #storage_ty_generics,
+                    })
+                }
+                _ => Some(quote! {
+                    #name: <#ty as ::#KRATE::parse::Parsed>::Output<__Offset>,
+                }),
             }
-            _ => Some(quote! {
-                #name: <#ty as ::#KRATE::parse::Parsed>::Output<__Offset>,
-            }),
         });
 
         let in_progress_fut = {
@@ -2252,27 +2264,26 @@ pub fn format_statemachine_fields(
             } => #name.borrow_reader(),
         };
 
-        let on_poll_ready = if idx == typed_fields.len() - 1 {
-            format_state_transition(Default::default())
-        } else {
-            // get next state
-            let (_, next_fut, state) = format_statemachine_next_state(
-                typed_fields,
-                idx,
-                payload_len.as_ref(),
-                parse_name,
-                mod_name,
-                generic_collection,
-                format_conditional_state,
-                &generics,
-                root,
-            );
-
-            quote! {
-                #next_fut
-                *self = #state;
-            }
-        };
+        let on_poll_ready =
+            if let Some(next_pos) = typed_fields[(idx + 1)..].iter().position(|f| f.is_some()) {
+                let (_, next_fut, state) = format_statemachine_next_state(
+                    typed_fields,
+                    idx + 1 + next_pos,
+                    payload_len.as_ref(),
+                    parse_name,
+                    mod_name,
+                    generic_collection,
+                    format_conditional_state,
+                    &generics,
+                    root,
+                );
+                quote! {
+                    #next_fut
+                    *self = #state;
+                }
+            } else {
+                format_state_transition(Default::default())
+            };
 
         let check_reserved = match in_progress.2 {
             FieldKind::Reserved => {
@@ -2293,7 +2304,8 @@ pub fn format_statemachine_fields(
             _ => None,
         };
 
-        let match_fields = completed.iter().filter_map(|(name, _, kind)| {
+        let match_fields = completed.iter().filter_map(|f| {
+            let (name, _, kind) = f.as_ref()?;
             if matches!(kind, FieldKind::Reserved | FieldKind::Expected(_)) {
                 return None;
             }
@@ -2473,7 +2485,7 @@ pub fn format_statemachine_fields(
 }
 
 pub fn format_statemachine_next_state(
-    typed_fields: &[(syn::Ident, proc_macro2::TokenStream, FieldKind)],
+    typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind)>],
     idx: usize,
     payload_len: Option<&PayloadLength>,
     parse_name: &syn::Ident,
@@ -2489,9 +2501,10 @@ pub fn format_statemachine_next_state(
 ) {
     use quote::quote;
 
-    let (next_name, next_ty, next_kind) = &typed_fields[idx + 1];
-    let next_state = quote::format_ident!("S{}", idx + 1);
-    let new_completed = typed_fields[..=idx].iter().filter_map(|(name, _, kind)| {
+    let (next_name, next_ty, next_kind) = typed_fields[idx].as_ref().unwrap();
+    let next_state = quote::format_ident!("S{}", idx);
+    let new_completed = typed_fields[..idx].iter().filter_map(|f| {
+        let (name, _, kind) = f.as_ref()?;
         if matches!(kind, FieldKind::Reserved | FieldKind::Expected(_)) {
             return None;
         }
@@ -2632,6 +2645,9 @@ pub fn format_async_statemachine(
 
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
 
+    let starting_idx = typed_fields.iter().position(|f| f.is_some()).unwrap_or(0);
+    let starting_state = quote::format_ident!("S{}", starting_idx);
+
     quote! {
         pub enum #parse_name #generics #where_clause {
             #(#state_machine_variants,)*
@@ -2658,7 +2674,7 @@ pub fn format_async_statemachine(
         impl #parse_impl_generics ::#KRATE::parse::AsyncParse<__Offset> for #struct_name #struct_ty_generics #struct_where_clause {
             type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #parse_name #type_generics ;
             fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
-                #parse_name ::S0 {
+                #parse_name :: #starting_state {
                     #start
                 }
             }

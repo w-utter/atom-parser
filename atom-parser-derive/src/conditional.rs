@@ -633,7 +633,6 @@ impl ConditionalVariant {
             .params
             .push(syn::parse_quote!(__Offset: ::#KRATE::reader::Offset = usize));
 
-
         let mut async_generics = generics.clone();
 
         let where_clause = async_generics
@@ -646,8 +645,7 @@ impl ConditionalVariant {
             if let syn::GenericParam::Type(ty) = param {
                 ty.bounds
                     .push(syn::parse_quote!(::#KRATE::parse::AsyncParse<__Offset>));
-                ty.bounds
-                    .push(syn::parse_quote!(::core::marker::Unpin));
+                ty.bounds.push(syn::parse_quote!(::core::marker::Unpin));
 
                 let name = &ty.ident;
                 where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<__Offset>: ::core::marker::Unpin));
@@ -752,19 +750,19 @@ impl Conditionals {
         let mut parse_generics = generics.clone();
         let mut storage_generics = generics.clone();
         {
-            let where_clause = parse_generics
-                .where_clause
-                .get_or_insert_with(|| syn::WhereClause {
-                    where_token: <syn::Token![where]>::default(),
-                    predicates: syn::punctuated::Punctuated::new(),
-                });
+            let where_clause =
+                parse_generics
+                    .where_clause
+                    .get_or_insert_with(|| syn::WhereClause {
+                        where_token: <syn::Token![where]>::default(),
+                        predicates: syn::punctuated::Punctuated::new(),
+                    });
 
             for param in &mut parse_generics.params {
                 if let syn::GenericParam::Type(ty) = param {
                     ty.bounds
                         .push(syn::parse_quote!(::#KRATE::parse::AsyncParse<__Offset>));
-                    ty.bounds
-                        .push(syn::parse_quote!(::core::marker::Unpin));
+                    ty.bounds.push(syn::parse_quote!(::core::marker::Unpin));
 
                     let name = &ty.ident;
                     where_clause.predicates.push(syn::parse_quote!(<#name as ::#KRATE::parse::Parsed>::Output<__Offset>: ::core::marker::Unpin));
