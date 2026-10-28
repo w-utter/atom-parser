@@ -59,6 +59,8 @@ pub mod atom;
 pub use atom::AnonymousAtom;
 pub mod bits;
 pub use bits::Bits;
+pub mod padded;
+pub use padded::Padded;
 
 pub use atom_parser_derive::make_atom;
 pub use futures_core::Stream as AsyncIterator;

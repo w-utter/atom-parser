@@ -99,6 +99,7 @@ fn is_struct_attr(path: &syn::Path) -> bool {
         || path.is_ident("trailing_array")
         || path.is_ident("payload")
         || path.is_ident("payload_length")
+        || path.is_ident("padded")
         || path.is_ident("condition")
         || path.is_ident("reuse_condition")
         || path.is_ident("version")
@@ -202,7 +203,9 @@ impl AtomFields {
                 AtomField::Children { .. }
                     | AtomField::Struct(
                         _,
-                        StructFieldAttr::Payload { .. } | StructFieldAttr::TrailingArray { .. }
+                        StructFieldAttr::Payload { .. }
+                            | StructFieldAttr::TrailingArray { .. }
+                            | StructFieldAttr::Padded { .. }
                     )
             )
         });
@@ -1132,6 +1135,22 @@ pub enum StructFieldAttr {
         // #[payload(u32, some_other_field * 2)]
         from_expr: Option<LenFromExpr>,
     },
+    // definition of a padded field,
+    // e.g, a field which may have padding / data trailing it
+    // _requires_ either #[payload_length] or a length specifier
+    //
+    // #[payload_length]
+    // section_length: u32,
+    // #[padded]
+    // last_known_field: u8,
+    Padded {
+        // specifies the length from other fields or a constant expr
+        //
+        // #[padded(u8, 8)]
+        // or
+        // #[padded(u32, some_other_field * 2)]
+        from_expr: Option<LenFromExpr>,
+    },
     // the field that identifies the version number
     //
     // #[version]
@@ -1197,6 +1216,9 @@ impl StructFieldAttr {
             Self::TrailingArray { from_expr }
         } else if path.is_ident("null_terminated_array") {
             Self::NullTerminatedArray
+        } else if path.is_ident("padded") {
+            let from_expr = LenFromExpr::parse_from_attr(attr)?;
+            Self::Padded { from_expr }
         } else if path.is_ident("payload") {
             let from_expr = LenFromExpr::parse_from_attr(attr)?;
             Self::Payload { from_expr }
@@ -1320,6 +1342,25 @@ impl StructFieldAttr {
                     }
                 }
             }
+            Self::Padded { from_expr } => {
+                if let Some(LenFromExpr { size_expr, ty: size_ty }) = from_expr {
+                    quote! {
+                        let #name = ::#KRATE::padded::Padded::<__Offset, #size_ty, #ty>::parse_from_len(#size_expr, reader, opts)?;
+                    }
+                } else if let Some(PayloadLength { offset, ty: size_ty, }) = payload_len {
+                    let len = if let Some(offset) = offset {
+                        quote!(_payload_len.checked_sub(#offset).ok_or(::#KRATE::error::ParseError::AtomSizeTooSmall)?)
+                    } else {
+                        quote!(_payload_len)
+                    };
+
+                    quote! {
+                        let #name = ::#KRATE::padded::Padded::<__Offset, #size_ty, #ty>::parse_from_len(#len, reader, opts)?;
+                    }
+                } else {
+                    panic!("neither payload length or length specifier specified for padded field")
+                }
+            }
             Self::Normal | Self::Condition => {
                 quote! {
                     let #name = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
@@ -1359,6 +1400,7 @@ impl StructFieldAttr {
             | Self::DynamicArray { .. }
             | Self::TrailingArray { .. }
             | Self::Payload { .. }
+            | Self::Padded { .. }
             | Self::PascalString { .. }
             | Self::ReuseCondition
             | Self::NullTerminatedArray
@@ -1385,7 +1427,7 @@ impl StructFieldAttr {
             | Self::PayloadLength { .. }
             | Self::Condition
             | Self::ReuseCondition => return None,
-            Self::Normal => {
+            Self::Normal | Self::Padded { .. } => {
                 quote! {
                     pub #name: <#ty as ::#KRATE::parse::Parsed>::Output<__Offset>
                 }
@@ -1459,6 +1501,7 @@ impl StructFieldAttr {
             | Self::VersionIdentifier
             | Self::PayloadLength { .. }
             | Self::Payload { .. }
+            | Self::Padded { .. }
             | Self::Condition
             | Self::ReuseCondition
             | Self::PascalString { .. }
@@ -1505,6 +1548,7 @@ impl StructFieldAttr {
             | Self::VersionIdentifier
             | Self::PayloadLength { .. }
             | Self::Payload { .. }
+            | Self::Padded { .. }
             | Self::Condition
             | Self::ReuseCondition
             | Self::PascalString { .. }
@@ -1620,6 +1664,7 @@ pub enum FieldKind<'a> {
     PayloadLength,
     Payload(Option<&'a LenFromExpr>),
     Trailing(Option<&'a LenFromExpr>),
+    Padded(Option<&'a LenFromExpr>),
     Reserved,
     Expected(&'a syn::Expr),
     Regular,
@@ -1666,6 +1711,21 @@ impl FieldKind<'_> {
                     quote!(::#KRATE::payload::Payload::create_fut_from_len(#len, reader, opts))
                 } else {
                     quote!(::#KRATE::payload::Payload::create_fut(reader, opts))
+                }
+            }
+            Self::Padded(expr_len) => {
+                if let Some(LenFromExpr { size_expr, .. }) = expr_len {
+                    quote!(::#KRATE::padded::Padded::create_fut_from_len(#size_expr, reader, opts))
+                } else if let Some(PayloadLength { offset, .. }) = payload_len {
+                    let len = if let Some(offset) = offset {
+                        quote!(_payload_len.checked_sub(#offset).ok_or(::#KRATE::error::ParseError::AtomSizeTooSmall)?)
+                    } else {
+                        quote!(_payload_len)
+                    };
+
+                    quote!(::#KRATE::padded::Padded::create_fut_from_len(#len, reader, opts))
+                } else {
+                    unreachable!()
                 }
             }
             FieldKind::Conditional(cond) => {
@@ -1820,6 +1880,12 @@ pub fn prepare_fields_for_statemachine<'a>(
                         quote!(::#KRATE::payload::Payload)
                     };
                     (name, display_ty, FieldKind::Payload(from_expr.as_ref()))
+                }
+                StructFieldAttr::Padded { from_expr } => {
+                    let name = field.ident.clone().unwrap();
+                    let ty = &field.ty;
+                    assert!(from_expr.is_some() || payload_len.is_some(), "padded field requires either a length specifier or a payload_len field");
+                    (name, quote!(#ty), FieldKind::Padded(from_expr.as_ref()))
                 }
                 StructFieldAttr::PascalString { length_ty } => {
                     let name = field.ident.clone().unwrap();
@@ -2219,6 +2285,14 @@ pub fn format_statemachine_fields(
                     } else {
                         quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty>)
                     }
+                }
+                FieldKind::Padded(expr_len) => {
+                    let len_ty = match (expr_len, payload_len.as_ref()) {
+                        (Some(LenFromExpr { ty: len_ty, .. }), _) => len_ty,
+                        (_, Some(PayloadLength { ty: len_ty, .. })) => len_ty,
+                        _ => unreachable!(),
+                    };
+                    quote!(#name: ::#KRATE::padded::AsyncPaddedParse<'__parse_options, __Offset, __Reader, #len_ty, #ty>)
                 }
                 FieldKind::Conditional(cond) => {
                     let field_name = &cond.field_name;

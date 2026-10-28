@@ -124,3 +124,29 @@ fn null_terminated() {
     assert_eq!(nums, vec![1, 2, 3, 4]);
     assert_eq!(a.after, 128);
 }
+
+#[cfg(all(feature = "alloc", feature = "provided_readers"))]
+#[test]
+fn padding() {
+    make_atom! {
+        struct Padded {
+            padded: WithPadding,
+            after: u16,
+        }
+
+        struct WithPadding {
+            #[payload_length]
+            len: u32,
+            #[padded]
+            padded: u8,
+        }
+    }
+    let bytes = vec![0, 0, 0, 2, 100, 123, 0, 200];
+
+    let mut r = atom_parser::InMemoryReader::from_buf(bytes);
+    let opts = Default::default();
+    use atom_parser::Parse;
+    let padded = Padded::parse(&mut r, &opts).unwrap();
+    assert_eq!(padded.padded.padded, 100);
+    assert_eq!(padded.after, 200);
+}
