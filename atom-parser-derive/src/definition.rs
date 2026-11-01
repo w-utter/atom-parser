@@ -3,7 +3,7 @@ use crate::FourCC;
 mod enum_definition;
 pub use enum_definition::EnumDefinition;
 mod record_definition;
-pub use record_definition::{AtomDefinition, StructDefinition};
+pub use record_definition::{AtomDefinition, StructDefinition, Tag};
 mod newtype;
 pub use newtype::NewTypeDefinition;
 mod bitwise;
@@ -53,6 +53,15 @@ impl syn::parse::Parse for Definition {
             attr.parse_args::<syn::Type>()
         })?;
 
+        let tag = singular_attr(&mut attrs, "tag", |attr| {
+            attr.parse_args_with(|input: syn::parse::ParseStream| {
+                let ty = input.parse()?;
+                let _: syn::Token![,] = input.parse()?;
+                let expr = input.parse()?;
+                Ok(Tag { ty, expr })
+            })
+        })?;
+
         let lookahead = input.lookahead1();
         if lookahead.peek(syn::Token![struct]) {
             if enum_repr.is_some() {
@@ -75,27 +84,28 @@ impl syn::parse::Parse for Definition {
                 fcc,
                 flags_repr,
                 bitfield_repr,
+                tag,
             ) {
-                (false, Some(fcc), None, None) => {
+                (false, Some(fcc), None, None, None) => {
                     if generics != Default::default() {
                         panic!("generics are not supported for atoms")
                     }
                     DefinitionKind::Atom(AtomDefinition::parse_from_syn(input, fcc, attrs, name)?)
                 }
-                (false, None, Some(flags), None) => DefinitionKind::Flags(
+                (false, None, Some(flags), None, None) => DefinitionKind::Flags(
                     FlagsDefinition::parse_from_syn(input, attrs, name, flags)?,
                 ),
-                (false, None, None, Some(bitfield)) => DefinitionKind::BitField(
+                (false, None, None, Some(bitfield), None) => DefinitionKind::BitField(
                     BitFieldDefinition::parse_from_syn(input, attrs, name, bitfield)?,
                 ),
-                (false, None, None, None) => DefinitionKind::Struct(
-                    StructDefinition::parse_from_syn(input, attrs, name, generics)?,
+                (false, None, None, None, tag) => DefinitionKind::Struct(
+                    StructDefinition::parse_from_syn(input, attrs, name, tag, generics)?,
                 ),
-                (true, None, None, None) => DefinitionKind::NewType(
+                (true, None, None, None, None) => DefinitionKind::NewType(
                     NewTypeDefinition::parse_from_syn(input, attrs, name, generics)?,
                 ),
-                (a, b, c, d) => panic!(
-                    "invalid configuration( newtype: {a:?}, fourcc: {b:?}, flags: {c:?}, bitfield: {d:?})"
+                (a, b, c, d, e) => panic!(
+                    "invalid configuration( newtype: {a:?}, fourcc: {b:?}, flags: {c:?}, bitfield: {d:?}, tag: {e:?})"
                 ),
             };
 

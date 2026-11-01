@@ -4,7 +4,7 @@ use proc_macro::TokenStream;
 mod definition;
 use definition::{
     AtomDefinition, BitFieldDefinition, BitFieldList, DefinitionKind, DefinitionList,
-    EnumDefinition, FlagsDefinition, NewTypeDefinition, StructDefinition,
+    EnumDefinition, FlagsDefinition, NewTypeDefinition, StructDefinition, Tag,
 };
 mod field;
 use field::{
@@ -53,9 +53,10 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                     name,
                     fields,
                     generics,
+                    tag,
                 } = item;
 
-                format_struct_impl(def.version, attrs, mod_name, name, fields, generics)
+                format_struct_impl(def.version, attrs, mod_name, name, fields, tag, generics)
             }
             DefinitionKind::Atom(atom) => {
                 let AtomDefinition {
@@ -68,13 +69,16 @@ pub fn make_atom(input: TokenStream) -> TokenStream {
                 let atom_mod = fcc.as_ident();
                 let [fcc_0, fcc_1, fcc_2, fcc_3] = fcc.as_fcc();
 
-                let struct_impl = format_struct_impl(def.version, attrs, atom_mod, name.clone(), fields, Default::default());
+                let fourcc_tag = Tag {
+                    ty: syn::parse_quote!(::#KRATE::fourcc::FourCC),
+                    expr: syn::parse_quote!(::#KRATE::fourcc::FourCC::new([#fcc_0, #fcc_1, #fcc_2, #fcc_3])),
+                };
+
+                let struct_impl = format_struct_impl(def.version, attrs, atom_mod, name.clone(), fields, Some(fourcc_tag), Default::default());
                 quote! {
                     #struct_impl
 
-                    impl ::#KRATE::Atom for #name {
-                        const FCC: ::#KRATE::fourcc::FourCC = ::#KRATE::fourcc::FourCC::new([#fcc_0, #fcc_1, #fcc_2, #fcc_3]);
-                    }
+                    impl ::#KRATE::Atom for #name {}
                 }
             }
             DefinitionKind::Enum(e) => {
@@ -637,6 +641,7 @@ fn format_struct_impl(
     mod_name: syn::Ident,
     name: syn::Ident,
     fields: Vec<AtomField>,
+    tag: Option<Tag>,
     mut generics: syn::Generics,
 ) -> proc_macro2::TokenStream {
     for param in &mut generics.params {
@@ -647,6 +652,14 @@ fn format_struct_impl(
 
     use quote::quote;
 
+    let tag_impl = tag.map(|Tag { ty, expr }| {
+        quote! {
+            impl ::#KRATE::tag::Tag<#ty> for #name {
+                const TAG: #ty = #expr;
+            }
+        }
+    });
+
     let generic_collection = None;
     match try_expand_into_versioned_fields(fields, version) {
         Ok(Ok(versioned)) => {
@@ -655,12 +668,13 @@ fn format_struct_impl(
                 let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
                 let payload_len = AtomFields::payload_len(fields);
+                let tag = AtomFields::tag(fields);
 
                 let version_mod = Versioned::version_mod_from_lit(v);
 
 
-                let version_specific = fields.iter().filter_map(|field| field.as_inline_definition(Some(v), &attrs, &generics, generic_collection, payload_len.as_ref()));
-                let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(&mod_name, Some(&version_mod), payload_len.as_ref())).collect::<Vec<_>>();
+                let version_specific = fields.iter().filter_map(|field| field.as_inline_definition(Some(v), &attrs, &generics, generic_collection, payload_len.as_ref(), tag.as_ref()));
+                let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(Some(v), &mod_name, Some(&version_mod), payload_len.as_ref(), tag.as_ref())).collect::<Vec<_>>();
                 let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
                 let sync_helper_fns = fields.iter().filter_map(|f| f.as_sync_helper_fn(None)).collect::<Vec<_>>();
                 let async_helper_fns = fields.iter().filter_map(|f| f.as_async_helper_fn(None)).collect::<Vec<_>>();
@@ -696,7 +710,7 @@ fn format_struct_impl(
                 };
 
                 let parse_impl = format_parse_impl(&name, &sync_parsing, &field_collection, &generics, generic_collection.as_ref());
-                let async_parse_impl = format_async_statemachine(fields, &name, generics.clone(), None, generic_collection.as_ref(), payload_len.as_ref());
+                let async_parse_impl = format_async_statemachine(fields, &name, generics.clone(), None, generic_collection.as_ref(), payload_len.as_ref(), tag.as_ref());
                 let fields = fields.iter().filter_map(|field| field.as_field_decl(None, payload_len.as_ref(), &generics)).collect::<Vec<_>>();
 
                 let mut parse_generics = generics.clone();
@@ -810,10 +824,13 @@ fn format_struct_impl(
                 }
 
                 #async_parse_impl
+
+                #tag_impl
             }
         }
         Ok(Err(fields)) => {
             let payload_len = AtomFields::payload_len(&fields);
+            let tag = AtomFields::tag(&fields);
             // since some fields are omitted
             // (e.g reserved/padding)
             let atom_fields = fields
@@ -831,12 +848,15 @@ fn format_struct_impl(
                 &generics,
                 generic_collection,
                 payload_len.as_ref(),
+                tag.as_ref(),
             );
             let attrs = attrs.iter();
 
             let sync_parsing = fields
                 .iter()
-                .filter_map(|f| f.as_sync_parse(&mod_name, None, payload_len.as_ref()))
+                .filter_map(|f| {
+                    f.as_sync_parse(None, &mod_name, None, payload_len.as_ref(), tag.as_ref())
+                })
                 .collect::<Vec<_>>();
             let field_collection = fields
                 .iter()
@@ -862,6 +882,7 @@ fn format_struct_impl(
                 Some(&mod_name),
                 None,
                 payload_len.as_ref(),
+                tag.as_ref(),
             );
 
             let parsed_output = format_parsed_ty(&name, &generics);
@@ -925,6 +946,8 @@ fn format_struct_impl(
                 #async_parse_impl
 
                 #mod_specific
+
+                #tag_impl
             }
         }
         Err(e) => {

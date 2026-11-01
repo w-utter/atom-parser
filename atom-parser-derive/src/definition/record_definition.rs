@@ -1,4 +1,4 @@
-use crate::{AtomField, AtomFields, FourCC};
+use crate::{AtomField, AtomFields, FourCC, field::ChildrenKind};
 
 pub struct AtomDefinition {
     pub fcc: FourCC,
@@ -24,9 +24,16 @@ impl AtomDefinition {
     }
 }
 
+#[derive(Debug)]
+pub struct Tag {
+    pub ty: syn::Type,
+    pub expr: syn::Expr,
+}
+
 pub struct StructDefinition {
     pub attrs: Vec<syn::Attribute>,
     pub name: syn::Ident,
+    pub tag: Option<Tag>,
     pub generics: syn::Generics,
     pub fields: Vec<AtomField>,
 }
@@ -36,6 +43,7 @@ impl StructDefinition {
         input: syn::parse::ParseStream,
         attrs: Vec<syn::Attribute>,
         name: syn::Ident,
+        tag: Option<Tag>,
         generics: syn::Generics,
     ) -> syn::Result<Self> {
         let fields = input.parse::<AtomFields>()?.inner;
@@ -43,7 +51,11 @@ impl StructDefinition {
         if fields.iter().any(|field| {
             matches!(
                 field,
-                AtomField::FullBox { .. } | AtomField::Children { .. }
+                AtomField::FullBox { .. }
+                    | AtomField::Children {
+                        kind: ChildrenKind::Atom,
+                        ..
+                    }
             )
         }) {
             panic!("unsupported field in non-atom definition");
@@ -54,6 +66,7 @@ impl StructDefinition {
             name,
             generics,
             fields,
+            tag,
         })
     }
 

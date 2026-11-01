@@ -1,4 +1,4 @@
-use crate::field::PayloadLength;
+use crate::field::{PayloadLength, Tag};
 use crate::{AtomField, AtomFields, KRATE, StructFieldAttr};
 
 #[derive(Clone)]
@@ -404,11 +404,13 @@ impl ConditionalVariant {
         parse_generics: &syn::Generics,
         storage_generics: &syn::Generics,
         payload_len: Option<&PayloadLength>,
+        tag: Option<&Tag>,
     ) -> proc_macro2::TokenStream {
         let (parse_impl_generics, parse_ty_generics, parse_where_clause) =
             parse_generics.split_for_impl();
 
         let payload_len = AtomFields::nested_payload_len(payload_len, fields);
+        let tag = AtomFields::nested_tag(tag, fields);
 
         let typed_fields = crate::field::prepare_fields_for_statemachine(
             fields,
@@ -424,6 +426,7 @@ impl ConditionalVariant {
                 fields,
                 &typed_fields,
                 payload_len.as_ref(),
+                tag.as_ref(),
                 vname,
                 &parse_name,
                 &generics,
@@ -445,6 +448,7 @@ impl ConditionalVariant {
             None,
             generic_collection,
             payload_len.as_ref(),
+            tag.as_ref(),
             &|_| Default::default(),
         );
 
@@ -744,6 +748,7 @@ impl Conditionals {
         generics: &syn::Generics,
         generic_collection: Option<&proc_macro2::TokenStream>,
         payload_len: Option<&PayloadLength>,
+        tag: Option<&Tag>,
     ) -> proc_macro2::TokenStream {
         use quote::quote;
 
@@ -809,6 +814,7 @@ impl Conditionals {
 
                 let variant_statemachines = variants.iter().map(|v| {
                     let payload_len = AtomFields::nested_payload_len(payload_len, &v.fields);
+                    let tag = AtomFields::nested_tag(tag, &v.fields);
                     ConditionalVariant::format_variant_statemachine(
                         &v.variant_name,
                         &v.fields,
@@ -817,17 +823,20 @@ impl Conditionals {
                         &parse_generics,
                         &storage_generics,
                         payload_len.as_ref(),
+                        tag.as_ref(),
                     )
                 });
 
                 let nested = variants.iter().flat_map(|v| {
                     let payload_len = AtomFields::nested_payload_len(payload_len, &v.fields);
+                    let tag = AtomFields::nested_tag(tag, &v.fields);
                     v.fields.iter().filter_map(move |field| {
                         if let AtomField::Conditional(cond) = field {
                             Some(cond.as_async_state(
                                 generics,
                                 generic_collection,
                                 payload_len.as_ref(),
+                                tag.as_ref(),
                             ))
                         } else {
                             None
@@ -877,6 +886,7 @@ impl Conditionals {
             GroupedConditionals::Struct { name, fields } => {
                 let exhaustive = false;
                 let payload_len = AtomFields::nested_payload_len(payload_len, &fields);
+                let tag = AtomFields::nested_tag(tag, &fields);
                 let parse_variant =
                     ConditionalVariant::format_variant_parse(&name, exhaustive, &parse_ty_generics);
 
@@ -894,6 +904,7 @@ impl Conditionals {
                     &parse_generics,
                     &storage_generics,
                     payload_len.as_ref(),
+                    tag.as_ref(),
                 );
 
                 let nested = fields.iter().filter_map(|field| {
@@ -902,6 +913,7 @@ impl Conditionals {
                             generics,
                             generic_collection,
                             payload_len.as_ref(),
+                            tag.as_ref(),
                         ))
                     } else {
                         None

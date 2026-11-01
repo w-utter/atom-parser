@@ -61,9 +61,19 @@ pub enum AtomField {
     //      Wide,
     //      Skip,
     // }
+    //
+    // OR
+    //
+    // inline definitions of a tagged item variant
+    // #[tagged]
+    // enum <enum_name> {
+    //      SomeTagVariant,
+    //      SomeOtherTagVariant,
+    // }
     Children {
         size_ty: Option<syn::Type>,
         children: Vec<Child>,
+        kind: ChildrenKind,
     },
     Conditional(Conditionals),
 
@@ -86,6 +96,7 @@ fn is_atom_attr(path: &syn::Path) -> bool {
         || path.is_ident("flags")
         || path.is_ident("versions")
         || path.is_ident("children")
+        || path.is_ident("tagged")
         || path.is_ident("conditional")
 }
 
@@ -99,6 +110,7 @@ fn is_struct_attr(path: &syn::Path) -> bool {
         || path.is_ident("trailing_array")
         || path.is_ident("payload")
         || path.is_ident("payload_length")
+        || path.is_ident("tag")
         || path.is_ident("padded")
         || path.is_ident("condition")
         || path.is_ident("reuse_condition")
@@ -159,9 +171,11 @@ impl AtomFields {
 
         generic_collection: Option<&proc_macro2::TokenStream>,
         payload_len: Option<&PayloadLength>,
+        tag: Option<&Tag>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
         let payload_len = AtomFields::nested_payload_len(payload_len, fields);
+        let tag = AtomFields::nested_tag(tag, fields);
         let inline_definitions = fields.iter().filter_map(|field| {
             field.as_inline_definition(
                 version,
@@ -169,6 +183,7 @@ impl AtomFields {
                 generics,
                 generic_collection,
                 payload_len.as_ref(),
+                tag.as_ref(),
             )
         });
 
@@ -182,6 +197,49 @@ impl AtomFields {
                 #(#inline_definitions)*
             }
         })
+    }
+
+    pub fn tag(fields: &[AtomField]) -> Option<Tag> {
+        let mut tags = fields.iter().filter_map(|field| match &field {
+            AtomField::Struct(field, StructFieldAttr::Tag) => Some(&field.ty),
+            _ => None,
+        });
+
+        if tags.clone().count() > 1 {
+            panic!("more than one tag specified");
+        }
+
+        let mut tagged = fields.iter().filter(|field| {
+            matches!(
+                field,
+                AtomField::Children {
+                    kind: ChildrenKind::Tagged { .. },
+                    ..
+                }
+            )
+        });
+
+        if tagged.clone().count() > 1 {
+            panic!("more than one tagged specified")
+        }
+        match (tags.next(), tagged.next()) {
+            (Some(ty), Some(_)) => Some(Tag { ty: ty.clone() }),
+            (None, None) => None,
+            (tag, tagged) => panic!(
+                "tag was {} and tagged was {}",
+                tag.is_some(),
+                tagged.is_some()
+            ),
+        }
+    }
+
+    pub fn nested_tag(existing: Option<&Tag>, fields: &[AtomField]) -> Option<Tag> {
+        match (existing, Self::tag(fields)) {
+            (Some(_), Some(new)) => Some(new),
+            (Some(existing), None) => Some(existing.clone()),
+            (None, Some(new)) => Some(new),
+            (None, None) => None,
+        }
     }
 
     pub fn payload_len(fields: &[AtomField]) -> Option<PayloadLength> {
@@ -216,7 +274,16 @@ impl AtomFields {
         }
 
         let ty = match (ty, trailing.next()) {
-            (Some(_), Some((_, AtomField::Children { .. }))) => panic!(
+            (
+                Some(_),
+                Some((
+                    _,
+                    AtomField::Children {
+                        kind: ChildrenKind::Atom,
+                        ..
+                    },
+                )),
+            ) => panic!(
                 "length specified with children is unsupported (it is gotten from the atom size)"
             ),
             (_, Some((i, _))) if i != fields.len() - 1 => {
@@ -232,6 +299,7 @@ impl AtomFields {
 
         ty
     }
+
     pub fn nested_payload_len(
         existing: Option<&PayloadLength>,
         fields: &[AtomField],
@@ -296,7 +364,29 @@ impl AtomField {
             let size_ty = atom_field_attr.parse_args::<syn::Type>().ok();
 
             let children = input.parse::<ChildList>()?.inner;
-            Self::Children { size_ty, children }
+            Self::Children {
+                size_ty,
+                children,
+                kind: ChildrenKind::Atom,
+            }
+        } else if path.is_ident("tagged") {
+            let field_name = input.parse()?;
+            let _: syn::Token![:] = input.parse()?;
+            let _: syn::Token![enum] = input.parse()?;
+            let tagged_name: syn::Ident = input.parse()?;
+
+            let len_from_expr = LenFromExpr::parse_from_attr(atom_field_attr)?;
+
+            let children = input.parse::<ChildList>()?.inner;
+            Self::Children {
+                size_ty: None,
+                children,
+                kind: ChildrenKind::Tagged {
+                    field_name,
+                    tagged_name,
+                    len_from_expr,
+                },
+            }
         } else if path.is_ident("conditional") {
             use syn::Meta;
             let name = match &atom_field_attr.meta {
@@ -328,17 +418,30 @@ impl AtomField {
 
         Some(match self {
             Self::Struct(f, attr) => return attr.as_field_decl(f, payload_len),
-            Self::Children { size_ty, .. } => {
-                if let Some(size_ty) = size_ty {
+            Self::Children { size_ty, kind, .. } => match (kind, size_ty) {
+                (ChildrenKind::Atom, Some(size_ty)) => {
                     quote! {
                         pub children: ::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name Child>
                     }
-                } else {
+                }
+                (ChildrenKind::Atom, None) => {
                     quote! {
                         pub children: ::#KRATE::children::Children<__Offset, #mod_name Child>
                     }
                 }
-            }
+                (
+                    ChildrenKind::Tagged {
+                        field_name,
+                        tagged_name,
+                        ..
+                    },
+                    _,
+                ) => {
+                    quote! {
+                        pub #field_name: <#mod_name #tagged_name as ::#KRATE::parse::Parsed>::Output<__Offset>
+                    }
+                }
+            },
             Self::Conditional(cond) => {
                 let exhaustive = cond.is_exhaustive();
                 let name = &cond.field_name;
@@ -389,7 +492,15 @@ impl AtomField {
         let mod_name = atom_mod.map(|name| quote!(#name::));
         Some(match self {
             Self::Struct(f, attr) => return attr.as_sync_helper_fn(f),
-            Self::Children { size_ty, .. } => {
+            Self::Children {
+                kind: ChildrenKind::Tagged { .. },
+                ..
+            } => return None,
+            Self::Children {
+                size_ty,
+                kind: ChildrenKind::Atom,
+                ..
+            } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
                         pub fn children<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::DynamicArrayIter<'__parse_options, __Offset, __Reader, #size_ty, #mod_name Child, false> {
@@ -417,7 +528,15 @@ impl AtomField {
         let mod_name = atom_mod.map(|name| quote!(#name::));
         Some(match self {
             Self::Struct(f, attr) => return attr.as_async_helper_fn(f),
-            Self::Children { size_ty, .. } => {
+            Self::Children {
+                kind: ChildrenKind::Tagged { .. },
+                ..
+            } => return None,
+            Self::Children {
+                size_ty,
+                kind: ChildrenKind::Atom,
+                ..
+            } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
                         pub fn children_async<'__parse_options, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::AsyncDynamicArrayIter<'__parse_options, __Offset, __Reader, #size_ty, #mod_name Child, false> {
@@ -439,9 +558,11 @@ impl AtomField {
 
     pub fn as_sync_parse(
         &self,
+        version: Option<&syn::LitInt>,
         atom_mod: &syn::Ident,
         version_mod: Option<&syn::Ident>,
         payload_len: Option<&PayloadLength>,
+        tag: Option<&Tag>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
 
@@ -452,17 +573,69 @@ impl AtomField {
 
         Some(match self {
             Self::Struct(field, attr) => return attr.as_sync_parse(field, payload_len),
-            Self::Children { size_ty, .. } => {
-                if let Some(size_ty) = size_ty {
+            Self::Children {
+                size_ty,
+                kind,
+                children,
+            } => match (kind, size_ty) {
+                (ChildrenKind::Atom, Some(size_ty)) => {
                     quote! {
                         let children = <::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name::Child>>::parse(reader, opts)?;
                     }
-                } else {
+                }
+                (ChildrenKind::Atom, None) => {
                     quote! {
                         let children = <::#KRATE::children::Children<__Offset, #mod_name::Child>>::parse(reader, opts)?;
                     }
                 }
-            }
+                (
+                    ChildrenKind::Tagged {
+                        field_name,
+                        tagged_name,
+                        len_from_expr,
+                    },
+                    _,
+                ) => {
+                    let reader = reader_from_lengths(len_from_expr.as_ref(), payload_len);
+
+                    let variants = children
+                        .iter()
+                        .filter_map(|child| {
+                            if let Some(v) = version {
+                                if !child.version_num.is_empty() && !child.version_num.contains(v) {
+                                    return None;
+                                }
+                            } else if !child.version_num.is_empty() {
+                                panic!("child version but no version identifier");
+                            }
+                            Some(&child.name)
+                        })
+                        .collect::<Vec<_>>();
+
+                    let tag_ty = &tag.expect("no tag for tagged").ty;
+                    let krate = &KRATE;
+
+                    quote! {
+                        let #field_name = {
+                            let mut reader = #reader;
+                            match _tag {
+                                #(
+                                    <#variants as #krate::tag::Tag<#tag_ty>>::TAG => {
+                                        let atom = <#variants as ::#krate::parse::Parse<__Offset>>::parse(&mut reader, opts)?;
+                                        ::#krate::reader::Reader::seek_remaining(&mut reader)?;
+                                        #mod_name :: #tagged_name::#variants(atom)
+                                    }
+                                )*
+                                missed => {
+                                    let extent = ::#krate::reader::Reader::extent(&reader);
+                                    ::#krate::reader::Reader::seek_remaining(&mut reader)?;
+                                    #mod_name :: #tagged_name::Unsupported(::#KRATE::children::UnknownChild::new(missed, extent))
+                                }
+                            }
+                        };
+                    }
+                }
+            },
             Self::Conditional(cond) => {
                 let enum_name =
                     if let GroupedConditionals::Enum { name, .. } = cond.group().unwrap() {
@@ -474,8 +647,15 @@ impl AtomField {
                 let conditional = cond.format_conditional(
                     |name, fields, exhaustive| {
                         let payload_len = AtomFields::nested_payload_len(payload_len, fields);
+                        let tag = AtomFields::nested_tag(tag, fields);
                         let sync_parse = fields.iter().filter_map(|f| {
-                            f.as_sync_parse(atom_mod, version_mod, payload_len.as_ref())
+                            f.as_sync_parse(
+                                version,
+                                atom_mod,
+                                version_mod,
+                                payload_len.as_ref(),
+                                tag.as_ref(),
+                            )
                         });
                         let collection = fields.iter().filter_map(|f| f.as_collection());
 
@@ -546,11 +726,10 @@ impl AtomField {
         use quote::quote;
         Some(match self {
             Self::Struct(field, attr) => return attr.as_collection(field),
-            Self::Children { .. } => {
-                quote! {
-                    children,
-                }
-            }
+            Self::Children { kind, .. } => match kind {
+                ChildrenKind::Atom => quote!(children,),
+                ChildrenKind::Tagged { field_name, .. } => quote!(#field_name,),
+            },
             Self::Conditional(cond) => {
                 let name = &cond.field_name;
                 quote! {
@@ -583,11 +762,17 @@ impl AtomField {
 
         generic_collection: Option<&proc_macro2::TokenStream>,
         payload_len: Option<&PayloadLength>,
+        tag: Option<&Tag>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
         Some(match self {
             Self::Struct(_, _) => return None,
-            Self::Children { children, .. } => {
+            Self::Children { children, kind, .. } => {
+                let children_name = match kind {
+                    ChildrenKind::Atom => quote::format_ident!("Child"),
+                    ChildrenKind::Tagged { tagged_name, .. } => tagged_name.clone(),
+                };
+
                 let variants = children
                     .iter()
                     .filter_map(|child| {
@@ -603,120 +788,289 @@ impl AtomField {
                     .collect::<Vec<_>>();
 
                 let krate = &KRATE;
+
+                let async_children_name = quote::format_ident!("Async{}Parse", children_name);
+                let (header_parse, parse_impl) = match kind {
+                    ChildrenKind::Atom => (
+                        Some(quote! {
+                            Self::AtomHeader(mut header) => {
+                                match ::core::pin::Pin::new(&mut header).poll(cx) {
+                                    ::core::task::Poll::Pending => {
+                                        *self = Self::AtomHeader(header);
+                                        return ::core::task::Poll::Pending;
+                                    }
+                                    ::core::task::Poll::Ready(res) => {
+                                        let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(header);
+
+                                        let atom = match res {
+                                            Ok(atom) => atom,
+                                            Err(e) => {
+                                                let max_offset = reader.offset();
+                                                let reader = ::#KRATE::reader::TrailingReader::new(reader, max_offset);
+                                                *self = Self::Done(reader, opts);
+                                                return ::core::task::Poll::Ready(Err(e));
+                                            }
+                                        };
+
+                                        let atom_size = match atom.size.size()
+                                            .map(|size| size.try_into())
+                                            .transpose()
+                                            .map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError)) {
+                                                Ok(size) => size,
+                                                Err(e) => {
+                                                    let max_offset = reader.offset();
+                                                    let reader = ::#KRATE::reader::TrailingReader::new(reader, max_offset);
+                                                    *self = Self::Done(reader, opts);
+                                                    return ::core::task::Poll::Ready(Err(e));
+                                                }
+                                            }
+                                            .unwrap_or(reader.remaining_size());
+
+                                        let max_offset = reader.offset() + atom_size;
+                                        let reader = ::#KRATE::reader::TrailingReader::new(reader, max_offset);
+
+                                        *self = match atom.fcc {
+                                            #(
+                                                <#variants as ::#krate::tag::Atom>::FCC => {
+                                                    Self::#variants(<#variants as ::#krate::parse::AsyncParse<__Offset>>::create_fut(reader, opts))
+                                                }
+                                            )*
+                                            u => {
+                                                let extent = #KRATE::reader::PollReader::extent(&reader);
+                                                let rest = ::#KRATE::reader::PollReader::remaining_size(&reader);
+                                                Self::Seek(Child::Unsupported(::#KRATE::children::UnknownChild::new(u, extent)), ::#KRATE::reader::AsyncSeek::seek(reader, rest), opts)
+                                            }
+                                        };
+                                    }
+                                }
+                            }
+                        }),
+                        quote! {
+                            impl <__Offset: ::#KRATE::reader::Offset> ::#KRATE::parse::Parse<__Offset> for Child {
+                                fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>>(reader: &mut __Reader, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
+                                    let atom = ::#KRATE::atom_header::AtomHeader::parse(reader, opts)?;
+                                    let atom_size = atom.size.size()
+                                        .map(|size| size.try_into())
+                                        .transpose().map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError))?
+                                        .unwrap_or(reader.remaining_size());
+
+                                    let max_offset = reader.offset() + atom_size;
+                                    let mut r = ::#KRATE::reader::TrailingReader::new(&mut*reader, max_offset);
+                                    Ok(match atom.fcc {
+                                        #(
+                                            <#variants as ::#krate::tag::Atom>::FCC => {
+                                                let atom = <#variants as ::#krate::parse::Parse<__Offset>>::parse(&mut r, opts)?;
+                                                ::#krate::reader::Reader::seek_remaining(&mut r)?;
+                                                Child::#variants(atom)
+                                            }
+                                        )*
+                                        missed => {
+                                            let extent = ::#krate::reader::Reader::extent(&r);
+                                            ::#krate::reader::Reader::seek_remaining(&mut r)?;
+                                            Child::Unsupported(::#KRATE::children::UnknownChild::new(missed, extent))
+                                        }
+                                    })
+                                }
+                            }
+
+                            pub enum AsyncChildParse<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
+                                AtomHeader(<::#KRATE::atom_header::AtomHeader as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
+                                #(
+                                    #variants(<#variants as ::#krate::parse::AsyncParse<__Offset>>::Fut<'__parse_options, ::#krate::reader::TrailingReader<__Offset, __Reader>>),
+                                )*
+                                Seek(Child<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                Done(::#KRATE::reader::TrailingReader<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                Empty,
+                            }
+
+                            impl <__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<__Offset> for Child {
+                                type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = AsyncChildParse<'__parse_options, __Offset, __Reader>;
+                                fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
+                                    AsyncChildParse::AtomHeader(::#KRATE::atom_header::AtomHeader::create_fut(reader, opts))
+                                }
+                            }
+
+                            impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> AsyncChildParse<'__parse_options, __Offset, __Reader> {
+                                pub fn reader(&mut self) -> &mut ::#KRATE::reader::TrailingReader<__Offset, __Reader> {
+                                    match self {
+                                        Self::Done(reader, _) => reader,
+                                        _ => unreachable!("should not be able to access mid future")
+                                    }
+                                }
+                            }
+
+                            impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for AsyncChildParse<'__parse_options, __Offset, __Reader> {
+                                fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                    match self {
+                                        Self::Done(reader, opts) => (reader.reader, opts),
+                                        _ => unreachable!("invalid state of AsyncChildParse")
+                                    }
+                                }
+                                fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                    match self {
+                                        Self::AtomHeader(fut) => fut.borrow_reader(),
+                                        #(Self::#variants(fut) => {
+                                            let (reader, opts) = fut.borrow_reader();
+                                            (&mut reader.reader, opts)
+                                        })*
+                                        Self::Seek(_, seek, opts) => (&mut seek.reader.reader, opts),
+                                        Self::Done(reader, opts) => (&mut reader.reader, opts),
+                                        Self::Empty => unreachable!(),
+                                    }
+                                }
+                            }
+                        },
+                    ),
+                    ChildrenKind::Tagged { .. } => {
+                        let async_children_name_with_len =
+                            quote::format_ident!("{async_children_name}WithLen");
+                        (
+                            None,
+                            quote! {
+                                pub enum #async_children_name<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
+                                    #(
+                                        #variants(<#variants as #krate::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
+                                    )*
+                                    Seek(<#children_name as #KRATE::parse::Parsed>::Output<__Offset>, ::#krate::reader::AsyncSeek<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                    Done(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                    Empty,
+                                }
+
+                                pub enum #async_children_name_with_len<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
+                                    #(
+                                        #variants(<#variants as #krate::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
+                                    )*
+                                    Seek(<#children_name as #KRATE::parse::Parsed>::Output<__Offset>, ::#krate::reader::AsyncSeek<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                    Done(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                    Empty,
+                                }
+
+                                impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #async_children_name<'__parse_options, __Offset, __Reader> {
+                                    fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                        match self {
+                                            Self::Done(reader, opts) => (reader, opts),
+                                            _ => unreachable!("invalid state of AsyncChildParse")
+                                        }
+                                    }
+                                    fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                        match self {
+                                            #(
+                                                Self::#variants(fut) => fut.borrow_reader(),
+                                            )*
+                                            Self::Seek(_, seek, opts) => (&mut seek.reader, opts),
+                                            Self::Done(reader, opts) => (reader, opts),
+                                            Self::Empty => unreachable!(),
+                                        }
+                                    }
+                                }
+
+                                impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #async_children_name_with_len<'__parse_options, __Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>> {
+                                    fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                        match self {
+                                            Self::Done(reader, opts) => (reader.reader, opts),
+                                            _ => unreachable!("invalid state of AsyncChildParse")
+                                        }
+                                    }
+                                    fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                        match self {
+                                            #(
+                                                Self::#variants(fut) => {
+                                                    let (reader, opts) = fut.borrow_reader();
+                                                    (&mut reader.reader, opts)
+                                                }
+                                            )*
+                                            Self::Seek(_, seek, opts) => (&mut seek.reader.reader, opts),
+                                            Self::Done(reader, opts) => (&mut reader.reader, opts),
+                                            Self::Empty => unreachable!(),
+                                        }
+                                    }
+                                }
+
+                                impl <__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<__Offset> for #children_name {
+                                    type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #async_children_name<'__parse_options, __Offset, __Reader>;
+                                    fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
+                                        unreachable!("need tag to parse")
+                                    }
+                                }
+
+                                impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> Future for #async_children_name_with_len<'__parse_options, __Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>> {
+                                    type Output = ::core::result::Result<<#children_name as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError>;
+                                    fn poll(mut self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
+                                        loop {
+                                            let mut this = ::core::mem::replace(&mut*self, Self::Empty);
+                                            match this {
+                                                #(
+                                                    Self::#variants(mut fut) => {
+                                                        match ::core::pin::Pin::new(&mut fut).poll(cx) {
+                                                            ::core::task::Poll::Pending => {
+                                                                *self = Self::#variants (fut);
+                                                                return ::core::task::Poll::Pending;
+                                                            }
+                                                            ::core::task::Poll::Ready(res) => {
+                                                                let (reader, opts) = ::#krate::reader::TakeReader::take_reader(fut);
+                                                                let child = match res {
+                                                                    Ok(child) => child,
+                                                                    Err(e) => {
+                                                                        *self = Self::Done(reader, opts);
+                                                                        return ::core::task::Poll::Ready(Err(e));
+                                                                    }
+                                                                };
+                                                                let child = #children_name::#variants(child);
+                                                                let rest = ::#krate::reader::PollReader::remaining_size(&reader);
+                                                                *self = Self::Seek(child, ::#krate::reader::AsyncSeek::seek(reader, rest), opts);
+                                                            }
+                                                        }
+                                                    }
+                                                )*
+                                                Self::Seek(child, mut fut, opts) => {
+                                                    match ::core::pin::Pin::new(&mut fut).poll(cx) {
+                                                        ::core::task::Poll::Pending => {
+                                                            *self = Self::Seek(child, fut, opts);
+                                                            return ::core::task::Poll::Pending;
+                                                        }
+                                                        ::core::task::Poll::Ready(res) => {
+                                                            let reader = fut.reader;
+                                                            *self = Self::Done(reader, opts);
+                                                            let _ = res?;
+                                                            return ::core::task::Poll::Ready(Ok(child))
+                                                        }
+                                                    }
+                                                }
+                                                Self::Done(..) => panic!("poll after completion"),
+                                                Self::Empty => unreachable!(),
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                        )
+                    }
+                };
+
+                let tag_ty = tag
+                    .map(|tag| tag.ty.clone())
+                    .unwrap_or(syn::parse_quote!(::#KRATE::fourcc::FourCC));
+
                 quote! {
                     #(#attrs)*
-                    pub enum Child<__Offset = usize> {
+                    pub enum #children_name<__Offset = usize> {
                         #(
                             #variants(#variants<__Offset>),
                         )*
-                        Unsupported(::#KRATE::children::UnknownChild<__Offset>),
+                        Unsupported(::#KRATE::children::UnknownChild<__Offset, #tag_ty>),
                     }
 
-                    impl ::#KRATE::parse::Parsed for Child {
-                        type Output<__Offset> = Child<__Offset>;
+                    impl ::#KRATE::parse::Parsed for #children_name {
+                        type Output<__Offset> = #children_name<__Offset>;
                     }
 
-                    impl <__Offset: ::#KRATE::reader::Offset> ::#KRATE::parse::Parse<__Offset> for Child {
-                        fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>>(reader: &mut __Reader, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
-                            let atom = ::#KRATE::atom_header::AtomHeader::parse(reader, opts)?;
-                            let atom_size = atom.size.size()
-                                .map(|size| size.try_into())
-                                .transpose().map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError))?
-                                .unwrap_or(reader.remaining_size());
-
-                            let max_offset = reader.offset() + atom_size;
-                            let mut r = ::#KRATE::reader::TrailingReader::new(&mut*reader, max_offset);
-                            Ok(match atom.fcc {
-                                #(
-                                    <#variants as ::#krate::Atom>::FCC => {
-                                        let atom = <#variants as ::#krate::parse::Parse<__Offset>>::parse(&mut r, opts)?;
-                                        ::#krate::reader::Reader::seek_remaining(&mut r)?;
-                                        Child::#variants(atom)
-                                    }
-                                )*
-                                missed => {
-                                    let extent = ::#krate::reader::Reader::extent(&r);
-                                    ::#krate::reader::Reader::seek_remaining(&mut r)?;
-                                    Child::Unsupported(::#KRATE::children::UnknownChild::new(missed, extent))
-                                }
-                            })
-                        }
-                    }
-
-                    pub enum AsyncChildParse<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
-                        AtomHeader(<::#KRATE::atom_header::AtomHeader as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
-                        #(
-                            #variants(<#variants as ::#krate::parse::AsyncParse<__Offset>>::Fut<'__parse_options, ::#krate::reader::TrailingReader<__Offset, __Reader>>),
-                        )*
-                        Seek(Child<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
-                        Done(::#KRATE::reader::TrailingReader<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
-                        Empty,
-                    }
-
-                    impl <__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<__Offset> for Child {
-                        type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = AsyncChildParse<'__parse_options, __Offset, __Reader>;
-                        fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
-                            AsyncChildParse::AtomHeader(::#KRATE::atom_header::AtomHeader::create_fut(reader, opts))
-                        }
-                    }
-
-                    impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> Future for AsyncChildParse<'__parse_options, __Offset, __Reader> {
-                        type Output = ::core::result::Result<<Child as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError>;
+                    impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> Future for #async_children_name<'__parse_options, __Offset, __Reader> {
+                        type Output = ::core::result::Result<<#children_name as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError>;
                         fn poll(mut self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
                             loop {
                                 let mut this = ::core::mem::replace(&mut*self, Self::Empty);
                                 match this {
-                                    Self::AtomHeader(mut header) => {
-                                        match ::core::pin::Pin::new(&mut header).poll(cx) {
-                                            ::core::task::Poll::Pending => {
-                                                *self = Self::AtomHeader(header);
-                                                return ::core::task::Poll::Pending;
-                                            }
-                                            ::core::task::Poll::Ready(res) => {
-                                                let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(header);
-
-                                                let atom = match res {
-                                                    Ok(atom) => atom,
-                                                    Err(e) => {
-                                                        let max_offset = reader.offset();
-                                                        let reader = ::#KRATE::TrailingReader::new(reader, max_offset);
-                                                        *self = Self::Done(reader, opts);
-                                                        return ::core::task::Poll::Ready(Err(e));
-                                                    }
-                                                };
-
-                                                let atom_size = match atom.size.size()
-                                                    .map(|size| size.try_into())
-                                                    .transpose()
-                                                    .map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError)) {
-                                                        Ok(size) => size,
-                                                        Err(e) => {
-                                                            let max_offset = reader.offset();
-                                                            let reader = ::#KRATE::TrailingReader::new(reader, max_offset);
-                                                            *self = Self::Done(reader, opts);
-                                                            return ::core::task::Poll::Ready(Err(e));
-                                                        }
-                                                    }
-                                                    .unwrap_or(reader.remaining_size());
-
-                                                let max_offset = reader.offset() + atom_size;
-                                                let reader = ::#KRATE::reader::TrailingReader::new(reader, max_offset);
-
-                                                *self = match atom.fcc {
-                                                    #(
-                                                        <#variants as ::#krate::Atom>::FCC => {
-                                                            Self::#variants(<#variants as ::#krate::parse::AsyncParse<__Offset>>::create_fut(reader, opts))
-                                                        }
-                                                    )*
-                                                    u => {
-                                                        let extent = #KRATE::reader::PollReader::extent(&reader);
-                                                        let rest = ::#KRATE::reader::PollReader::remaining_size(&reader);
-                                                        Self::Seek(Child::Unsupported(::#KRATE::children::UnknownChild::new(u, extent)), ::#KRATE::reader::AsyncSeek::seek(reader, rest), opts)
-                                                    }
-                                                };
-                                            }
-                                        }
-                                    }
+                                    #header_parse
                                     #(
                                         Self::#variants(mut fut) => {
                                             match ::core::pin::Pin::new(&mut fut).poll(cx) {
@@ -733,7 +1087,7 @@ impl AtomField {
                                                             return ::core::task::Poll::Ready(Err(e));
                                                         }
                                                     };
-                                                    let child = Child::#variants(child);
+                                                    let child = #children_name::#variants(child);
                                                     let rest = ::#krate::reader::PollReader::remaining_size(&reader);
                                                     *self = Self::Seek(child, ::#krate::reader::AsyncSeek::seek(reader, rest), opts);
                                                 }
@@ -761,43 +1115,17 @@ impl AtomField {
                         }
                     }
 
-                    impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> AsyncChildParse<'__parse_options, __Offset, __Reader> {
-                        pub fn reader(&mut self) -> &mut ::#KRATE::reader::TrailingReader<__Offset, __Reader> {
-                            match self {
-                                Self::Done(reader, _) => reader,
-                                _ => unreachable!("should not be able to access mid future")
-                            }
-                        }
-                    }
-
-                    impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for AsyncChildParse<'__parse_options, __Offset, __Reader> {
-                        fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
-                            match self {
-                                Self::Done(reader, opts) => (reader.reader, opts),
-                                _ => unreachable!("invalid state of AsyncChildParse")
-                            }
-                        }
-                        fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
-                            match self {
-                                Self::AtomHeader(fut) => fut.borrow_reader(),
-                                #(Self::#variants(fut) => {
-                                    let (reader, opts) = fut.borrow_reader();
-                                    (&mut reader.reader, opts)
-                                })*
-                                Self::Seek(_, seek, opts) => (&mut seek.reader.reader, opts),
-                                Self::Done(reader, opts) => (&mut reader.reader, opts),
-                                Self::Empty => unreachable!(),
-                            }
-                        }
-                    }
+                    #parse_impl
                 }
             }
             Self::Conditional(cond) => {
-                let nested_defs = cond.as_async_state(generics, generic_collection, payload_len);
+                let nested_defs =
+                    cond.as_async_state(generics, generic_collection, payload_len, tag);
 
                 match cond.group().unwrap() {
                     GroupedConditionals::Struct { name, fields } => {
                         let payload_len = AtomFields::nested_payload_len(payload_len, &fields);
+                        let tag = AtomFields::nested_tag(tag, &fields);
                         let helper_fns = crate::conditional::ConditionalVariant::format_helper_fns(
                             &name, &fields, generics,
                         );
@@ -819,6 +1147,7 @@ impl AtomField {
                                 generics,
                                 generic_collection,
                                 payload_len.as_ref(),
+                                tag.as_ref(),
                             )
                         });
 
@@ -901,6 +1230,7 @@ impl AtomField {
                         let field_defs = variants.iter().flat_map(|v| {
                             let payload_len =
                                 AtomFields::nested_payload_len(payload_len, &v.fields);
+                            let tag = AtomFields::nested_tag(tag, &v.fields);
                             v.fields.iter().filter_map(move |f| {
                                 f.as_inline_definition(
                                     version,
@@ -908,6 +1238,7 @@ impl AtomField {
                                     generics,
                                     generic_collection,
                                     payload_len.as_ref(),
+                                    tag.as_ref(),
                                 )
                             })
                         });
@@ -1123,6 +1454,9 @@ pub enum StructFieldAttr {
         // #[payload_length(offset = 8)]
         offset: Option<syn::Expr>,
     },
+    // declaration of a tag, which will be used in a #[tagged] field
+    // to parse a variant with the given tag
+    Tag,
     // definition of trailing payload at the end of the atom
     //
     // #[payload]
@@ -1244,6 +1578,8 @@ impl StructFieldAttr {
             };
 
             Self::PayloadLength { offset }
+        } else if path.is_ident("tag") {
+            Self::Tag
         } else if path.is_ident("version") {
             Self::VersionIdentifier
         } else if path.is_ident("condition") {
@@ -1314,6 +1650,11 @@ impl StructFieldAttr {
                     quote! {
                         let #name = ::#KRATE::trailing::Trailing::parse(reader, opts)?;
                     }
+                }
+            }
+            Self::Tag => {
+                quote! {
+                    let _tag = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
                 }
             }
             Self::PayloadLength{..} => {
@@ -1393,6 +1734,7 @@ impl StructFieldAttr {
             | Self::Expected { .. }
             | Self::VersionIdentifier
             | Self::PayloadLength { .. }
+            | Self::Tag
             | Self::Condition => {
                 return None;
             }
@@ -1425,6 +1767,7 @@ impl StructFieldAttr {
             | Self::Expected { .. }
             | Self::VersionIdentifier
             | Self::PayloadLength { .. }
+            | Self::Tag
             | Self::Condition
             | Self::ReuseCondition => return None,
             Self::Normal | Self::Padded { .. } => {
@@ -1499,6 +1842,7 @@ impl StructFieldAttr {
             | Self::Reserved
             | Self::Expected { .. }
             | Self::VersionIdentifier
+            | Self::Tag
             | Self::PayloadLength { .. }
             | Self::Payload { .. }
             | Self::Padded { .. }
@@ -1546,6 +1890,7 @@ impl StructFieldAttr {
             | Self::Reserved
             | Self::Expected { .. }
             | Self::VersionIdentifier
+            | Self::Tag
             | Self::PayloadLength { .. }
             | Self::Payload { .. }
             | Self::Padded { .. }
@@ -1628,9 +1973,66 @@ pub fn format_parse_impl(
 }
 
 #[derive(Clone, Debug)]
+pub enum ChildrenKind {
+    Atom,
+    Tagged {
+        len_from_expr: Option<LenFromExpr>,
+        field_name: syn::Ident,
+        tagged_name: syn::Ident,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct Tag {
+    ty: syn::Type,
+}
+
+#[derive(Clone, Debug)]
 pub struct PayloadLength {
     ty: syn::Type,
     offset: Option<syn::Expr>,
+}
+
+// for fields that use different readers in their sms
+// based on whether or not length is present (e.g Tagged)
+fn reader_from_lengths(
+    len_from_expr: Option<&LenFromExpr>,
+    payload_len: Option<&PayloadLength>,
+) -> proc_macro2::TokenStream {
+    use quote::quote;
+    if len_from_expr.is_some() || payload_len.is_some() {
+        let len = match (len_from_expr, payload_len) {
+            (Some(LenFromExpr { size_expr, .. }), _) => {
+                quote! {
+                    (#size_expr)
+                }
+            }
+            (_, Some(PayloadLength { offset, .. })) => {
+                if let Some(offset) = offset {
+                    quote!(_payload_len.checked_sub(#offset).ok_or(::#KRATE::error::ParseError::AtomSizeTooSmall)?)
+                } else {
+                    quote!(_payload_len)
+                }
+            }
+            _ => unreachable!(),
+        };
+
+        quote! {
+            {
+                let offset = reader.offset();
+                let size: __Offset = #len
+                    .try_into()
+                    .map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError))?;
+
+                let max_offset = offset + size;
+                ::#KRATE::reader::TrailingReader::new(reader, max_offset)
+            }
+        }
+    } else {
+        quote! {
+            reader
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1670,6 +2072,8 @@ pub enum FieldKind<'a> {
     Regular,
     Conditional(&'a Conditionals),
     Condition,
+    Tag,
+    Tagged(Option<&'a LenFromExpr>, &'a [Child], &'a syn::Ident),
 }
 
 impl FieldKind<'_> {
@@ -1680,6 +2084,7 @@ impl FieldKind<'_> {
         mod_name: Option<&proc_macro2::TokenStream>,
         generic_collection: Option<&proc_macro2::TokenStream>,
         payload_len: Option<&PayloadLength>,
+        tag: Option<&Tag>,
     ) -> proc_macro2::TokenStream {
         use quote::quote;
         match self {
@@ -1728,6 +2133,39 @@ impl FieldKind<'_> {
                     unreachable!()
                 }
             }
+            Self::Tagged(expr_len, children, tagged_name) => {
+                let tag_ty = &tag.expect("no tag for given tagged field").ty;
+
+                let reader = reader_from_lengths(*expr_len, payload_len);
+
+                let variants = children.iter().map(|child| &child.name).collect::<Vec<_>>();
+
+                let async_name = quote::format_ident!("Async{}Parse", tagged_name);
+                let parse_name = if expr_len.is_some() || payload_len.is_some() {
+                    quote::format_ident!("{async_name}WithLen")
+                } else {
+                    async_name
+                };
+
+                let krate = &KRATE;
+                quote! {
+                    {
+                        let reader = #reader;
+                        match _tag {
+                            #(
+                                <#variants as #krate::tag::Tag<#tag_ty>>::TAG => {
+                                    #mod_name #parse_name :: #variants (<#variants as ::#krate::parse::AsyncParse<__Offset>>::create_fut(reader, opts))
+                                }
+                            )*
+                            missed => {
+                                let extent = ::#krate::reader::PollReader::extent(&reader);
+                                let rest = ::#KRATE::reader::PollReader::remaining_size(&reader);
+                                #mod_name #parse_name ::Seek(#mod_name #tagged_name::Unsupported(::#KRATE::children::UnknownChild::new(missed, extent)), ::#KRATE::reader::AsyncSeek::seek(reader, rest), opts)
+                            }
+                        }
+                    }
+                }
+            }
             FieldKind::Conditional(cond) => {
                 let enum_name = match cond.group().unwrap() {
                     GroupedConditionals::Enum { name, .. } => {
@@ -1741,6 +2179,7 @@ impl FieldKind<'_> {
                 cond.format_conditional(
                     |name, fields, exhaustive| {
                         let payload_len = AtomFields::nested_payload_len(payload_len, fields);
+                        let tag = AtomFields::nested_tag(tag, fields);
                         let typed = prepare_fields_for_statemachine(
                             fields,
                             generics.clone(),
@@ -1757,6 +2196,7 @@ impl FieldKind<'_> {
                                 mod_name,
                                 generic_collection,
                                 payload_len.as_ref(),
+                                tag.as_ref(),
                             );
 
                             let name = if !exhaustive {
@@ -1842,15 +2282,22 @@ pub fn prepare_fields_for_statemachine<'a>(
                 (name, ty, FieldKind::Regular)
             }
             AtomField::Version { .. } => unreachable!(),
-            AtomField::Children { size_ty, .. } => {
-                let name = syn::Ident::new("children", proc_macro2::Span::call_site());
+            AtomField::Children { size_ty, kind, children } => {
+                match kind {
+                    ChildrenKind::Atom => {
+                        let name = syn::Ident::new("children", proc_macro2::Span::call_site());
 
-                let ty = if let Some(size_ty) = size_ty {
-                    quote!(::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name Child>)
-                } else {
-                    quote!(::#KRATE::children::Children<__Offset, #mod_name Child>)
-                };
-                (name, ty, FieldKind::Regular)
+                        let ty = if let Some(size_ty) = size_ty {
+                            quote!(::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name Child>)
+                        } else {
+                            quote!(::#KRATE::children::Children<__Offset, #mod_name Child>)
+                        };
+                        (name, ty, FieldKind::Regular)
+                    }
+                    ChildrenKind::Tagged { field_name, tagged_name, len_from_expr } => {
+                        (field_name.clone(), quote!(#mod_name #tagged_name), FieldKind::Tagged(len_from_expr.as_ref(), children, tagged_name))
+                    }
+                }
             }
             AtomField::Conditional(cond) => {
                 let name = cond.field_name.clone();
@@ -1864,6 +2311,12 @@ pub fn prepare_fields_for_statemachine<'a>(
                     (name, quote!(#ty), FieldKind::Regular)
                 }
                 StructFieldAttr::VersionIdentifier => unreachable!(),
+                StructFieldAttr::Tag => {
+                    let name = quote::format_ident!("_tag");
+                    let ty = &field.ty;
+
+                    (name, quote!(#ty), FieldKind::Tag)
+                }
                 StructFieldAttr::PayloadLength{ .. } => {
                     let name = quote::format_ident!("_payload_len");
                     let ty = &field.ty;
@@ -1965,6 +2418,7 @@ pub fn format_statemachine_nop_impl(
     mod_name: Option<&proc_macro2::TokenStream>,
     generic_collection: Option<&proc_macro2::TokenStream>,
     payload_len: Option<&PayloadLength>,
+    tag: Option<&Tag>,
     format_state_transition: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream,
 ) -> (
     proc_macro2::TokenStream,
@@ -1974,7 +2428,8 @@ pub fn format_statemachine_nop_impl(
 ) {
     use quote::quote;
     if let Some((name, ty, kind)) = typed_fields.iter().find_map(|f| f.as_ref()) {
-        let next_fut = kind.as_next_fut(ty, generics, mod_name, generic_collection, payload_len);
+        let next_fut =
+            kind.as_next_fut(ty, generics, mod_name, generic_collection, payload_len, tag);
 
         (
             quote! {
@@ -2025,6 +2480,7 @@ pub fn format_variant_state_change<'a>(
     generic_collection: Option<&proc_macro2::TokenStream>,
     root: bool,
     payload_len: Option<&PayloadLength>,
+    tag: Option<&Tag>,
     struct_name: &syn::Ident,
     idx: usize,
     parse_name: &syn::Ident,
@@ -2039,6 +2495,7 @@ pub fn format_variant_state_change<'a>(
     let parent_typed_fields = &typed_fields;
 
     let payload_len = AtomFields::nested_payload_len(payload_len, fields);
+    let tag = AtomFields::nested_tag(tag, fields);
 
     let typed_fields =
         prepare_fields_for_statemachine(fields, generics.clone(), mod_name, payload_len.as_ref());
@@ -2069,6 +2526,7 @@ pub fn format_variant_state_change<'a>(
             let (f, _, kind) = f.as_ref()?;
             match kind {
                 FieldKind::PayloadLength
+                | FieldKind::Tag
                 | FieldKind::Reserved
                 | FieldKind::Expected(_)
                 | FieldKind::Condition => None,
@@ -2108,6 +2566,7 @@ pub fn format_variant_state_change<'a>(
                 parent_typed_fields,
                 idx + 1 + next_pos,
                 payload_len.as_ref(),
+                tag.as_ref(),
                 parse_name,
                 mod_name,
                 generic_collection,
@@ -2131,6 +2590,7 @@ pub fn format_variant_state_change<'a>(
             fields,
             &typed_fields,
             payload_len.as_ref(),
+            tag.as_ref(),
             struct_name,
             &parse_name,
             &generics,
@@ -2206,6 +2666,7 @@ pub fn format_statemachine_fields(
     fields: &[AtomField],
     typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind)>],
     payload_len: Option<&PayloadLength>,
+    tag: Option<&Tag>,
     struct_name: &syn::Ident,
     parse_name: &syn::Ident,
     generics: &syn::Generics,
@@ -2225,6 +2686,7 @@ pub fn format_statemachine_fields(
     let mut borrow_reader_variants = vec![];
 
     let payload_len = AtomFields::nested_payload_len(payload_len, fields);
+    let tag = AtomFields::nested_tag(tag, fields);
 
     for idx in 0..typed_fields.len() {
         let completed = &typed_fields[0..idx];
@@ -2294,6 +2756,15 @@ pub fn format_statemachine_fields(
                     };
                     quote!(#name: ::#KRATE::padded::AsyncPaddedParse<'__parse_options, __Offset, __Reader, #len_ty, #ty>)
                 }
+                FieldKind::Tagged(expr_len, _, tagged_name) => {
+                    let async_name = quote::format_ident!("Async{tagged_name}Parse");
+                    if expr_len.is_some() || payload_len.is_some() {
+                        let with_len = quote::format_ident!("{async_name}WithLen");
+                        quote!(#name: #mod_name #with_len<'__parse_options, __Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>>,)
+                    } else {
+                        quote!(#name: #mod_name #async_name<'__parse_options, __Offset, __Reader>,)
+                    }
+                }
                 FieldKind::Conditional(cond) => {
                     let field_name = &cond.field_name;
                     let parse_name = match cond.group().unwrap() {
@@ -2344,6 +2815,7 @@ pub fn format_statemachine_fields(
                     typed_fields,
                     idx + 1 + next_pos,
                     payload_len.as_ref(),
+                    tag.as_ref(),
                     parse_name,
                     mod_name,
                     generic_collection,
@@ -2413,6 +2885,7 @@ pub fn format_statemachine_fields(
                         generic_collection,
                         root,
                         payload_len.as_ref(),
+                        tag.as_ref(),
                         struct_name,
                         idx,
                         parse_name,
@@ -2463,6 +2936,7 @@ pub fn format_statemachine_fields(
                             generic_collection,
                             root,
                             payload_len.as_ref(),
+                            tag.as_ref(),
                             struct_name,
                             idx,
                             parse_name,
@@ -2562,6 +3036,7 @@ pub fn format_statemachine_next_state(
     typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind)>],
     idx: usize,
     payload_len: Option<&PayloadLength>,
+    tag: Option<&Tag>,
     parse_name: &syn::Ident,
     mod_name: Option<&proc_macro2::TokenStream>,
     generic_collection: Option<&proc_macro2::TokenStream>,
@@ -2585,8 +3060,14 @@ pub fn format_statemachine_next_state(
         Some(name)
     });
 
-    let next_fut =
-        next_kind.as_next_fut(next_ty, generics, mod_name, generic_collection, payload_len);
+    let next_fut = next_kind.as_next_fut(
+        next_ty,
+        generics,
+        mod_name,
+        generic_collection,
+        payload_len,
+        tag,
+    );
     let next_fut = quote! {
         let #next_name = #next_fut;
     };
@@ -2622,8 +3103,10 @@ pub fn format_async_statemachine(
     atom_mod: Option<&syn::Ident>,
     generic_collection: Option<&proc_macro2::TokenStream>,
     payload_len: Option<&PayloadLength>,
+    tag: Option<&Tag>,
 ) -> proc_macro2::TokenStream {
     let payload_len = AtomFields::nested_payload_len(payload_len, fields);
+    let tag = AtomFields::nested_tag(tag, fields);
     let mod_name = atom_mod.map(|name| quote!(#name::));
     let typed_fields = prepare_fields_for_statemachine(
         fields,
@@ -2659,6 +3142,7 @@ pub fn format_async_statemachine(
             fields,
             &typed_fields,
             payload_len.as_ref(),
+            tag.as_ref(),
             struct_name,
             &parse_name,
             &generics,
@@ -2675,6 +3159,7 @@ pub fn format_async_statemachine(
         mod_name.as_ref(),
         generic_collection,
         payload_len.as_ref(),
+        tag.as_ref(),
         &format_state_transition,
     );
 

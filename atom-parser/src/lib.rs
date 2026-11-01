@@ -61,15 +61,11 @@ pub mod bits;
 pub use bits::Bits;
 pub mod padded;
 pub use padded::Padded;
+pub mod tag;
+pub use tag::{Atom, Tag};
 
 pub use atom_parser_derive::make_atom;
 pub use futures_core::Stream as AsyncIterator;
-
-/// used for identifying child atoms
-/// during iteration
-pub trait Atom: Sized {
-    const FCC: FourCC;
-}
 
 /// offset + Size
 #[derive(Debug, Clone, Copy)]
