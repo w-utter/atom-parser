@@ -375,7 +375,28 @@ impl AtomField {
             let _: syn::Token![enum] = input.parse()?;
             let tagged_name: syn::Ident = input.parse()?;
 
-            let len_from_expr = LenFromExpr::parse_from_attr(atom_field_attr)?;
+            let f = || {
+                use syn::Meta;
+                match &atom_field_attr.meta {
+                    Meta::Path(_) => return Ok((false, None)),
+                    Meta::List(list) => {
+                        let parser = |input: syn::parse::ParseStream| {
+                            let fork = input.fork();
+                            if let Ok(path) = fork.parse::<syn::Path>() {
+                                if path.is_ident("skip_seek") {
+                                    let _: syn::Path = input.parse()?;
+                                    return Ok((true, None));
+                                }
+                            }
+                            Ok((false, LenFromExpr::parse_from_attr(atom_field_attr)?))
+                        };
+                        use syn::parse::Parser;
+                        parser.parse2(list.tokens.clone())
+                    }
+                    _ => panic!("unsupported kv meta"),
+                }
+            };
+            let (skip_seek, len_from_expr) = f()?;
 
             let children = input.parse::<ChildList>()?.inner;
             Self::Children {
@@ -385,6 +406,7 @@ impl AtomField {
                     field_name,
                     tagged_name,
                     len_from_expr,
+                    skip_seek,
                 },
             }
         } else if path.is_ident("conditional") {
@@ -593,6 +615,7 @@ impl AtomField {
                         field_name,
                         tagged_name,
                         len_from_expr,
+                        skip_seek,
                     },
                     _,
                 ) => {
@@ -610,6 +633,7 @@ impl AtomField {
                         Some(&mod_name),
                         tagged_name,
                         false,
+                        *skip_seek,
                     );
 
                     quote! {
@@ -780,6 +804,7 @@ impl AtomField {
                             None,
                             &quote::format_ident!("Child"),
                             true,
+                            false,
                         );
                         let async_parse = ChildList::async_parse(
                             &children,
@@ -913,7 +938,7 @@ impl AtomField {
                             },
                         )
                     }
-                    ChildrenKind::Tagged { .. } => {
+                    ChildrenKind::Tagged { skip_seek, .. } => {
                         let async_children_name_with_len =
                             quote::format_ident!("{async_children_name}WithLen");
                         let async_sm = ChildList::async_statemachine(&children, version, false);
@@ -923,8 +948,12 @@ impl AtomField {
                             ChildList::borrow_reader_variants(&children, version, false);
                         let borrow_reader_variants_with_len =
                             ChildList::borrow_reader_variants(&children, version, true);
-                        let sm_poll =
-                            ChildList::async_statemachine_poll(&children, version, &children_name);
+                        let sm_poll = ChildList::async_statemachine_poll(
+                            &children,
+                            version,
+                            &children_name,
+                            *skip_seek,
+                        );
                         (
                             None,
                             quote! {
@@ -1020,8 +1049,18 @@ impl AtomField {
                     .unwrap_or(syn::parse_quote!(::#KRATE::fourcc::FourCC));
 
                 let tagged_variants = ChildList::tagged_variants(&children, version);
-                let sm_poll =
-                    ChildList::async_statemachine_poll(&children, version, &children_name);
+
+                let seek_skip = match kind {
+                    ChildrenKind::Atom => false,
+                    ChildrenKind::Tagged { skip_seek, .. } => *skip_seek,
+                };
+
+                let sm_poll = ChildList::async_statemachine_poll(
+                    &children,
+                    version,
+                    &children_name,
+                    seek_skip,
+                );
 
                 quote! {
                     #(#attrs)*
@@ -1927,6 +1966,7 @@ pub enum ChildrenKind {
         len_from_expr: Option<LenFromExpr>,
         field_name: syn::Ident,
         tagged_name: syn::Ident,
+        skip_seek: bool,
     },
 }
 
@@ -2241,7 +2281,7 @@ pub fn prepare_fields_for_statemachine<'a>(
                         };
                         (name, ty, FieldKind::Regular)
                     }
-                    ChildrenKind::Tagged { field_name, tagged_name, len_from_expr } => {
+                    ChildrenKind::Tagged { field_name, tagged_name, len_from_expr, .. } => {
                         (field_name.clone(), quote!(#mod_name #tagged_name), FieldKind::Tagged(len_from_expr.as_ref(), children, tagged_name))
                     }
                 }

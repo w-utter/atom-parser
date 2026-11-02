@@ -166,9 +166,15 @@ impl ChildList {
         mod_name: Option<&proc_macro2::TokenStream>,
         tagged_name: &syn::Ident,
         atom: bool,
+        skip_seek: bool,
     ) -> Vec<proc_macro2::TokenStream> {
+        assert!(!(atom && skip_seek));
         use quote::quote;
         let mod_name = mod_name.map(|m| quote!(#m ::));
+
+        let seek =
+            (!skip_seek).then(|| quote!(::#KRATE::reader::Reader::seek_remaining(&mut reader)?;));
+
         Self::filter_by_version(children, version)
         .enumerate()
         .map(|(i, child)| {
@@ -178,7 +184,7 @@ impl ChildList {
             quote!{
                 #tag => {
                     let tagged = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(&mut reader, opts)?;
-                    ::#KRATE::reader::Reader::seek_remaining(&mut reader)?;
+                    #seek
                     #mod_name #tagged_name::#name(tagged)
                 }
             }
@@ -284,36 +290,49 @@ impl ChildList {
         children: &[Child],
         version: Option<&syn::LitInt>,
         children_name: &syn::Ident,
+        skip_seek: bool,
     ) -> Vec<proc_macro2::TokenStream> {
         use quote::quote;
 
-        Self::filter_by_version(children, version)
-        .map(|child| {
-            let name = &child.name;
-
+        let state_transition = if skip_seek {
             quote! {
-                Self::#name(mut fut) => {
-                    match ::core::pin::Pin::new(&mut fut).poll(cx) {
-                        ::core::task::Poll::Pending => {
-                            *self = Self::#name (fut);
-                            return ::core::task::Poll::Pending;
-                        }
-                        ::core::task::Poll::Ready(res) => {
-                            let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(fut);
-                            let child = match res {
-                                Ok(child) => child,
-                                Err(e) => {
-                                    *self = Self::Done(reader, opts);
-                                    return ::core::task::Poll::Ready(Err(e));
-                                }
-                            };
-                            let child = #children_name::#name(child);
-                            let rest = ::#KRATE::reader::PollReader::remaining_size(&reader);
-                            *self = Self::Seek(child, ::#KRATE::reader::AsyncSeek::seek(reader, rest), opts);
+                *self = Self::Done(reader, opts);
+                return ::core::task::Poll::Ready(Ok(child))
+            }
+        } else {
+            quote! {
+                let rest = ::#KRATE::reader::PollReader::remaining_size(&reader);
+                *self = Self::Seek(child, ::#KRATE::reader::AsyncSeek::seek(reader, rest), opts);
+            }
+        };
+
+        Self::filter_by_version(children, version)
+            .map(|child| {
+                let name = &child.name;
+
+                quote! {
+                    Self::#name(mut fut) => {
+                        match ::core::pin::Pin::new(&mut fut).poll(cx) {
+                            ::core::task::Poll::Pending => {
+                                *self = Self::#name (fut);
+                                return ::core::task::Poll::Pending;
+                            }
+                            ::core::task::Poll::Ready(res) => {
+                                let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(fut);
+                                let child = match res {
+                                    Ok(child) => child,
+                                    Err(e) => {
+                                        *self = Self::Done(reader, opts);
+                                        return ::core::task::Poll::Ready(Err(e));
+                                    }
+                                };
+                                let child = #children_name::#name(child);
+                                #state_transition
+                            }
                         }
                     }
                 }
-            }
-        }).collect()
+            })
+            .collect()
     }
 }

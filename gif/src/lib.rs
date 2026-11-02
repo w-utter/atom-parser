@@ -48,48 +48,33 @@ impl Header {
         (self.aspect_ratio as f64 + 15.) / 64.
     }
 }
+
 make_atom! {
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Clone, Copy)]
     #[enum_repr(u8)]
     enum SegmentKind {
         Extension = 0x21,
         ImageBlock = 0x2c,
         Trailer = 0x3b,
     }
+}
 
+make_atom! {
     #[derive(Debug)]
     struct Segment {
-        #[condition]
+        #[tag]
         kind: SegmentKind,
-        #[conditional(Segment)]
-        segment: {
-            match kind {
-                SegmentKind::Extension => {
-                    Extension {
-                        extension: ExtensionBlock,
-                    }
-                }
-                SegmentKind::ImageBlock => {
-                    Image {
-                        image: ImageBlock,
-                    }
-                }
-                SegmentKind::Trailer => {
-                    Trailer {
-                        trailer: TrailerBlock,
-                    }
-                }
-                SegmentKind::Unknown(_) => {
-                    Unknown {
-                        #[reuse_condition]
-                        kind: SegmentKind,
-                    }
-                }
-            }
+        #[tagged(skip_seek)]
+        segment: enum Segment {
+            ExtensionBlock,
+            ImageBlock,
+            Trailer,
         }
     }
+}
 
-    #[derive(Debug)]
+make_atom! {
+    #[derive(Debug, PartialEq, Clone, Copy)]
     #[enum_repr(u8)]
     enum ExtensionKind {
         GraphicsControl = 0xf9,
@@ -117,60 +102,61 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[tag(SegmentKind, SegmentKind::Extension)]
     struct ExtensionBlock {
-        #[condition]
+        #[tag]
         kind: ExtensionKind,
-        #[conditional(Extension)]
-        extension: {
-            match kind {
-                ExtensionKind::GraphicsControl => {
-                    GraphicsControl {
-                        #[expected(0x04)]
-                        block_size: u8,
-                        packed: GraphicsControlPacked,
-                        delay_cs: u16,
-                        transparent_color_idx: u8,
-                        #[expected(0x00)]
-                        terminator: u8,
-                    }
-                }
-                ExtensionKind::Plaintext => {
-                    Plaintext {
-                        #[expected(0x0c)]
-                        block_size: u8,
-                        text_left: u16,
-                        text_top: u16,
-                        text_width: u16,
-                        text_height: u16,
-                        cell_width: u16,
-                        cell_height: u16,
-                        text_fg_idx: u8,
-                        text_bg_idx: u8,
-                        data: SubBlocks,
-                    }
-                }
-                ExtensionKind::Application => {
-                    Application {
-                        #[expected(0x0b)]
-                        block_size: u8,
-                        identifier: [u8; 8],
-                        authentication_code: [u8; 3],
-                        data: SubBlocks,
-                    }
-                }
-                ExtensionKind::Comment => {
-                    Comment {
-                        data: SubBlocks,
-                    }
-                }
-                ExtensionKind::Unknown(_) => {
-                    Unknown {
-                        #[reuse_condition]
-                        kind: ExtensionKind,
-                    }
-                }
-            }
+        #[tagged(skip_seek)]
+        extension: enum Extension {
+            GraphicsControl,
+            Plaintext,
+            Application,
+            Comment,
         }
+    }
+
+    #[derive(Debug)]
+    #[tag(ExtensionKind, ExtensionKind::GraphicsControl)]
+    struct GraphicsControl {
+        #[expected(0x04)]
+        block_size: u8,
+        packed: GraphicsControlPacked,
+        delay_cs: u16,
+        transparent_color_idx: u8,
+        #[expected(0x00)]
+        terminator: u8,
+    }
+
+    #[derive(Debug)]
+    #[tag(ExtensionKind, ExtensionKind::Plaintext)]
+    struct Plaintext {
+        #[expected(0x0c)]
+        block_size: u8,
+        text_left: u16,
+        text_top: u16,
+        text_width: u16,
+        text_height: u16,
+        cell_width: u16,
+        cell_height: u16,
+        text_fg_idx: u8,
+        text_bg_idx: u8,
+        data: SubBlocks,
+    }
+
+    #[derive(Debug)]
+    #[tag(ExtensionKind, ExtensionKind::Application)]
+    struct Application {
+        #[expected(0x0b)]
+        block_size: u8,
+        identifier: [u8; 8],
+        authentication_code: [u8; 3],
+        data: SubBlocks,
+    }
+
+    #[derive(Debug)]
+    #[tag(ExtensionKind, ExtensionKind::Comment)]
+    struct Comment {
+        data: SubBlocks,
     }
 
     #[bitfield_repr(u8)]
@@ -200,6 +186,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[tag(SegmentKind, SegmentKind::ImageBlock)]
     struct ImageBlock {
         header: ImageHeader,
         lzw_min_code_size: u8,
@@ -207,7 +194,8 @@ make_atom! {
     }
 
     #[derive(Debug)]
-    struct TrailerBlock {
+    #[tag(SegmentKind, SegmentKind::Trailer)]
+    struct Trailer {
 
     }
 }
@@ -222,7 +210,7 @@ impl LocalImageDescriptor {
     }
 }
 
-impl<O> extension_block::GraphicsControl<O> {
+impl<O> GraphicsControl<O> {
     pub fn transparent_color_index(&self) -> Option<u8> {
         if self.packed.transparent_color() {
             Some(self.transparent_color_idx)
@@ -338,7 +326,7 @@ fn gif() {
         use segment::Segment;
         let r = segment_iter.reader();
         match segment.unwrap().segment {
-            Segment::Extension(segment::Extension { extension, .. }) => {
+            Segment::ExtensionBlock(extension) => {
                 use extension_block::Extension;
                 match extension.extension {
                     Extension::GraphicsControl(ctrl) => {
@@ -362,11 +350,11 @@ fn gif() {
                         let str = String::from_utf8_lossy(&comment);
                         println!("comment: {str:?}");
                     }
-                    Extension::Unknown(_) => panic!("unknown extension"),
+                    Extension::Unsupported(_) => panic!("unknown extension"),
                 }
             }
-            Segment::Image(img) => {
-                let image_data = img.image.data.read_into(r, &opts).unwrap();
+            Segment::ImageBlock(img) => {
+                let image_data = img.data.read_into(r, &opts).unwrap();
                 println!(
                     "image: {img:?}, data: {image_data:?} (len: {})",
                     image_data.len()
@@ -380,7 +368,7 @@ fn gif() {
                     panic!("more data after trailer")
                 }
             }
-            Segment::Unknown(_) => panic!(),
+            Segment::Unsupported(_) => panic!(),
         }
     }
 
@@ -418,7 +406,7 @@ async fn gif_async() {
         let r = segment_iter.reader();
 
         match segment.unwrap().segment {
-            Segment::Extension(segment::Extension { extension, .. }) => {
+            Segment::ExtensionBlock(extension) => {
                 use extension_block::Extension;
                 match extension.extension {
                     Extension::GraphicsControl(ctrl) => {
@@ -442,11 +430,11 @@ async fn gif_async() {
                         let str = String::from_utf8_lossy(&comment);
                         println!("comment: {str:?}");
                     }
-                    Extension::Unknown(_) => panic!("unknown extension"),
+                    Extension::Unsupported(_) => panic!("unknown extension"),
                 }
             }
-            Segment::Image(img) => {
-                let image_data = img.image.data.read_into_async(r, &opts).await.unwrap();
+            Segment::ImageBlock(img) => {
+                let image_data = img.data.read_into_async(r, &opts).await.unwrap();
                 println!(
                     "image: {img:?}, data: {image_data:?} (len: {})",
                     image_data.len()
@@ -460,7 +448,7 @@ async fn gif_async() {
                     panic!("more data after trailer")
                 }
             }
-            Segment::Unknown(_) => panic!(),
+            Segment::Unsupported(_) => panic!(),
         }
     }
 
