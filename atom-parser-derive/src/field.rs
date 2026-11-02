@@ -598,37 +598,25 @@ impl AtomField {
                 ) => {
                     let reader = reader_from_lengths(len_from_expr.as_ref(), payload_len);
 
-                    let variants = children
-                        .iter()
-                        .filter_map(|child| {
-                            if let Some(v) = version {
-                                if !child.version_num.is_empty() && !child.version_num.contains(v) {
-                                    return None;
-                                }
-                            } else if !child.version_num.is_empty() {
-                                panic!("child version but no version identifier");
-                            }
-                            Some(&child.name)
-                        })
-                        .collect::<Vec<_>>();
-
                     let tag_ty = &tag.expect("no tag for tagged").ty;
-                    let krate = &KRATE;
+
+                    let sync_parse = ChildList::sync_parse(
+                        &children,
+                        version,
+                        tag_ty,
+                        Some(&mod_name),
+                        tagged_name,
+                        false,
+                    );
 
                     quote! {
                         let #field_name = {
                             let mut reader = #reader;
                             match _tag {
-                                #(
-                                    <#variants as #krate::tag::Tag<#tag_ty>>::TAG => {
-                                        let atom = <#variants as ::#krate::parse::Parse<__Offset>>::parse(&mut reader, opts)?;
-                                        ::#krate::reader::Reader::seek_remaining(&mut reader)?;
-                                        #mod_name :: #tagged_name::#variants(atom)
-                                    }
-                                )*
+                                #(#sync_parse)*
                                 missed => {
-                                    let extent = ::#krate::reader::Reader::extent(&reader);
-                                    ::#krate::reader::Reader::seek_remaining(&mut reader)?;
+                                    let extent = ::#KRATE::reader::Reader::extent(&reader);
+                                    ::#KRATE::reader::Reader::seek_remaining(&mut reader)?;
                                     #mod_name :: #tagged_name::Unsupported(::#KRATE::children::UnknownChild::new(missed, extent))
                                 }
                             }
@@ -773,174 +761,169 @@ impl AtomField {
                     ChildrenKind::Tagged { tagged_name, .. } => tagged_name.clone(),
                 };
 
-                let variants = children
-                    .iter()
-                    .filter_map(|child| {
-                        if let Some(v) = version {
-                            if !child.version_num.is_empty() && !child.version_num.contains(v) {
-                                return None;
-                            }
-                        } else if !child.version_num.is_empty() {
-                            panic!("child version but no version identifier");
-                        }
-                        Some(&child.name)
-                    })
-                    .collect::<Vec<_>>();
-
-                let krate = &KRATE;
-
                 let async_children_name = quote::format_ident!("Async{}Parse", children_name);
                 let (header_parse, parse_impl) = match kind {
-                    ChildrenKind::Atom => (
-                        Some(quote! {
-                            Self::AtomHeader(mut header) => {
-                                match ::core::pin::Pin::new(&mut header).poll(cx) {
-                                    ::core::task::Poll::Pending => {
-                                        *self = Self::AtomHeader(header);
-                                        return ::core::task::Poll::Pending;
-                                    }
-                                    ::core::task::Poll::Ready(res) => {
-                                        let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(header);
+                    ChildrenKind::Atom => {
+                        let sync_parse = ChildList::sync_parse(
+                            &children,
+                            version,
+                            &syn::parse_quote!(::#KRATE::fourcc::FourCC),
+                            None,
+                            &quote::format_ident!("Child"),
+                            true,
+                        );
+                        let async_parse = ChildList::async_parse(
+                            &children,
+                            version,
+                            &syn::parse_quote!(::#KRATE::fourcc::FourCC),
+                            None,
+                            &quote::format_ident!("Self"),
+                            true,
+                        );
+                        let async_sm = ChildList::async_statemachine(&children, version, true);
+                        let borrow_reader_variants =
+                            ChildList::borrow_reader_variants(&children, version, true);
+                        (
+                            Some(quote! {
+                                Self::AtomHeader(mut header) => {
+                                    match ::core::pin::Pin::new(&mut header).poll(cx) {
+                                        ::core::task::Poll::Pending => {
+                                            *self = Self::AtomHeader(header);
+                                            return ::core::task::Poll::Pending;
+                                        }
+                                        ::core::task::Poll::Ready(res) => {
+                                            let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(header);
 
-                                        let atom = match res {
-                                            Ok(atom) => atom,
-                                            Err(e) => {
-                                                let max_offset = reader.offset();
-                                                let reader = ::#KRATE::reader::TrailingReader::new(reader, max_offset);
-                                                *self = Self::Done(reader, opts);
-                                                return ::core::task::Poll::Ready(Err(e));
-                                            }
-                                        };
-
-                                        let atom_size = match atom.size.size()
-                                            .map(|size| size.try_into())
-                                            .transpose()
-                                            .map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError)) {
-                                                Ok(size) => size,
+                                            let atom = match res {
+                                                Ok(atom) => atom,
                                                 Err(e) => {
                                                     let max_offset = reader.offset();
                                                     let reader = ::#KRATE::reader::TrailingReader::new(reader, max_offset);
                                                     *self = Self::Done(reader, opts);
                                                     return ::core::task::Poll::Ready(Err(e));
                                                 }
-                                            }
+                                            };
+
+                                            let atom_size = match atom.size.size()
+                                                .map(|size| size.try_into())
+                                                .transpose()
+                                                .map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError)) {
+                                                    Ok(size) => size,
+                                                    Err(e) => {
+                                                        let max_offset = reader.offset();
+                                                        let reader = ::#KRATE::reader::TrailingReader::new(reader, max_offset);
+                                                        *self = Self::Done(reader, opts);
+                                                        return ::core::task::Poll::Ready(Err(e));
+                                                    }
+                                                }
+                                                .unwrap_or(reader.remaining_size());
+
+                                            let max_offset = reader.offset() + atom_size;
+                                            let reader = ::#KRATE::reader::TrailingReader::new(reader, max_offset);
+
+                                            *self = match atom.fcc {
+                                                #(#async_parse)*
+                                                u => {
+                                                    let extent = #KRATE::reader::PollReader::extent(&reader);
+                                                    let rest = ::#KRATE::reader::PollReader::remaining_size(&reader);
+                                                    Self::Seek(Child::Unsupported(::#KRATE::children::UnknownChild::new(u, extent)), ::#KRATE::reader::AsyncSeek::seek(reader, rest), opts)
+                                                }
+                                            };
+                                        }
+                                    }
+                                }
+                            }),
+                            quote! {
+                                impl <__Offset: ::#KRATE::reader::Offset> ::#KRATE::parse::Parse<__Offset> for Child {
+                                    fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>>(reader: &mut __Reader, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
+                                        let atom = ::#KRATE::atom_header::AtomHeader::parse(reader, opts)?;
+                                        let atom_size = atom.size.size()
+                                            .map(|size| size.try_into())
+                                            .transpose().map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError))?
                                             .unwrap_or(reader.remaining_size());
 
                                         let max_offset = reader.offset() + atom_size;
-                                        let reader = ::#KRATE::reader::TrailingReader::new(reader, max_offset);
-
-                                        *self = match atom.fcc {
-                                            #(
-                                                <#variants as ::#krate::tag::Atom>::FCC => {
-                                                    Self::#variants(<#variants as ::#krate::parse::AsyncParse<__Offset>>::create_fut(reader, opts))
-                                                }
-                                            )*
-                                            u => {
-                                                let extent = #KRATE::reader::PollReader::extent(&reader);
-                                                let rest = ::#KRATE::reader::PollReader::remaining_size(&reader);
-                                                Self::Seek(Child::Unsupported(::#KRATE::children::UnknownChild::new(u, extent)), ::#KRATE::reader::AsyncSeek::seek(reader, rest), opts)
+                                        let mut reader = ::#KRATE::reader::TrailingReader::new(&mut*reader, max_offset);
+                                        Ok(match atom.fcc {
+                                            #(#sync_parse)*
+                                            missed => {
+                                                let extent = ::#KRATE::reader::Reader::extent(&reader);
+                                                ::#KRATE::reader::Reader::seek_remaining(&mut reader)?;
+                                                Child::Unsupported(::#KRATE::children::UnknownChild::new(missed, extent))
                                             }
-                                        };
+                                        })
                                     }
                                 }
-                            }
-                        }),
-                        quote! {
-                            impl <__Offset: ::#KRATE::reader::Offset> ::#KRATE::parse::Parse<__Offset> for Child {
-                                fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>>(reader: &mut __Reader, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
-                                    let atom = ::#KRATE::atom_header::AtomHeader::parse(reader, opts)?;
-                                    let atom_size = atom.size.size()
-                                        .map(|size| size.try_into())
-                                        .transpose().map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError))?
-                                        .unwrap_or(reader.remaining_size());
 
-                                    let max_offset = reader.offset() + atom_size;
-                                    let mut r = ::#KRATE::reader::TrailingReader::new(&mut*reader, max_offset);
-                                    Ok(match atom.fcc {
-                                        #(
-                                            <#variants as ::#krate::tag::Atom>::FCC => {
-                                                let atom = <#variants as ::#krate::parse::Parse<__Offset>>::parse(&mut r, opts)?;
-                                                ::#krate::reader::Reader::seek_remaining(&mut r)?;
-                                                Child::#variants(atom)
-                                            }
-                                        )*
-                                        missed => {
-                                            let extent = ::#krate::reader::Reader::extent(&r);
-                                            ::#krate::reader::Reader::seek_remaining(&mut r)?;
-                                            Child::Unsupported(::#KRATE::children::UnknownChild::new(missed, extent))
+                                pub enum AsyncChildParse<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
+                                    AtomHeader(<::#KRATE::atom_header::AtomHeader as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
+                                    #(#async_sm)*
+                                    Seek(Child<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                    Done(::#KRATE::reader::TrailingReader<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                    Empty,
+                                }
+
+                                impl <__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<__Offset> for Child {
+                                    type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = AsyncChildParse<'__parse_options, __Offset, __Reader>;
+                                    fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
+                                        AsyncChildParse::AtomHeader(::#KRATE::atom_header::AtomHeader::create_fut(reader, opts))
+                                    }
+                                }
+
+                                impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> AsyncChildParse<'__parse_options, __Offset, __Reader> {
+                                    pub fn reader(&mut self) -> &mut ::#KRATE::reader::TrailingReader<__Offset, __Reader> {
+                                        match self {
+                                            Self::Done(reader, _) => reader,
+                                            _ => unreachable!("should not be able to access mid future")
                                         }
-                                    })
-                                }
-                            }
-
-                            pub enum AsyncChildParse<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
-                                AtomHeader(<::#KRATE::atom_header::AtomHeader as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
-                                #(
-                                    #variants(<#variants as ::#krate::parse::AsyncParse<__Offset>>::Fut<'__parse_options, ::#krate::reader::TrailingReader<__Offset, __Reader>>),
-                                )*
-                                Seek(Child<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
-                                Done(::#KRATE::reader::TrailingReader<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
-                                Empty,
-                            }
-
-                            impl <__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<__Offset> for Child {
-                                type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = AsyncChildParse<'__parse_options, __Offset, __Reader>;
-                                fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
-                                    AsyncChildParse::AtomHeader(::#KRATE::atom_header::AtomHeader::create_fut(reader, opts))
-                                }
-                            }
-
-                            impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> AsyncChildParse<'__parse_options, __Offset, __Reader> {
-                                pub fn reader(&mut self) -> &mut ::#KRATE::reader::TrailingReader<__Offset, __Reader> {
-                                    match self {
-                                        Self::Done(reader, _) => reader,
-                                        _ => unreachable!("should not be able to access mid future")
                                     }
                                 }
-                            }
 
-                            impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for AsyncChildParse<'__parse_options, __Offset, __Reader> {
-                                fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
-                                    match self {
-                                        Self::Done(reader, opts) => (reader.reader, opts),
-                                        _ => unreachable!("invalid state of AsyncChildParse")
+                                impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for AsyncChildParse<'__parse_options, __Offset, __Reader> {
+                                    fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                        match self {
+                                            Self::Done(reader, opts) => (reader.reader, opts),
+                                            _ => unreachable!("invalid state of AsyncChildParse")
+                                        }
+                                    }
+                                    fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                        match self {
+                                            Self::AtomHeader(fut) => fut.borrow_reader(),
+                                            #(#borrow_reader_variants)*
+                                            Self::Seek(_, seek, opts) => (&mut seek.reader.reader, opts),
+                                            Self::Done(reader, opts) => (&mut reader.reader, opts),
+                                            Self::Empty => unreachable!(),
+                                        }
                                     }
                                 }
-                                fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
-                                    match self {
-                                        Self::AtomHeader(fut) => fut.borrow_reader(),
-                                        #(Self::#variants(fut) => {
-                                            let (reader, opts) = fut.borrow_reader();
-                                            (&mut reader.reader, opts)
-                                        })*
-                                        Self::Seek(_, seek, opts) => (&mut seek.reader.reader, opts),
-                                        Self::Done(reader, opts) => (&mut reader.reader, opts),
-                                        Self::Empty => unreachable!(),
-                                    }
-                                }
-                            }
-                        },
-                    ),
+                            },
+                        )
+                    }
                     ChildrenKind::Tagged { .. } => {
                         let async_children_name_with_len =
                             quote::format_ident!("{async_children_name}WithLen");
+                        let async_sm = ChildList::async_statemachine(&children, version, false);
+                        let async_sm_with_len =
+                            ChildList::async_statemachine(&children, version, false);
+                        let borrow_reader_variants =
+                            ChildList::borrow_reader_variants(&children, version, false);
+                        let borrow_reader_variants_with_len =
+                            ChildList::borrow_reader_variants(&children, version, true);
+                        let sm_poll =
+                            ChildList::async_statemachine_poll(&children, version, &children_name);
                         (
                             None,
                             quote! {
                                 pub enum #async_children_name<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
-                                    #(
-                                        #variants(<#variants as #krate::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
-                                    )*
-                                    Seek(<#children_name as #KRATE::parse::Parsed>::Output<__Offset>, ::#krate::reader::AsyncSeek<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                    #(#async_sm)*
+                                    Seek(<#children_name as #KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
                                     Done(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions),
                                     Empty,
                                 }
 
                                 pub enum #async_children_name_with_len<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
-                                    #(
-                                        #variants(<#variants as #krate::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
-                                    )*
-                                    Seek(<#children_name as #KRATE::parse::Parsed>::Output<__Offset>, ::#krate::reader::AsyncSeek<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                    #(#async_sm_with_len)*
+                                    Seek(<#children_name as #KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
                                     Done(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions),
                                     Empty,
                                 }
@@ -954,9 +937,7 @@ impl AtomField {
                                     }
                                     fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                                         match self {
-                                            #(
-                                                Self::#variants(fut) => fut.borrow_reader(),
-                                            )*
+                                            #(#borrow_reader_variants)*
                                             Self::Seek(_, seek, opts) => (&mut seek.reader, opts),
                                             Self::Done(reader, opts) => (reader, opts),
                                             Self::Empty => unreachable!(),
@@ -973,12 +954,7 @@ impl AtomField {
                                     }
                                     fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
                                         match self {
-                                            #(
-                                                Self::#variants(fut) => {
-                                                    let (reader, opts) = fut.borrow_reader();
-                                                    (&mut reader.reader, opts)
-                                                }
-                                            )*
+                                            #(#borrow_reader_variants_with_len)*
                                             Self::Seek(_, seek, opts) => (&mut seek.reader.reader, opts),
                                             Self::Done(reader, opts) => (&mut reader.reader, opts),
                                             Self::Empty => unreachable!(),
@@ -999,29 +975,7 @@ impl AtomField {
                                         loop {
                                             let mut this = ::core::mem::replace(&mut*self, Self::Empty);
                                             match this {
-                                                #(
-                                                    Self::#variants(mut fut) => {
-                                                        match ::core::pin::Pin::new(&mut fut).poll(cx) {
-                                                            ::core::task::Poll::Pending => {
-                                                                *self = Self::#variants (fut);
-                                                                return ::core::task::Poll::Pending;
-                                                            }
-                                                            ::core::task::Poll::Ready(res) => {
-                                                                let (reader, opts) = ::#krate::reader::TakeReader::take_reader(fut);
-                                                                let child = match res {
-                                                                    Ok(child) => child,
-                                                                    Err(e) => {
-                                                                        *self = Self::Done(reader, opts);
-                                                                        return ::core::task::Poll::Ready(Err(e));
-                                                                    }
-                                                                };
-                                                                let child = #children_name::#variants(child);
-                                                                let rest = ::#krate::reader::PollReader::remaining_size(&reader);
-                                                                *self = Self::Seek(child, ::#krate::reader::AsyncSeek::seek(reader, rest), opts);
-                                                            }
-                                                        }
-                                                    }
-                                                )*
+                                                #(#sm_poll)*
                                                 Self::Seek(child, mut fut, opts) => {
                                                     match ::core::pin::Pin::new(&mut fut).poll(cx) {
                                                         ::core::task::Poll::Pending => {
@@ -1051,12 +1005,14 @@ impl AtomField {
                     .map(|tag| tag.ty.clone())
                     .unwrap_or(syn::parse_quote!(::#KRATE::fourcc::FourCC));
 
+                let tagged_variants = ChildList::tagged_variants(&children, version);
+                let sm_poll =
+                    ChildList::async_statemachine_poll(&children, version, &children_name);
+
                 quote! {
                     #(#attrs)*
                     pub enum #children_name<__Offset = usize> {
-                        #(
-                            #variants(#variants<__Offset>),
-                        )*
+                        #(#tagged_variants)*
                         Unsupported(::#KRATE::children::UnknownChild<__Offset, #tag_ty>),
                     }
 
@@ -1071,29 +1027,7 @@ impl AtomField {
                                 let mut this = ::core::mem::replace(&mut*self, Self::Empty);
                                 match this {
                                     #header_parse
-                                    #(
-                                        Self::#variants(mut fut) => {
-                                            match ::core::pin::Pin::new(&mut fut).poll(cx) {
-                                                ::core::task::Poll::Pending => {
-                                                    *self = Self::#variants (fut);
-                                                    return ::core::task::Poll::Pending;
-                                                }
-                                                ::core::task::Poll::Ready(res) => {
-                                                    let (reader, opts) = ::#krate::reader::TakeReader::take_reader(fut);
-                                                    let child = match res {
-                                                        Ok(child) => child,
-                                                        Err(e) => {
-                                                            *self = Self::Done(reader, opts);
-                                                            return ::core::task::Poll::Ready(Err(e));
-                                                        }
-                                                    };
-                                                    let child = #children_name::#variants(child);
-                                                    let rest = ::#krate::reader::PollReader::remaining_size(&reader);
-                                                    *self = Self::Seek(child, ::#krate::reader::AsyncSeek::seek(reader, rest), opts);
-                                                }
-                                            }
-                                        }
-                                    )*
+                                    #(#sm_poll)*
                                     Self::Seek(child, mut fut, opts) => {
                                         match ::core::pin::Pin::new(&mut fut).poll(cx) {
                                             ::core::task::Poll::Pending => {
@@ -2138,8 +2072,6 @@ impl FieldKind<'_> {
 
                 let reader = reader_from_lengths(*expr_len, payload_len);
 
-                let variants = children.iter().map(|child| &child.name).collect::<Vec<_>>();
-
                 let async_name = quote::format_ident!("Async{}Parse", tagged_name);
                 let parse_name = if expr_len.is_some() || payload_len.is_some() {
                     quote::format_ident!("{async_name}WithLen")
@@ -2147,18 +2079,15 @@ impl FieldKind<'_> {
                     async_name
                 };
 
-                let krate = &KRATE;
+                let async_parse =
+                    ChildList::async_parse(children, None, tag_ty, mod_name, &parse_name, false);
                 quote! {
                     {
                         let reader = #reader;
                         match _tag {
-                            #(
-                                <#variants as #krate::tag::Tag<#tag_ty>>::TAG => {
-                                    #mod_name #parse_name :: #variants (<#variants as ::#krate::parse::AsyncParse<__Offset>>::create_fut(reader, opts))
-                                }
-                            )*
+                            #(#async_parse)*
                             missed => {
-                                let extent = ::#krate::reader::PollReader::extent(&reader);
+                                let extent = ::#KRATE::reader::PollReader::extent(&reader);
                                 let rest = ::#KRATE::reader::PollReader::remaining_size(&reader);
                                 #mod_name #parse_name ::Seek(#mod_name #tagged_name::Unsupported(::#KRATE::children::UnknownChild::new(missed, extent)), ::#KRATE::reader::AsyncSeek::seek(reader, rest), opts)
                             }
