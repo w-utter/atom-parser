@@ -3,24 +3,34 @@ pub struct FourCC([u8; 4]);
 
 impl FourCC {
     pub fn from_syn(attr: syn::Attribute) -> syn::parse::Result<Self> {
-        let val = if let Ok(bstr) = attr.parse_args::<syn::LitByteStr>() {
-            let bstr = bstr.value();
-            if bstr.len() != 4 {
-                panic!("fcc must be 4 characters")
-            }
-            let b = bstr;
-            [b[0], b[1], b[2], b[3]]
-        } else if let Ok(str) = attr.parse_args::<syn::LitStr>() {
-            let str = str.value();
-            if str.len() != 4 {
-                panic!("fcc must be 4 characters")
-            }
-            let b = str.into_bytes();
-            [b[0], b[1], b[2], b[3]]
-        } else if let Ok(int) = attr.parse_args::<syn::LitInt>() {
-            int.base10_parse::<u32>()?.to_be_bytes()
-        } else {
-            panic!("unknown repr for fourcc")
+        let expr = attr.parse_args::<syn::Expr>()?;
+        Self::from_expr(expr)
+    }
+
+    pub(crate) fn from_expr(expr: syn::Expr) -> syn::parse::Result<Self> {
+        use syn::{Expr, ExprLit, Lit};
+        let val = match expr {
+            Expr::Lit(ExprLit { lit, .. }) => match lit {
+                Lit::ByteStr(bstr) => {
+                    let bstr = bstr.value();
+                    if bstr.len() != 4 {
+                        panic!("fcc must be 4 characters")
+                    }
+                    let b = bstr;
+                    [b[0], b[1], b[2], b[3]]
+                }
+                Lit::Str(str) => {
+                    let str = str.value();
+                    if str.len() != 4 {
+                        panic!("fcc must be 4 characters")
+                    }
+                    let b = str.into_bytes();
+                    [b[0], b[1], b[2], b[3]]
+                }
+                Lit::Int(int) => int.base10_parse::<u32>()?.to_be_bytes(),
+                o => panic!("unknown fcc repr: {o:?}"),
+            },
+            o => panic!("unknown fcc repr: {o:?}"),
         };
         Ok(Self(val))
     }

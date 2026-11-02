@@ -600,6 +600,9 @@ impl AtomField {
 
                     let tag_ty = &tag.expect("no tag for tagged").ty;
 
+                    let tag_bindings =
+                        ChildList::bind_overridden_tag_consts(&children, version, tag_ty);
+
                     let sync_parse = ChildList::sync_parse(
                         &children,
                         version,
@@ -611,6 +614,8 @@ impl AtomField {
 
                     quote! {
                         let #field_name = {
+                            #(#tag_bindings)*
+
                             let mut reader = #reader;
                             match _tag {
                                 #(#sync_parse)*
@@ -764,10 +769,14 @@ impl AtomField {
                 let async_children_name = quote::format_ident!("Async{}Parse", children_name);
                 let (header_parse, parse_impl) = match kind {
                     ChildrenKind::Atom => {
+                        let fcc_ty = syn::parse_quote!(::#KRATE::fourcc::FourCC);
+                        let tag_bindings =
+                            ChildList::bind_overridden_tag_consts(&children, version, &fcc_ty);
+
                         let sync_parse = ChildList::sync_parse(
                             &children,
                             version,
-                            &syn::parse_quote!(::#KRATE::fourcc::FourCC),
+                            &fcc_ty,
                             None,
                             &quote::format_ident!("Child"),
                             true,
@@ -821,6 +830,8 @@ impl AtomField {
                                             let max_offset = reader.offset() + atom_size;
                                             let reader = ::#KRATE::reader::TrailingReader::new(reader, max_offset);
 
+                                            #(#tag_bindings)*
+
                                             *self = match atom.fcc {
                                                 #(#async_parse)*
                                                 u => {
@@ -844,6 +855,9 @@ impl AtomField {
 
                                         let max_offset = reader.offset() + atom_size;
                                         let mut reader = ::#KRATE::reader::TrailingReader::new(&mut*reader, max_offset);
+
+                                        #(#tag_bindings)*
+
                                         Ok(match atom.fcc {
                                             #(#sync_parse)*
                                             missed => {
@@ -2079,11 +2093,15 @@ impl FieldKind<'_> {
                     async_name
                 };
 
+                let tag_bindings = ChildList::bind_overridden_tag_consts(&children, None, tag_ty);
                 let async_parse =
                     ChildList::async_parse(children, None, tag_ty, mod_name, &parse_name, false);
                 quote! {
                     {
                         let reader = #reader;
+
+                        #(#tag_bindings)*
+
                         match _tag {
                             #(#async_parse)*
                             missed => {

@@ -2,10 +2,17 @@ use crate::{KRATE, VersionList};
 use std::collections::HashSet;
 
 #[derive(Clone)]
+pub enum TagOverride {
+    Tag(syn::Expr),
+    FourCC(crate::FourCC),
+}
+
+#[derive(Clone)]
 pub struct Child {
     pub specified_type: Option<syn::Type>,
     pub name: syn::Ident,
     pub version_num: HashSet<syn::LitInt>,
+    pub tag_override: Option<TagOverride>,
 }
 
 impl syn::parse::Parse for Child {
@@ -13,6 +20,7 @@ impl syn::parse::Parse for Child {
         let attrs = input.call(syn::Attribute::parse_outer)?;
 
         let mut version_num = None;
+        let mut tag_override = None;
         for attr in attrs.into_iter() {
             let path = attr.path();
             if path.is_ident("version") {
@@ -20,6 +28,18 @@ impl syn::parse::Parse for Child {
                     panic!("duplicate version attrs")
                 }
                 version_num = Some(VersionList::parse_version_num_from_attr(attr)?);
+            } else if path.is_ident("override_tag") {
+                if tag_override.is_some() {
+                    panic!("duplicate tag override");
+                }
+                tag_override = Some(TagOverride::Tag(attr.parse_args()?));
+            } else if path.is_ident("override_fourcc") {
+                if tag_override.is_some() {
+                    panic!("duplicate tag override");
+                }
+                tag_override = Some(TagOverride::FourCC(crate::FourCC::from_expr(
+                    attr.parse_args()?,
+                )?));
             } else {
                 panic!("unknown attr");
             }
@@ -42,6 +62,7 @@ impl syn::parse::Parse for Child {
             name,
             specified_type,
             version_num,
+            tag_override,
         })
     }
 }
@@ -88,15 +109,45 @@ impl ChildList {
         }
     }
 
+    pub fn bind_overridden_tag_consts(
+        children: &[Child],
+        version: Option<&syn::LitInt>,
+        tag_type: &syn::Type,
+    ) -> Vec<proc_macro2::TokenStream> {
+        use quote::quote;
+        Self::filter_by_version(children, version)
+            .enumerate()
+            .filter_map(|(i, child)| {
+                let val = match child.tag_override.as_ref()? {
+                    TagOverride::Tag(expr) => quote!(#expr),
+                    TagOverride::FourCC(fcc) => {
+                        let [fcc_0, fcc_1, fcc_2, fcc_3] = fcc.as_fcc();
+                        quote!(::#KRATE::fourcc::FourCC::new([#fcc_0, #fcc_1, #fcc_2, #fcc_3]))
+                    }
+                };
+                let name = Self::format_overridden_tag(i);
+                Some(quote!(const #name: #tag_type = #val;))
+            })
+            .collect()
+    }
+
+    fn format_overridden_tag(idx: usize) -> syn::Ident {
+        quote::format_ident!("OVERRIDDEN_TAG_{idx}")
+    }
+
     fn ty_and_tag_from_child(
         child: &Child,
         tag_type: &syn::Type,
+        idx: usize,
         atom: bool,
     ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
         use quote::quote;
         let ty = Self::ty_from_child(child);
 
-        let tag = if atom {
+        let tag = if child.tag_override.is_some() {
+            let tag = Self::format_overridden_tag(idx);
+            quote!(#tag)
+        } else if atom {
             quote! {
                 <#ty as ::#KRATE::tag::Atom>::FCC
             }
@@ -119,9 +170,10 @@ impl ChildList {
         use quote::quote;
         let mod_name = mod_name.map(|m| quote!(#m ::));
         Self::filter_by_version(children, version)
-        .map(|child| {
+        .enumerate()
+        .map(|(i, child)| {
             let name = &child.name;
-            let (ty, tag) = Self::ty_and_tag_from_child(child, tag_type, atom);
+            let (ty, tag) = Self::ty_and_tag_from_child(child, tag_type, i, atom);
 
             quote!{
                 #tag => {
@@ -143,9 +195,10 @@ impl ChildList {
     ) -> Vec<proc_macro2::TokenStream> {
         use quote::quote;
         Self::filter_by_version(children, version)
-        .map(|child| {
+        .enumerate()
+        .map(|(i, child)| {
             let name = &child.name;
-            let (ty, tag) = Self::ty_and_tag_from_child(child, tag_type, atom);
+            let (ty, tag) = Self::ty_and_tag_from_child(child, tag_type, i, atom);
 
             quote!{
                 #tag => {

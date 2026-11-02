@@ -101,45 +101,85 @@ make_atom! {
     struct Userdata {
         #[children]
         enum Child {
-            ArrangerName,
-            ArrangerKeywords,
-            ComposerKeywords,
-            ComposerName,
-            CopyrightStatement,
-            MovieCreationDate,
-            DirectorName,
-            Edit1,
-            Edit2,
-            Edit3,
-            Edit4,
-            Edit5,
-            Edit6,
-            Edit7,
-            Edit8,
-            Edit9,
-            MovieFormat,
-            MovieInformation,
-            ISRCCode,
-            RecordLabelName,
-            RecordLabelUrl,
-            CreatorName,
-            CreatorUrl,
-            TitleKeywords,
-            Title,
-            ProducerKeywords,
-            RecordingCopyrightStatement,
-            ProducerName,
-            PerformersNames,
-            ArtistAndPerformerKeywords,
-            ArtistAndPerformerUrl,
-            HardwareAndSoftwareRequirements,
-            SubtitleKeywords,
-            Subtitle,
-            SourceCredits,
-            SongwriterName,
-            SongwriterKeywords,
-            MovieVersionNumber,
-            WriterName,
+            // all © codepoints are replaced with \xA9
+            #[override_fourcc(b"\xA9arg")]
+            UserdataEntries as ArrangerName,
+            #[override_fourcc(b"\xA9ark")]
+            UserdataEntries as ArrangerKeywords,
+            #[override_fourcc(b"\xA9cok")]
+            UserdataEntries as ComposerKeywords,
+            #[override_fourcc(b"\xA9com")]
+            UserdataEntries as ComposerName,
+            #[override_fourcc(b"\xA9cpy")]
+            UserdataEntries as CopyrightStatement,
+            #[override_fourcc(b"\xA9day")]
+            UserdataEntries as MovieCreationDate,
+            #[override_fourcc(b"\xA9dir")]
+            UserdataEntries as DirectorName,
+            #[override_fourcc(b"\xA9ed1")]
+            UserdataEntries as Edit1,
+            #[override_fourcc(b"\xA9ed2")]
+            UserdataEntries as Edit2,
+            #[override_fourcc(b"\xA9ed3")]
+            UserdataEntries as Edit3,
+            #[override_fourcc(b"\xA9ed4")]
+            UserdataEntries as Edit4,
+            #[override_fourcc(b"\xA9ed5")]
+            UserdataEntries as Edit5,
+            #[override_fourcc(b"\xA9ed6")]
+            UserdataEntries as Edit6,
+            #[override_fourcc(b"\xA9ed7")]
+            UserdataEntries as Edit7,
+            #[override_fourcc(b"\xA9ed8")]
+            UserdataEntries as Edit8,
+            #[override_fourcc(b"\xA9ed9")]
+            UserdataEntries as Edit9,
+            #[override_fourcc(b"\xA9fmt")]
+            UserdataEntries as MovieFormat,
+            #[override_fourcc(b"\xA9inf")]
+            UserdataEntries as MovieInformation,
+            #[override_fourcc(b"\xA9isr")]
+            UserdataEntries as ISRCCode,
+            #[override_fourcc(b"\xA9lab")]
+            UserdataEntries as RecordLabelName,
+            #[override_fourcc(b"\xA9lal")]
+            UserdataEntries as RecordLabelUrl,
+            #[override_fourcc(b"\xA9mak")]
+            UserdataEntries as CreatorName,
+            #[override_fourcc(b"\xA9mal")]
+            UserdataEntries as CreatorUrl,
+            #[override_fourcc(b"\xA9nak")]
+            UserdataEntries as TitleKeywords,
+            #[override_fourcc(b"\xA9nam")]
+            UserdataEntries as Title,
+            #[override_fourcc(b"\xA9pdk")]
+            UserdataEntries as ProducerKeywords,
+            #[override_fourcc(b"\xA9phg")]
+            UserdataEntries as RecordingCopyrightStatement,
+            #[override_fourcc(b"\xA9prd")]
+            UserdataEntries as ProducerName,
+            #[override_fourcc(b"\xA9prf")]
+            UserdataEntries as PerformersNames,
+            #[override_fourcc(b"\xA9prk")]
+            UserdataEntries as ArtistAndPerformerKeywords,
+            #[override_fourcc(b"\xA9prl")]
+            UserdataEntries as ArtistAndPerformerUrl,
+            #[override_fourcc(b"\xA9req")]
+            UserdataEntries as HardwareAndSoftwareRequirements,
+            #[override_fourcc(b"\xA9snk")]
+            UserdataEntries as SubtitleKeywords,
+            #[override_fourcc(b"\xA9snm")]
+            UserdataEntries as Subtitle,
+            #[override_fourcc(b"\xA9src")]
+            UserdataEntries as SourceCredits,
+            #[override_fourcc(b"\xA9swf")]
+            UserdataEntries as SongwriterName,
+            #[override_fourcc(b"\xA9swk")]
+            UserdataEntries as SongwriterKeywords,
+            #[override_fourcc(b"\xA9swr")]
+            UserdataEntries as MovieVersionNumber,
+            #[override_fourcc(b"\xA9wrt")]
+            UserdataEntries as WriterName,
             PlayAllFrames,
             HintTrackStatistics,
             MovieHintInfo,
@@ -150,10 +190,13 @@ make_atom! {
             DefaultWindowLocation,
         }
     }
-}
 
-// userdata
-make_atom! {
+    #[derive(Debug)]
+    struct UserdataEntries {
+        #[trailing_array]
+        entries: StringEntry,
+    }
+
     #[derive(Debug)]
     struct StringEntry {
         #[payload_len]
@@ -162,281 +205,10 @@ make_atom! {
         #[payload]
         string: String,
     }
+}
 
-    // all © codepoints are replaced with \xA9
-    #[derive(Debug)]
-    #[atom(b"\xA9arg")]
-    struct ArrangerName {
-        #[trailing_array]
-        name: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9ark")]
-    struct ArrangerKeywords {
-        #[trailing_array]
-        keywords: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9cok")]
-    struct ComposerKeywords {
-        #[trailing_array]
-        keywords: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9com")]
-    struct ComposerName {
-        #[trailing_array]
-        name: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9cpy")]
-    struct CopyrightStatement {
-        #[trailing_array]
-        statement: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9day")]
-    struct MovieCreationDate {
-        #[trailing_array]
-        date: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9dir")]
-    struct DirectorName {
-        #[trailing_array]
-        name: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9ed1")]
-    struct Edit1 {
-        #[trailing_array]
-        edit_and_description: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9ed2")]
-    struct Edit2 {
-        #[trailing_array]
-        edit_and_description: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9ed3")]
-    struct Edit3 {
-        #[trailing_array]
-        edit_and_description: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9ed4")]
-    struct Edit4 {
-        #[trailing_array]
-        edit_and_description: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9ed5")]
-    struct Edit5 {
-        #[trailing_array]
-        edit_and_description: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9ed6")]
-    struct Edit6 {
-        #[trailing_array]
-        edit_and_description: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9ed7")]
-    struct Edit7 {
-        #[trailing_array]
-        edit_and_description: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9ed8")]
-    struct Edit8 {
-        #[trailing_array]
-        edit_and_description: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9ed9")]
-    struct Edit9 {
-        #[trailing_array]
-        edit_and_description: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9fmt")]
-    struct MovieFormat {
-        #[trailing_array]
-        format: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9inf")]
-    struct MovieInformation {
-        #[trailing_array]
-        info: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9isr")]
-    struct ISRCCode {
-        #[trailing_array]
-        isrc: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9lab")]
-    struct RecordLabelName {
-        #[trailing_array]
-        record_label: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9lal")]
-    struct RecordLabelUrl {
-        #[trailing_array]
-        url: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9mak")]
-    struct CreatorName {
-        #[trailing_array]
-        name: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9mal")]
-    struct CreatorUrl {
-        #[trailing_array]
-        url: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9nak")]
-    struct TitleKeywords {
-        #[trailing_array]
-        keywords: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9nam")]
-    struct Title {
-        #[trailing_array]
-        title: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9pdk")]
-    struct ProducerKeywords {
-        #[trailing_array]
-        keywords: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9phg")]
-    struct RecordingCopyrightStatement {
-        #[trailing_array]
-        statement: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9prd")]
-    struct ProducerName {
-        #[trailing_array]
-        name: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9prf")]
-    struct PerformersNames {
-        #[trailing_array]
-        names: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9prk")]
-    struct ArtistAndPerformerKeywords {
-        #[trailing_array]
-        keywords: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9prl")]
-    struct ArtistAndPerformerUrl {
-        #[trailing_array]
-        url: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9req")]
-    struct HardwareAndSoftwareRequirements {
-        #[trailing_array]
-        requirements: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9snk")]
-    struct SubtitleKeywords {
-        #[trailing_array]
-        keywords: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9snm")]
-    struct Subtitle {
-        #[trailing_array]
-        subtitle: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9src")]
-    struct SourceCredits {
-        #[trailing_array]
-        credits: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9swf")]
-    struct SongwriterName {
-        #[trailing_array]
-        name: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9swk")]
-    struct SongwriterKeywords {
-        #[trailing_array]
-        keywords: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9swr")]
-    struct MovieVersionNumber {
-        #[trailing_array]
-        name_and_version: StringEntry,
-    }
-
-    #[derive(Debug)]
-    #[atom(b"\xA9wrt")]
-    struct WriterName {
-        #[trailing_array]
-        name: StringEntry,
-    }
-
+// userdata
+make_atom! {
     #[derive(Debug)]
     #[atom("AllF")]
     struct PlayAllFrames {
