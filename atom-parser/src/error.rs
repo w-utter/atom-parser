@@ -26,8 +26,10 @@ pub struct TryFromIntError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ParseError {
-    #[error("Atom Size is too small")]
+    #[error("Atom Size is too small (integer offset underflow)")]
     AtomSizeTooSmall,
+    #[error("Atom Size is too large (integer offset overflow)")]
+    AtomSizeTooLarge,
     #[cfg(not(feature = "extended_sized_atoms"))]
     #[error("extended atom sizes (64 bytes) is not supported")]
     AtomSizeUnsupported,
