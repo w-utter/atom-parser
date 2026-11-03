@@ -388,7 +388,7 @@ impl AtomField {
                                     return Ok((true, None));
                                 }
                             }
-                            Ok((false, LenFromExpr::parse_from_attr(atom_field_attr)?))
+                            Ok((false, Some(LenFromExpr::parse_from_syn(input)?)))
                         };
                         use syn::parse::Parser;
                         parser.parse2(list.tokens.clone())
@@ -2035,18 +2035,20 @@ impl LenFromExpr {
         let from_expr = match &attr.meta {
             Meta::Path(_) => None,
             Meta::List(list) => {
-                let parser = |input: syn::parse::ParseStream| {
-                    let ty = input.parse()?;
-                    let _: syn::Token![,] = input.parse()?;
-                    let size_expr = input.parse()?;
-                    Ok(Some(LenFromExpr { ty, size_expr }))
-                };
+                let parser = Self::parse_from_syn;
                 use syn::parse::Parser;
-                parser.parse2(list.tokens.clone())?
+                Some(parser.parse2(list.tokens.clone())?)
             }
             Meta::NameValue(_) => panic!("name-value pair for conditional is not supported"),
         };
         Ok(from_expr)
+    }
+
+    fn parse_from_syn(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let ty = input.parse()?;
+        let _: syn::Token![,] = input.parse()?;
+        let size_expr = input.parse()?;
+        Ok(Self { ty, size_expr })
     }
 }
 
