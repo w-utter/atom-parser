@@ -114,7 +114,7 @@ impl AtomSize {
     }
 }
 
-pub enum AtomSizeParse<P, O: Offset + Unpin, R: PollReader<O> + Unpin> {
+pub enum AtomSizeParse<P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin> {
     Waiting(u32, R, P, core::marker::PhantomData<O>),
     #[cfg(feature = "extended_sized_atoms")]
     ExtendedSize(<u64 as AsyncParse<O>>::Fut<P, R>),
