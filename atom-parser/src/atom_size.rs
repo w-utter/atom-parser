@@ -1,4 +1,4 @@
-use crate::{Offset, ParseError, ParseOptions, PollReader, Reader, TakeReader, impl_take_reader};
+use crate::{Offset, Options, ParseError, PollReader, Reader, TakeReader, impl_take_reader};
 
 #[cfg(feature = "extended_sized_atoms")]
 use crate::{AsyncParse, IntegerParse, Parse};
@@ -45,10 +45,10 @@ impl AtomSize {
     #[cfg(feature = "extended_sized_atoms")]
     const MIN_ATOM_SIZE_64: u64 = 16;
 
-    pub fn parse<O: Offset, T: Reader<O>>(
+    pub fn parse<O: Offset, T: Reader<O>, P: Options>(
         size: u32,
         reader: &mut T,
-        options: &ParseOptions,
+        options: P,
     ) -> Result<Self, ParseError> {
         #[cfg(feature = "extended_sized_atoms")]
         {
@@ -94,11 +94,11 @@ impl AtomSize {
         }
     }
 
-    pub fn create_fut<'a, O: Offset + Unpin, R: PollReader<O> + Unpin>(
+    pub fn create_fut<P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin>(
         size: u32,
         reader: R,
-        options: &'a ParseOptions,
-    ) -> AtomSizeParse<'a, O, R> {
+        options: P,
+    ) -> AtomSizeParse<P, O, R> {
         #[cfg(feature = "extended_sized_atoms")]
         {
             if size == 1 {
@@ -114,15 +114,17 @@ impl AtomSize {
     }
 }
 
-pub enum AtomSizeParse<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> {
-    Waiting(u32, R, &'a ParseOptions, core::marker::PhantomData<O>),
+pub enum AtomSizeParse<P, O: Offset + Unpin, R: PollReader<O> + Unpin> {
+    Waiting(u32, R, P, core::marker::PhantomData<O>),
     #[cfg(feature = "extended_sized_atoms")]
-    ExtendedSize(<u64 as AsyncParse<O>>::Fut<'a, R>),
-    Done(R, &'a ParseOptions),
+    ExtendedSize(<u64 as AsyncParse<O>>::Fut<P, R>),
+    Done(R, P),
     Empty,
 }
 
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for AtomSizeParse<'a, O, R> {
+impl<P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin> Future
+    for AtomSizeParse<P, O, R>
+{
     type Output = Result<AtomSize, ParseError>;
     fn poll(
         mut self: core::pin::Pin<&mut Self>,
@@ -196,12 +198,12 @@ impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for AtomSizeParse<'
     }
 }
 
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> TakeReader<'a, R>
-    for AtomSizeParse<'a, O, R>
+impl<P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin> TakeReader<P, R>
+    for AtomSizeParse<P, O, R>
 {
     impl_take_reader! {}
 
-    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+    fn borrow_reader(&mut self) -> (&mut R, &P) {
         match self {
             Self::Waiting(_, r, opts, _) => (r, opts),
             #[cfg(feature = "extended_sized_atoms")]

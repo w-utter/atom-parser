@@ -1,4 +1,4 @@
-use crate::{AtomField, KRATE, StructFieldAttr};
+use crate::{AtomField, AtomFieldKind, Endianess, KRATE, StructFieldAttr};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
@@ -70,11 +70,12 @@ pub fn try_expand_into_versioned_fields(
 ) -> syn::Result<Result<Versioned, Vec<AtomField>>> {
     let versions = fields
         .iter()
-        .filter(|field| matches!(field, AtomField::Version { .. }));
+        .filter(|field| matches!(field.kind, AtomFieldKind::Version { .. }));
     let mut version_identifier = fields.iter().enumerate().filter(|(_, field)| {
         matches!(
-            field,
-            AtomField::FullBox { .. } | AtomField::Struct(_, StructFieldAttr::VersionIdentifier)
+            field.kind,
+            AtomFieldKind::FullBox { .. }
+                | AtomFieldKind::Struct(_, StructFieldAttr::VersionIdentifier)
         )
     });
 
@@ -94,19 +95,18 @@ pub fn try_expand_into_versioned_fields(
         (_, Some(version_num), _) => {
             let mut map = HashMap::new();
 
-            let mut version_repr = None;
+            let mut version = None;
             let mut out_fields = vec![];
 
             for field in &fields {
-                match field {
-                    AtomField::Struct(field, StructFieldAttr::VersionIdentifier) => {
-                        version_repr = Some(field.ty.clone());
+                match &field.kind {
+                    AtomFieldKind::Struct(f, StructFieldAttr::VersionIdentifier) => {
+                        version = Some((f.ty.clone(), field.endianess.clone()));
                     }
-                    AtomField::Version { .. } => unreachable!(),
-                    field => {
-                        if matches!(field, AtomField::FullBox { .. }) {
-                            let repr = syn::parse_quote!(u8);
-                            version_repr = Some(repr);
+                    AtomFieldKind::Version { .. } => unreachable!(),
+                    _ => {
+                        if matches!(field.kind, AtomFieldKind::FullBox { .. }) {
+                            version = Some((syn::parse_quote!(u8), field.endianess.clone()));
                         }
                         out_fields.push(field.clone());
                     }
@@ -114,23 +114,25 @@ pub fn try_expand_into_versioned_fields(
             }
 
             map.insert(version_num.clone(), out_fields);
+            let (version_repr, version_endianess) = version.unwrap();
             Ok(Ok(Versioned {
                 versions: map,
-                version_repr: version_repr.unwrap(),
+                version_repr,
+                version_endianess,
             }))
         }
         _ => {
             let mut map = HashMap::new();
 
             let mut version_independent = vec![];
-            let mut version_repr = None;
+            let mut version = None;
 
             for field in &fields {
-                match field {
-                    AtomField::Struct(field, StructFieldAttr::VersionIdentifier) => {
-                        version_repr = Some(field.ty.clone());
+                match &field.kind {
+                    AtomFieldKind::Struct(f, StructFieldAttr::VersionIdentifier) => {
+                        version = Some((f.ty.clone(), field.endianess.clone()));
                     }
-                    AtomField::Version { versions } => {
+                    AtomFieldKind::Version { versions } => {
                         for version in versions {
                             for v in &version.version_num {
                                 if !map.contains_key(v) {
@@ -141,10 +143,9 @@ pub fn try_expand_into_versioned_fields(
                             }
                         }
                     }
-                    field => {
-                        if matches!(field, AtomField::FullBox { .. }) {
-                            let repr = syn::parse_quote!(u8);
-                            version_repr = Some(repr);
+                    _ => {
+                        if matches!(&field.kind, AtomFieldKind::FullBox { .. }) {
+                            version = Some((syn::parse_quote!(u8), field.endianess.clone()));
                         }
                         for (_, version_specific) in &mut map {
                             version_specific.push(field.clone());
@@ -154,9 +155,12 @@ pub fn try_expand_into_versioned_fields(
                 }
             }
 
+            let (version_repr, version_endianess) = version.unwrap();
+
             Ok(Ok(Versioned {
                 versions: map,
-                version_repr: version_repr.unwrap(),
+                version_repr,
+                version_endianess,
             }))
         }
     }
@@ -164,6 +168,7 @@ pub fn try_expand_into_versioned_fields(
 
 pub struct Versioned {
     pub version_repr: syn::Type,
+    pub version_endianess: Option<Endianess>,
     pub versions: HashMap<syn::LitInt, Vec<AtomField>>,
 }
 
@@ -189,6 +194,7 @@ impl Versioned {
         name: &syn::Ident,
         attrs: &[syn::Attribute],
         generics: &syn::Generics,
+        definition_endianess: Option<&Endianess>,
     ) -> proc_macro2::TokenStream {
         use quote::quote;
 
@@ -249,15 +255,21 @@ impl Versioned {
             let variant = Self::versioned_enum_variant_from_lit(v);
             let version_mod = Self::version_mod_from_lit(v);
             let versioned_name = Self::versioned_struct_from_lit(&name, v);
+            let format_options = Endianess::format_options(definition_endianess, None, true);
 
-            quote!(#v => #enum_name::#variant(#version_mod::#versioned_name::parse(reader, opts)?),)
+            quote! {
+                #v => {
+                    #format_options
+                    #enum_name::#variant(#version_mod::#versioned_name::parse(reader, &opts)?)
+                }
+            }
         });
 
         let async_sm_variants = self.versions.iter().map(|(v, _)| {
             let variant = Self::versioned_enum_variant_from_lit(v);
             let version_mod = Self::version_mod_from_lit(v);
             let versioned_name = Self::versioned_struct_from_lit(&name, v);
-            quote!(#variant(<#version_mod::#versioned_name #ty_generics as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>))
+            quote!(#variant(<#version_mod::#versioned_name #ty_generics as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<__Options, __Reader>))
         });
 
         let async_parse_enum_name = quote::format_ident!("Async{}Parse", enum_name);
@@ -316,9 +328,9 @@ impl Versioned {
             }
         }
 
-        async_generics
-            .params
-            .push(syn::parse_quote!('__parse_options));
+        async_generics.params.push(
+            syn::parse_quote!(__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin),
+        );
         async_generics
             .params
             .push(syn::parse_quote!(__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin));
@@ -331,6 +343,16 @@ impl Versioned {
 
         let (async_parse_impl_generics, async_parse_ty_generics, async_parse_where_clause) =
             async_generics.split_for_impl();
+
+        let format_options = Endianess::format_options(
+            self.version_endianess.as_ref(),
+            Some(Endianess::format_options_create_fut(
+                definition_endianess,
+                None,
+                true,
+            )),
+            true,
+        );
 
         quote! {
             #(#attrs)*
@@ -345,8 +367,11 @@ impl Versioned {
 
             use super::*;
             impl #parse_impl_generics ::#KRATE::parse::Parse<__Offset> for #enum_name #ty_generics #where_clause {
-                fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>>(reader: &mut __Reader, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
-                    let version_ident = <#version_repr as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
+                fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>, __Options: ::#KRATE::parse_options::Options>(reader: &mut __Reader, opts: __Options) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
+                    let version_ident = {
+                        #format_options
+                        <#version_repr as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
+                    };
                     Ok(match version_ident {
                         #(#sync_parsing)*
                         u => #enum_name::Unknown(::#KRATE::version::UnknownVersion::new(u)),
@@ -355,7 +380,7 @@ impl Versioned {
             }
 
             impl #async_impl_generics #enum_name #async_ty_generics #async_where_clause {
-                pub fn create_fut_from_version<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(version: #version_repr, reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> #async_parse_enum_name #async_parse_ty_generics {
+                pub fn create_fut_from_version<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(version: #version_repr, reader: __Reader, opts: __Options) -> #async_parse_enum_name #async_parse_ty_generics {
                     match version {
                         #(#async_create_fut)*
                         u => {
@@ -369,14 +394,14 @@ impl Versioned {
 
             pub enum #async_parse_enum_name #async_generics #async_parse_where_clause {
                 #(#async_sm_variants,)*
-                Unknown(#version_repr, ::#KRATE::reader::AsyncSeek<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
-                Done(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                Unknown(#version_repr, ::#KRATE::reader::AsyncSeek<__Offset, __Reader>, __Options),
+                Done(__Reader, __Options),
                 Empty,
             }
 
             impl #async_impl_generics ::#KRATE::parse::AsyncParse<__Offset> for #enum_name #ty_generics #async_parse_where_clause {
-                type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #async_parse_enum_name #async_parse_ty_generics;
-                fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
+                type Fut<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #async_parse_enum_name #async_parse_ty_generics;
+                fn create_fut<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: __Options) -> Self::Fut<__Options, __Reader> {
                     unreachable!("can only be called when version is available")
                 }
             }
@@ -409,15 +434,15 @@ impl Versioned {
                 }
             }
 
-            impl #async_parse_impl_generics ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #async_parse_enum_name #async_parse_ty_generics #async_parse_where_clause {
-                fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+            impl #async_parse_impl_generics ::#KRATE::reader::TakeReader<__Options, __Reader> for #async_parse_enum_name #async_parse_ty_generics #async_parse_where_clause {
+                fn take_reader(self) -> (__Reader, __Options) {
                     match self {
                         Self::Done(reader, opts) => return (reader, opts),
                         _ => unreachable!("invalid state"),
                     }
                 }
 
-                fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                fn borrow_reader(&mut self) -> (&mut __Reader, &__Options) {
                     match self {
                         #(#borrow_reader_impl)*
                         Self::Unknown(_, seek, opts) => (&mut seek.reader, opts),
@@ -434,6 +459,7 @@ impl Versioned {
         name: &syn::Ident,
         generics: &syn::Generics,
         atom_mod: &syn::Ident,
+        definition_endianess: Option<&Endianess>,
     ) -> proc_macro2::TokenStream {
         use quote::quote;
         let (_, ty_generics, _) = generics.split_for_impl();
@@ -488,9 +514,9 @@ impl Versioned {
             }
         }
 
-        async_parse_generics
-            .params
-            .push(syn::parse_quote!('__parse_options));
+        async_parse_generics.params.push(
+            syn::parse_quote!(__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin),
+        );
         async_parse_generics
             .params
             .push(syn::parse_quote!(__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin));
@@ -505,11 +531,31 @@ impl Versioned {
         let async_parse_enum_name = quote::format_ident!("Async{}Parse", name);
         let parse_repr = &self.version_repr;
 
+        let version_repr_options = Endianess::format_options_ty(
+            self.version_endianess.as_ref(),
+            Some(Endianess::format_options_ty(definition_endianess, None)),
+        );
+        let version_specific_options = Endianess::format_options_ty(definition_endianess, None);
+        let to_version_specific_options =
+            Endianess::format_take_reader(self.version_endianess.as_ref(), None);
+        let to_finished_options = Endianess::format_take_reader(definition_endianess, None);
+        let borrow_repr =
+            Endianess::format_borrow_reader(definition_endianess, self.version_endianess.as_ref());
+        let borrow_specific = Endianess::format_borrow_reader(definition_endianess, None);
+        let create_fut_options = Endianess::format_options_create_fut(
+            self.version_endianess.as_ref(),
+            Some(Endianess::format_options_create_fut(
+                definition_endianess,
+                None,
+                false,
+            )),
+            false,
+        );
         quote! {
             pub enum #async_parse_enum_name #async_parse_generics #async_where_clause {
-                Version(<#parse_repr as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
-                VersionSpecific(<#atom_mod::#enum_name #ty_generics as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
-                Done(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                Version(<#parse_repr as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<#version_repr_options, __Reader>),
+                VersionSpecific(<#atom_mod::#enum_name #ty_generics as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<#version_specific_options, __Reader>),
+                Done(__Reader, __Options),
                 Empty,
             }
 
@@ -527,7 +573,7 @@ impl Versioned {
                                     }
                                     ::core::task::Poll::Ready(v) => {
                                         let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(fut);
-                                        *self = Self::VersionSpecific(<#atom_mod::#enum_name #async_version_ty_generics>::create_fut_from_version(v?, reader, opts));
+                                        *self = Self::VersionSpecific(<#atom_mod::#enum_name #async_version_ty_generics>::create_fut_from_version(v?, reader, #to_version_specific_options));
                                     }
                                 }
                             }
@@ -539,7 +585,7 @@ impl Versioned {
                                     }
                                     ::core::task::Poll::Ready(version) => {
                                         let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(fut);
-                                        *self = Self::Done(reader, opts);
+                                        *self = Self::Done(reader, #to_finished_options);
                                         return ::core::task::Poll::Ready(version.map(|version| {
                                             #name {
                                                 version,
@@ -555,18 +601,24 @@ impl Versioned {
                 }
             }
 
-            impl #async_impl_generics ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #async_parse_enum_name #async_ty_generics #async_where_clause {
-                fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+            impl #async_impl_generics ::#KRATE::reader::TakeReader<__Options, __Reader> for #async_parse_enum_name #async_ty_generics #async_where_clause {
+                fn take_reader(self) -> (__Reader, __Options) {
                     match self {
                         Self::Done(reader, opts) => return (reader, opts),
                         _ => unreachable!("invalid state"),
                     }
                 }
 
-                fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                fn borrow_reader(&mut self) -> (&mut __Reader, &__Options) {
                     match self {
-                        Self::Version(v) => v.borrow_reader(),
-                        Self::VersionSpecific(s) => s.borrow_reader(),
+                        Self::Version(v) => {
+                            let (reader, opts) = v.borrow_reader();
+                            (reader, #borrow_repr)
+                        }
+                        Self::VersionSpecific(s) => {
+                            let (reader, opts) = s.borrow_reader();
+                            (reader, #borrow_specific)
+                        }
                         Self::Done(r, opts) => (r, opts),
                         Self::Empty => unreachable!(),
                     }
@@ -574,9 +626,9 @@ impl Versioned {
             }
 
             impl #async_version_impl_generics ::#KRATE::parse::AsyncParse<__Offset> for #name #ty_generics #async_version_where_clause {
-                type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #async_parse_enum_name #async_ty_generics;
-                fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
-                    #async_parse_enum_name::Version(<#parse_repr as ::#KRATE::parse::AsyncParse<__Offset>>::create_fut(reader, opts))
+                type Fut<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #async_parse_enum_name #async_ty_generics;
+                fn create_fut<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: __Options) -> Self::Fut<__Options, __Reader> {
+                    #async_parse_enum_name::Version(<#parse_repr as ::#KRATE::parse::AsyncParse<__Offset>>::create_fut(reader, #create_fut_options))
                 }
             }
         }

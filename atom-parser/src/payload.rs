@@ -1,5 +1,5 @@
 use crate::{
-    AsyncSeek, Extent, Offset, ParseError, ParseOptions, PollReader, Reader, TakeReader,
+    AsyncSeek, Extent, Offset, Options, ParseError, PollReader, Reader, TakeReader,
     TryFromIntError, impl_take_reader,
 };
 
@@ -21,7 +21,7 @@ impl<O: Offset, S: Copy> Payload<O, S> {
 }
 
 impl<O: Offset> Payload<O> {
-    pub fn parse<T: Reader<O>>(reader: &mut T, _: &ParseOptions) -> Result<Self, ParseError> {
+    pub fn parse<T: Reader<O>, P: Options>(reader: &mut T, _: P) -> Result<Self, ParseError> {
         let offset = reader.offset();
         let size = reader.remaining_size();
         reader.seek(size)?;
@@ -30,10 +30,10 @@ impl<O: Offset> Payload<O> {
 }
 
 impl<O: Offset + core::convert::TryFrom<S>, S: Copy> Payload<O, S> {
-    pub fn parse_from_len<T: Reader<O>>(
+    pub fn parse_from_len<T: Reader<O>, P: Options>(
         size: S,
         reader: &mut T,
-        _: &ParseOptions,
+        _: P,
     ) -> Result<Self, ParseError> {
         let offset = reader.offset();
 
@@ -45,15 +45,19 @@ impl<O: Offset + core::convert::TryFrom<S>, S: Copy> Payload<O, S> {
     }
 }
 
-pub enum PayloadParse<'a, O: Unpin, R, S = O> {
-    Waiting(R, &'a ParseOptions, O, S),
-    Seek(&'a ParseOptions, O, S, AsyncSeek<O, R>),
-    Done(R, &'a ParseOptions),
+pub enum PayloadParse<P, O: Unpin, R, S = O> {
+    Waiting(R, P, O, S),
+    Seek(P, O, S, AsyncSeek<O, R>),
+    Done(R, P),
     Empty,
 }
 
-impl<'a, O: Offset + Unpin + core::convert::TryFrom<S>, R: PollReader<O> + Unpin, S: Copy + Unpin>
-    Future for PayloadParse<'a, O, R, S>
+impl<
+    P: Options + Unpin,
+    O: Offset + Unpin + core::convert::TryFrom<S>,
+    R: PollReader<O> + Unpin,
+    S: Copy + Unpin,
+> Future for PayloadParse<P, O, R, S>
 {
     type Output = Result<Payload<O, S>, ParseError>;
     fn poll(
@@ -96,10 +100,10 @@ impl<'a, O: Offset + Unpin + core::convert::TryFrom<S>, R: PollReader<O> + Unpin
     }
 }
 
-impl<'a, O: Unpin, R, S> TakeReader<'a, R> for PayloadParse<'a, O, R, S> {
+impl<P, O: Unpin, R, S> TakeReader<P, R> for PayloadParse<P, O, R, S> {
     impl_take_reader! {}
 
-    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+    fn borrow_reader(&mut self) -> (&mut R, &P) {
         match self {
             Self::Waiting(reader, opts, ..) => (reader, opts),
             Self::Seek(opts, _, _, seek) => (&mut seek.reader, opts),
@@ -110,10 +114,10 @@ impl<'a, O: Unpin, R, S> TakeReader<'a, R> for PayloadParse<'a, O, R, S> {
 }
 
 impl<O: Offset + Unpin> Payload<O> {
-    pub fn create_fut<'a, R: PollReader<O> + Unpin>(
+    pub fn create_fut<P: Options + Unpin, R: PollReader<O> + Unpin>(
         reader: R,
-        options: &'a ParseOptions,
-    ) -> PayloadParse<'a, O, R> {
+        options: P,
+    ) -> PayloadParse<P, O, R> {
         let offset = reader.offset();
         let len = reader.remaining_size();
         PayloadParse::Waiting(reader, options, offset, len)
@@ -121,11 +125,11 @@ impl<O: Offset + Unpin> Payload<O> {
 }
 
 impl<O: Offset + Unpin, S> Payload<O, S> {
-    pub fn create_fut_from_len<'a, R: PollReader<O> + Unpin>(
+    pub fn create_fut_from_len<P: Options + Unpin, R: PollReader<O> + Unpin>(
         len: S,
         reader: R,
-        options: &'a ParseOptions,
-    ) -> PayloadParse<'a, O, R, S> {
+        options: P,
+    ) -> PayloadParse<P, O, R, S> {
         let offset = reader.offset();
         PayloadParse::Waiting(reader, options, offset, len)
     }

@@ -228,14 +228,15 @@ impl ChildList {
         };
 
         Self::filter_by_version(children, version)
-        .map(|child| {
-            let name = &child.name;
-            let ty = Self::ty_from_child(child);
+            .map(|child| {
+                let name = &child.name;
+                let ty = Self::ty_from_child(child);
 
-            quote! {
-                #name(<#ty as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, #reader>),
-            }
-        }).collect()
+                quote! {
+                    #name(<#ty as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<__Options, #reader>),
+                }
+            })
+            .collect()
     }
 
     pub fn tagged_variants(

@@ -1,5 +1,5 @@
 use crate::{
-    AsyncParse, AsyncSeek, Offset, Parse, ParseError, ParseOptions, Parsed, PollReader, Reader,
+    AsyncParse, AsyncSeek, Offset, Options, Parse, ParseError, Parsed, PollReader, Reader,
     TakeReader, TrailingReader, TryFromIntError, impl_take_reader,
 };
 
@@ -13,10 +13,10 @@ impl<U, S, T: Parsed> Parsed for Padded<U, S, T> {
 
 // cant use parse here since it needs a size
 impl<O: Offset, S: TryInto<O>, T: Parse<O>> Padded<O, S, T> {
-    pub fn parse_from_len<R: Reader<O>>(
+    pub fn parse_from_len<R: Reader<O>, P: Options>(
         size: S,
         reader: &mut R,
-        opts: &ParseOptions,
+        opts: P,
     ) -> Result<<T as Parsed>::Output<O>, ParseError> {
         let offset = reader.offset();
         let size: O = size
@@ -31,23 +31,33 @@ impl<O: Offset, S: TryInto<O>, T: Parse<O>> Padded<O, S, T> {
     }
 }
 
-pub enum AsyncPaddedParse<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S, T: AsyncParse<O>>
-where
+pub enum AsyncPaddedParse<
+    P: Options + Unpin,
+    O: Offset + Unpin,
+    R: PollReader<O> + Unpin,
+    S,
+    T: AsyncParse<O>,
+> where
     <T as Parsed>::Output<O>: Unpin,
 {
-    Setup(O, S, R, &'a ParseOptions),
-    ParsingInner(<T as AsyncParse<O>>::Fut<'a, TrailingReader<O, R>>),
+    Setup(O, S, R, P),
+    ParsingInner(<T as AsyncParse<O>>::Fut<P, TrailingReader<O, R>>),
     SeekRemaining(
         <T as Parsed>::Output<O>,
         AsyncSeek<O, TrailingReader<O, R>>,
-        &'a ParseOptions,
+        P,
     ),
-    Done(R, &'a ParseOptions),
+    Done(R, P),
     Empty,
 }
 
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S: TryInto<O> + Unpin, T: AsyncParse<O>>
-    Future for AsyncPaddedParse<'a, O, R, S, T>
+impl<
+    P: Options + Unpin,
+    O: Offset + Unpin,
+    R: PollReader<O> + Unpin,
+    S: TryInto<O> + Unpin,
+    T: AsyncParse<O>,
+> Future for AsyncPaddedParse<P, O, R, S, T>
 where
     <T as Parsed>::Output<O>: Unpin,
 {
@@ -113,14 +123,14 @@ where
     }
 }
 
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, S, T: AsyncParse<O>> TakeReader<'a, R>
-    for AsyncPaddedParse<'a, O, R, S, T>
+impl<P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin, S, T: AsyncParse<O>>
+    TakeReader<P, R> for AsyncPaddedParse<P, O, R, S, T>
 where
     <T as Parsed>::Output<O>: Unpin,
 {
     impl_take_reader! {}
 
-    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+    fn borrow_reader(&mut self) -> (&mut R, &P) {
         match self {
             Self::Setup(_, _, reader, opts) => (reader, opts),
             Self::ParsingInner(fut) => {
@@ -138,11 +148,11 @@ impl<O: Offset + Unpin, S: TryInto<O> + Unpin, T: AsyncParse<O>> Padded<O, S, T>
 where
     <T as Parsed>::Output<O>: Unpin,
 {
-    pub fn create_fut_from_len<'a, R: PollReader<O> + Unpin>(
+    pub fn create_fut_from_len<P: Options + Unpin, R: PollReader<O> + Unpin>(
         size: S,
         reader: R,
-        opts: &'a ParseOptions,
-    ) -> AsyncPaddedParse<'a, O, R, S, T> {
+        opts: P,
+    ) -> AsyncPaddedParse<P, O, R, S, T> {
         let offset = reader.offset();
         AsyncPaddedParse::Setup(offset, size, reader, opts)
     }

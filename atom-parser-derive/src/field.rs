@@ -1,10 +1,16 @@
 use crate::{
-    Child, ChildList, Conditionals, Flag, FlagList, GroupedConditionals, KRATE, Version,
+    Child, ChildList, Conditionals, Endianess, Flag, FlagList, GroupedConditionals, KRATE, Version,
     VersionList,
 };
 
 #[derive(Clone)]
-pub enum AtomField {
+pub struct AtomField {
+    pub endianess: Option<Endianess>,
+    pub kind: AtomFieldKind,
+}
+
+#[derive(Clone)]
+pub enum AtomFieldKind {
     // 1 byte of version followed by 3 bytes of flags
     // common at the start of some atoms
     //
@@ -120,6 +126,9 @@ fn is_struct_attr(path: &syn::Path) -> bool {
 impl syn::parse::Parse for AtomField {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut attrs = input.call(syn::Attribute::parse_outer)?;
+        let endianess = crate::definition::singular_attr(&mut attrs, "endianess", |attr| {
+            attr.parse_args_with(Endianess::parse_from_syn)
+        })?;
 
         enum AttrKind {
             Atom,
@@ -146,14 +155,18 @@ impl syn::parse::Parse for AtomField {
             .next()
             .map(|(idx, kind)| (attrs.swap_remove(idx), kind));
 
-        Ok(match atom_attr {
-            Some((attr, AttrKind::Atom)) => Self::parse_from_syn(input, &attr)?,
-            Some((attr, AttrKind::Struct)) => Self::Struct(
+        let kind = match atom_attr {
+            Some((attr, AttrKind::Atom)) => AtomFieldKind::parse_from_syn(input, &attr)?,
+            Some((attr, AttrKind::Struct)) => AtomFieldKind::Struct(
                 parse_normal_field(input, attrs)?,
                 StructFieldAttr::parse_from_syn(&attr)?,
             ),
-            None => Self::Struct(parse_normal_field(input, attrs)?, StructFieldAttr::Normal),
-        })
+            None => {
+                AtomFieldKind::Struct(parse_normal_field(input, attrs)?, StructFieldAttr::Normal)
+            }
+        };
+
+        Ok(Self { kind, endianess })
     }
 }
 
@@ -172,6 +185,7 @@ impl AtomFields {
         generic_collection: Option<&proc_macro2::TokenStream>,
         payload_len: Option<&PayloadLength>,
         tag: Option<&Tag>,
+        definition_endianess: Option<&Endianess>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
         let payload_len = AtomFields::nested_payload_len(payload_len, fields);
@@ -184,6 +198,7 @@ impl AtomFields {
                 generic_collection,
                 payload_len.as_ref(),
                 tag.as_ref(),
+                definition_endianess,
             )
         });
 
@@ -200,8 +215,8 @@ impl AtomFields {
     }
 
     pub fn tag(fields: &[AtomField]) -> Option<Tag> {
-        let mut tags = fields.iter().filter_map(|field| match &field {
-            AtomField::Struct(field, StructFieldAttr::Tag) => Some(&field.ty),
+        let mut tags = fields.iter().filter_map(|field| match &field.kind {
+            AtomFieldKind::Struct(field, StructFieldAttr::Tag) => Some(&field.ty),
             _ => None,
         });
 
@@ -211,8 +226,8 @@ impl AtomFields {
 
         let mut tagged = fields.iter().filter(|field| {
             matches!(
-                field,
-                AtomField::Children {
+                &field.kind,
+                AtomFieldKind::Children {
                     kind: ChildrenKind::Tagged { .. },
                     ..
                 }
@@ -243,8 +258,8 @@ impl AtomFields {
     }
 
     pub fn payload_len(fields: &[AtomField]) -> Option<PayloadLength> {
-        let mut tys = fields.iter().filter_map(|field| match &field {
-            AtomField::Struct(field, StructFieldAttr::PayloadLength { offset, padding }) => {
+        let mut tys = fields.iter().filter_map(|field| match &field.kind {
+            AtomFieldKind::Struct(field, StructFieldAttr::PayloadLength { offset, padding }) => {
                 Some((&field.ty, offset, padding))
             }
             _ => None,
@@ -257,9 +272,9 @@ impl AtomFields {
         let ty = tys.next();
         let mut trailing = fields.iter().enumerate().filter(|(_, field)| {
             matches!(
-                field,
-                AtomField::Children { .. }
-                    | AtomField::Struct(
+                &field.kind,
+                AtomFieldKind::Children { .. }
+                    | AtomFieldKind::Struct(
                         _,
                         StructFieldAttr::Payload { .. }
                             | StructFieldAttr::TrailingArray { .. }
@@ -278,8 +293,12 @@ impl AtomFields {
                 Some(_),
                 Some((
                     _,
-                    AtomField::Children {
-                        kind: ChildrenKind::Atom,
+                    AtomField {
+                        kind:
+                            AtomFieldKind::Children {
+                                kind: ChildrenKind::Atom,
+                                ..
+                            },
                         ..
                     },
                 )),
@@ -326,7 +345,7 @@ impl syn::parse::Parse for AtomFields {
     }
 }
 
-impl AtomField {
+impl AtomFieldKind {
     pub fn parse_from_syn(
         input: syn::parse::ParseStream,
         atom_field_attr: &syn::Attribute,
@@ -428,7 +447,9 @@ impl AtomField {
             unreachable!("unknown atom attr")
         })
     }
+}
 
+impl AtomField {
     pub fn as_field_decl(
         &self,
         atom_mod: Option<&syn::Ident>,
@@ -439,9 +460,9 @@ impl AtomField {
 
         let mod_name = atom_mod.map(|name| quote!(#name::));
 
-        Some(match self {
-            Self::Struct(f, attr) => return attr.as_field_decl(f, payload_len),
-            Self::Children { size_ty, kind, .. } => match (kind, size_ty) {
+        Some(match &self.kind {
+            AtomFieldKind::Struct(f, attr) => return attr.as_field_decl(f, payload_len),
+            AtomFieldKind::Children { size_ty, kind, .. } => match (kind, size_ty) {
                 (ChildrenKind::Atom, Some(size_ty)) => {
                     quote! {
                         pub children: ::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name Child>
@@ -465,7 +486,7 @@ impl AtomField {
                     }
                 }
             },
-            Self::Conditional(cond) => {
+            AtomFieldKind::Conditional(cond) => {
                 let exhaustive = cond.is_exhaustive();
                 let name = &cond.field_name;
                 let ty = match cond.group().unwrap() {
@@ -488,12 +509,12 @@ impl AtomField {
                     }
                 }
             }
-            Self::FullBox { name, .. } => {
+            AtomFieldKind::FullBox { name, .. } => {
                 quote! {
                     pub atom_flags: #mod_name #name
                 }
             }
-            Self::Flags {
+            AtomFieldKind::Flags {
                 field_name, name, ..
             } => {
                 let field_name = field_name
@@ -503,79 +524,136 @@ impl AtomField {
                     pub #field_name: #mod_name #name
                 }
             }
-            Self::Version { .. } => unreachable!(),
+            AtomFieldKind::Version { .. } => unreachable!(),
         })
+    }
+
+    pub fn as_variant_decl(
+        &self,
+        payload_len: Option<&PayloadLength>,
+        generics: &syn::Generics,
+    ) -> Option<proc_macro2::TokenStream> {
+        match &self.kind {
+            AtomFieldKind::Struct(field, StructFieldAttr::ReuseCondition) => {
+                let this = AtomField {
+                    kind: AtomFieldKind::Struct(field.clone(), StructFieldAttr::Normal),
+                    endianess: self.endianess.clone(),
+                };
+                this.as_field_decl(None, payload_len, generics)
+            }
+            _ => self.as_field_decl(None, payload_len, generics),
+        }
     }
 
     pub fn as_sync_helper_fn(
         &self,
         atom_mod: Option<&syn::Ident>,
+        definition_endianess: Option<&Endianess>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
         let mod_name = atom_mod.map(|name| quote!(#name::));
-        Some(match self {
-            Self::Struct(f, attr) => return attr.as_sync_helper_fn(f),
-            Self::Children {
+        let format_options = Endianess::format_options(
+            self.endianess.as_ref(),
+            Some(Endianess::format_options_create_fut(
+                definition_endianess,
+                None,
+                false,
+            )),
+            false,
+        );
+        let options_ty = Endianess::format_options_ty(
+            self.endianess.as_ref(),
+            Some(Endianess::format_options_ty(definition_endianess, None)),
+        );
+        Some(match &self.kind {
+            AtomFieldKind::Struct(f, attr) => {
+                return attr.as_sync_helper_fn(f, &format_options, &options_ty);
+            }
+            AtomFieldKind::Children {
                 kind: ChildrenKind::Tagged { .. },
                 ..
             } => return None,
-            Self::Children {
+            AtomFieldKind::Children {
                 size_ty,
                 kind: ChildrenKind::Atom,
                 ..
             } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        pub fn children<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::DynamicArrayIter<'__parse_options, __Offset, __Reader, #size_ty, #mod_name Child, false> {
+                        pub fn children<__Options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader:  __Reader, opts: __Options) -> ::#KRATE::array::DynamicArrayIter<#options_ty, __Offset, __Reader, #size_ty, #mod_name Child, false> {
+                            #format_options
                             ::#KRATE::array::DynamicArrayIter::from_sized_children(&self.children, reader, opts)
                         }
                     }
                 } else {
                     quote! {
-                        pub fn children<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::children::ChildrenIter<'__parse_options, __Offset, __Reader, #mod_name Child> {
+                        pub fn children<__Options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: __Reader, opts: __Options) -> ::#KRATE::children::ChildrenIter<#options_ty, __Offset, __Reader, #mod_name Child> {
+                            #format_options
                             ::#KRATE::children::ChildrenIter::from_children(&self.children, reader, opts)
                         }
                     }
                 }
             }
-            Self::FullBox { .. } | Self::Flags { .. } | Self::Conditional(..) => return None,
-            Self::Version { .. } => unreachable!(),
+            AtomFieldKind::FullBox { .. }
+            | AtomFieldKind::Flags { .. }
+            | AtomFieldKind::Conditional(..) => return None,
+            AtomFieldKind::Version { .. } => unreachable!(),
         })
     }
 
     pub fn as_async_helper_fn(
         &self,
         atom_mod: Option<&syn::Ident>,
+        definition_endianess: Option<&Endianess>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
         let mod_name = atom_mod.map(|name| quote!(#name::));
-        Some(match self {
-            Self::Struct(f, attr) => return attr.as_async_helper_fn(f),
-            Self::Children {
+        let format_options = Endianess::format_options(
+            self.endianess.as_ref(),
+            Some(Endianess::format_options_create_fut(
+                definition_endianess,
+                None,
+                false,
+            )),
+            false,
+        );
+        let options_ty = Endianess::format_options_ty(
+            self.endianess.as_ref(),
+            Some(Endianess::format_options_ty(definition_endianess, None)),
+        );
+        Some(match &self.kind {
+            AtomFieldKind::Struct(f, attr) => {
+                return attr.as_async_helper_fn(f, &format_options, &options_ty);
+            }
+            AtomFieldKind::Children {
                 kind: ChildrenKind::Tagged { .. },
                 ..
             } => return None,
-            Self::Children {
+            AtomFieldKind::Children {
                 size_ty,
                 kind: ChildrenKind::Atom,
                 ..
             } => {
                 if let Some(size_ty) = size_ty {
                     quote! {
-                        pub fn children_async<'__parse_options, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::AsyncDynamicArrayIter<'__parse_options, __Offset, __Reader, #size_ty, #mod_name Child, false> {
+                        pub fn children_async<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: __Reader, opts: __Options) -> ::#KRATE::array::AsyncDynamicArrayIter<#options_ty, __Offset, __Reader, #size_ty, #mod_name Child, false> {
+                            #format_options
                             ::#KRATE::array::AsyncDynamicArrayIter::from_sized_children(&self.children, reader, opts)
                         }
                     }
                 } else {
                     quote! {
-                        pub fn children_async<'__parse_options, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::children::AsyncChildrenIter<'__parse_options, __Offset, __Reader, #mod_name Child> {
+                        pub fn children_async<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: __Reader, opts: __Options) -> ::#KRATE::children::AsyncChildrenIter<#options_ty, __Offset, __Reader, #mod_name Child> {
+                            #format_options
                             ::#KRATE::children::AsyncChildrenIter::from_children(&self.children, reader, opts)
                         }
                     }
                 }
             }
-            Self::FullBox { .. } | Self::Flags { .. } | Self::Conditional(..) => return None,
-            Self::Version { .. } => unreachable!(),
+            AtomFieldKind::FullBox { .. }
+            | AtomFieldKind::Flags { .. }
+            | AtomFieldKind::Conditional(..) => return None,
+            AtomFieldKind::Version { .. } => unreachable!(),
         })
     }
 
@@ -586,6 +664,7 @@ impl AtomField {
         version_mod: Option<&syn::Ident>,
         payload_len: Option<&PayloadLength>,
         tag: Option<&Tag>,
+        definition_endianess: Option<&Endianess>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
 
@@ -594,21 +673,39 @@ impl AtomField {
             None => quote!(#atom_mod),
         };
 
-        Some(match self {
-            Self::Struct(field, attr) => return attr.as_sync_parse(field, payload_len),
-            Self::Children {
+        let format_options = Endianess::format_options(
+            self.endianess.as_ref(),
+            Some(Endianess::format_options_create_fut(
+                definition_endianess,
+                None,
+                true,
+            )),
+            true,
+        );
+
+        Some(match &self.kind {
+            AtomFieldKind::Struct(field, attr) => {
+                return attr.as_sync_parse(field, payload_len, &format_options);
+            }
+            AtomFieldKind::Children {
                 size_ty,
                 kind,
                 children,
             } => match (kind, size_ty) {
                 (ChildrenKind::Atom, Some(size_ty)) => {
                     quote! {
-                        let children = <::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name::Child>>::parse(reader, opts)?;
+                        let children = {
+                            #format_options
+                            <::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name::Child>>::parse(reader, &opts)?
+                        };
                     }
                 }
                 (ChildrenKind::Atom, None) => {
                     quote! {
-                        let children = <::#KRATE::children::Children<__Offset, #mod_name::Child>>::parse(reader, opts)?;
+                        let children = {
+                            #format_options
+                            <::#KRATE::children::Children<__Offset, #mod_name::Child>>::parse(reader, &opts)?
+                        };
                     }
                 }
                 (
@@ -639,6 +736,7 @@ impl AtomField {
 
                     quote! {
                         let #field_name = {
+                            #format_options
                             #(#tag_bindings)*
 
                             let mut reader = #reader;
@@ -654,7 +752,11 @@ impl AtomField {
                     }
                 }
             },
-            Self::Conditional(cond) => {
+            AtomFieldKind::Conditional(cond) => {
+                assert!(
+                    self.endianess.is_none(),
+                    "endianess for a conditional field is not supported."
+                );
                 let enum_name =
                     if let GroupedConditionals::Enum { name, .. } = cond.group().unwrap() {
                         Some(quote!(#name ::))
@@ -673,6 +775,7 @@ impl AtomField {
                                 version_mod,
                                 payload_len.as_ref(),
                                 tag.as_ref(),
+                                definition_endianess,
                             )
                         });
                         let collection = fields.iter().filter_map(|f| f.as_collection());
@@ -714,15 +817,16 @@ impl AtomField {
                     let #name = #conditional ;
                 }
             }
-            Self::FullBox { name, .. } => {
+            AtomFieldKind::FullBox { name, .. } => {
                 quote! {
                     let atom_flags = {
-                        let bytes = <[u8; 3]>::parse(reader, opts)?;
-                        <#mod_name::#name as ::#KRATE::flags::FlagsParse<[u8; 3]>>::try_from_bits(bytes, opts)?
+                        #format_options
+                        let bytes = <[u8; 3]>::parse(reader, &opts)?;
+                        <#mod_name::#name as ::#KRATE::flags::FlagsParse<[u8; 3]>>::try_from_bits(bytes, &opts)?
                     };
                 }
             }
-            Self::Flags {
+            AtomFieldKind::Flags {
                 name,
                 parse_repr,
                 field_name,
@@ -730,36 +834,37 @@ impl AtomField {
             } => {
                 quote! {
                     let #field_name = {
+                        #format_options
                         use ::#KRATE::flags::FlagsParse;
-                        let flags = <#parse_repr>::parse(reader, opts)?;
-                        <#mod_name::#name>::try_from_bits(flags, opts)?
+                        let flags = <#parse_repr>::parse(reader, &opts)?;
+                        <#mod_name::#name>::try_from_bits(flags, &opts)?
                     };
                 }
             }
-            Self::Version { .. } => unreachable!(),
+            AtomFieldKind::Version { .. } => unreachable!(),
         })
     }
 
     pub fn as_collection(&self) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
-        Some(match self {
-            Self::Struct(field, attr) => return attr.as_collection(field),
-            Self::Children { kind, .. } => match kind {
+        Some(match &self.kind {
+            AtomFieldKind::Struct(field, attr) => return attr.as_collection(field),
+            AtomFieldKind::Children { kind, .. } => match kind {
                 ChildrenKind::Atom => quote!(children,),
                 ChildrenKind::Tagged { field_name, .. } => quote!(#field_name,),
             },
-            Self::Conditional(cond) => {
+            AtomFieldKind::Conditional(cond) => {
                 let name = &cond.field_name;
                 quote! {
                     #name,
                 }
             }
-            Self::FullBox { .. } => {
+            AtomFieldKind::FullBox { .. } => {
                 quote! {
                     atom_flags,
                 }
             }
-            Self::Flags { field_name, .. } => {
+            AtomFieldKind::Flags { field_name, .. } => {
                 let field_name = field_name
                     .clone()
                     .unwrap_or(syn::Ident::new("flags", proc_macro2::Span::call_site()));
@@ -768,7 +873,7 @@ impl AtomField {
                     #field_name,
                 }
             }
-            Self::Version { .. } => return None,
+            AtomFieldKind::Version { .. } => return None,
         })
     }
 
@@ -781,11 +886,12 @@ impl AtomField {
         generic_collection: Option<&proc_macro2::TokenStream>,
         payload_len: Option<&PayloadLength>,
         tag: Option<&Tag>,
+        definition_endianess: Option<&Endianess>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
-        Some(match self {
-            Self::Struct(_, _) => return None,
-            Self::Children { children, kind, .. } => {
+        Some(match &self.kind {
+            AtomFieldKind::Struct(_, _) => return None,
+            AtomFieldKind::Children { children, kind, .. } => {
                 let children_name = match kind {
                     ChildrenKind::Atom => quote::format_ident!("Child"),
                     ChildrenKind::Tagged { tagged_name, .. } => tagged_name.clone(),
@@ -872,8 +978,8 @@ impl AtomField {
                             }),
                             quote! {
                                 impl <__Offset: ::#KRATE::reader::Offset> ::#KRATE::parse::Parse<__Offset> for Child {
-                                    fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>>(reader: &mut __Reader, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
-                                        let atom = ::#KRATE::atom_header::AtomHeader::parse(reader, opts)?;
+                                    fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>, __Options: ::#KRATE::parse_options::Options>(reader: &mut __Reader, opts: __Options) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
+                                        let atom = ::#KRATE::atom_header::AtomHeader::parse(reader, &opts)?;
                                         let atom_size = atom.size.size()
                                             .map(|size| size.try_into())
                                             .transpose().map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError))?
@@ -895,22 +1001,22 @@ impl AtomField {
                                     }
                                 }
 
-                                pub enum AsyncChildParse<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
-                                    AtomHeader(<::#KRATE::atom_header::AtomHeader as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>),
+                                pub enum AsyncChildParse<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
+                                    AtomHeader(<::#KRATE::atom_header::AtomHeader as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<__Options, __Reader>),
                                     #(#async_sm)*
-                                    Seek(Child<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
-                                    Done(::#KRATE::reader::TrailingReader<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                    Seek(Child<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>>, __Options),
+                                    Done(::#KRATE::reader::TrailingReader<__Offset, __Reader>, __Options),
                                     Empty,
                                 }
 
                                 impl <__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<__Offset> for Child {
-                                    type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = AsyncChildParse<'__parse_options, __Offset, __Reader>;
-                                    fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
+                                    type Fut<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = AsyncChildParse<__Options, __Offset, __Reader>;
+                                    fn create_fut<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: __Options) -> Self::Fut<__Options, __Reader> {
                                         AsyncChildParse::AtomHeader(::#KRATE::atom_header::AtomHeader::create_fut(reader, opts))
                                     }
                                 }
 
-                                impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> AsyncChildParse<'__parse_options, __Offset, __Reader> {
+                                impl <__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> AsyncChildParse<__Options, __Offset, __Reader> {
                                     pub fn reader(&mut self) -> &mut ::#KRATE::reader::TrailingReader<__Offset, __Reader> {
                                         match self {
                                             Self::Done(reader, _) => reader,
@@ -919,14 +1025,14 @@ impl AtomField {
                                     }
                                 }
 
-                                impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for AsyncChildParse<'__parse_options, __Offset, __Reader> {
-                                    fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                impl <__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<__Options, __Reader> for AsyncChildParse<__Options, __Offset, __Reader> {
+                                    fn take_reader(self) -> (__Reader, __Options) {
                                         match self {
                                             Self::Done(reader, opts) => (reader.reader, opts),
                                             _ => unreachable!("invalid state of AsyncChildParse")
                                         }
                                     }
-                                    fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                    fn borrow_reader(&mut self) -> (&mut __Reader, &__Options) {
                                         match self {
                                             Self::AtomHeader(fut) => fut.borrow_reader(),
                                             #(#borrow_reader_variants)*
@@ -958,28 +1064,28 @@ impl AtomField {
                         (
                             None,
                             quote! {
-                                pub enum #async_children_name<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
+                                pub enum #async_children_name<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
                                     #(#async_sm)*
-                                    Seek(<#children_name as #KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
-                                    Done(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                    Seek(<#children_name as #KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, __Reader>, __Options),
+                                    Done(__Reader, __Options),
                                     Empty,
                                 }
 
-                                pub enum #async_children_name_with_len<'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
+                                pub enum #async_children_name_with_len<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> {
                                     #(#async_sm_with_len)*
-                                    Seek(<#children_name as #KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, __Reader>, &'__parse_options ::#KRATE::parse_options::ParseOptions),
-                                    Done(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+                                    Seek(<#children_name as #KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::reader::AsyncSeek<__Offset, __Reader>, __Options),
+                                    Done(__Reader, __Options),
                                     Empty,
                                 }
 
-                                impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #async_children_name<'__parse_options, __Offset, __Reader> {
-                                    fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                impl <__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<__Options, __Reader> for #async_children_name<__Options, __Offset, __Reader> {
+                                    fn take_reader(self) -> (__Reader, __Options) {
                                         match self {
                                             Self::Done(reader, opts) => (reader, opts),
                                             _ => unreachable!("invalid state of AsyncChildParse")
                                         }
                                     }
-                                    fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                    fn borrow_reader(&mut self) -> (&mut __Reader, &__Options) {
                                         match self {
                                             #(#borrow_reader_variants)*
                                             Self::Seek(_, seek, opts) => (&mut seek.reader, opts),
@@ -989,14 +1095,14 @@ impl AtomField {
                                     }
                                 }
 
-                                impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #async_children_name_with_len<'__parse_options, __Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>> {
-                                    fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                impl <__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> ::#KRATE::reader::TakeReader<__Options, __Reader> for #async_children_name_with_len<__Options, __Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>> {
+                                    fn take_reader(self) -> (__Reader, __Options) {
                                         match self {
                                             Self::Done(reader, opts) => (reader.reader, opts),
                                             _ => unreachable!("invalid state of AsyncChildParse")
                                         }
                                     }
-                                    fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                                    fn borrow_reader(&mut self) -> (&mut __Reader, &__Options) {
                                         match self {
                                             #(#borrow_reader_variants_with_len)*
                                             Self::Seek(_, seek, opts) => (&mut seek.reader.reader, opts),
@@ -1007,13 +1113,13 @@ impl AtomField {
                                 }
 
                                 impl <__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin> ::#KRATE::parse::AsyncParse<__Offset> for #children_name {
-                                    type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #async_children_name<'__parse_options, __Offset, __Reader>;
-                                    fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
+                                    type Fut<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #async_children_name<__Options, __Offset, __Reader>;
+                                    fn create_fut<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: __Options) -> Self::Fut<__Options, __Reader> {
                                         unreachable!("need tag to parse")
                                     }
                                 }
 
-                                impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> Future for #async_children_name_with_len<'__parse_options, __Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>> {
+                                impl <__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> Future for #async_children_name_with_len<__Options, __Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>> {
                                     type Output = ::core::result::Result<<#children_name as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError>;
                                     fn poll(mut self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
                                         loop {
@@ -1074,7 +1180,7 @@ impl AtomField {
                         type Output<__Offset> = #children_name<__Offset>;
                     }
 
-                    impl <'__parse_options, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> Future for #async_children_name<'__parse_options, __Offset, __Reader> {
+                    impl <__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> Future for #async_children_name<__Options, __Offset, __Reader> {
                         type Output = ::core::result::Result<<#children_name as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError>;
                         fn poll(mut self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
                             loop {
@@ -1106,27 +1212,29 @@ impl AtomField {
                     #parse_impl
                 }
             }
-            Self::Conditional(cond) => {
-                let nested_defs =
-                    cond.as_async_state(generics, generic_collection, payload_len, tag);
+            AtomFieldKind::Conditional(cond) => {
+                let nested_defs = cond.as_async_state(
+                    generics,
+                    generic_collection,
+                    payload_len,
+                    tag,
+                    definition_endianess,
+                );
 
                 match cond.group().unwrap() {
                     GroupedConditionals::Struct { name, fields } => {
                         let payload_len = AtomFields::nested_payload_len(payload_len, &fields);
                         let tag = AtomFields::nested_tag(tag, &fields);
                         let helper_fns = crate::conditional::ConditionalVariant::format_helper_fns(
-                            &name, &fields, generics,
+                            &name,
+                            &fields,
+                            generics,
+                            definition_endianess,
                         );
 
                         let fs = fields
                             .iter()
-                            .map(|f| match f {
-                                AtomField::Struct(field, StructFieldAttr::ReuseCondition) => {
-                                    AtomField::Struct(field.clone(), StructFieldAttr::Normal)
-                                }
-                                r => r.clone(),
-                            })
-                            .filter_map(|f| f.as_field_decl(None, payload_len.as_ref(), generics));
+                            .filter_map(|f| f.as_variant_decl(payload_len.as_ref(), generics));
 
                         let definitions = fields.iter().filter_map(|field| {
                             field.as_inline_definition(
@@ -1136,6 +1244,7 @@ impl AtomField {
                                 generic_collection,
                                 payload_len.as_ref(),
                                 tag.as_ref(),
+                                definition_endianess,
                             )
                         });
 
@@ -1185,13 +1294,9 @@ impl AtomField {
                         let variant_defs = variants.iter().map(|v| {
                             let name = &v.variant_name;
                             let payload_len = AtomFields::nested_payload_len(payload_len, &v.fields);
-                            let helper_fns = crate::conditional::ConditionalVariant::format_helper_fns(&v.variant_name, &v.fields, generics);
-                            let fs = v.fields.iter().map(|f| {
-                                match f {
-                                    AtomField::Struct(field, StructFieldAttr::ReuseCondition) => AtomField::Struct(field.clone(), StructFieldAttr::Normal),
-                                    r => r.clone(),
-                                }
-                            }).filter_map(|f| f.as_field_decl(None, payload_len.as_ref(), generics));
+                            let helper_fns = crate::conditional::ConditionalVariant::format_helper_fns(&v.variant_name, &v.fields, generics, definition_endianess);
+
+                            let fs = v.fields.iter().filter_map(|f| f.as_variant_decl(payload_len.as_ref(), generics));
 
                             let mut generics = generics.clone();
                             generics.params.push(syn::parse_quote!(__Offset = usize));
@@ -1227,6 +1332,7 @@ impl AtomField {
                                     generic_collection,
                                     payload_len.as_ref(),
                                     tag.as_ref(),
+                                    definition_endianess,
                                 )
                             })
                         });
@@ -1249,7 +1355,7 @@ impl AtomField {
                     }
                 }
             }
-            Self::FullBox { name, flags } => {
+            AtomFieldKind::FullBox { name, flags } => {
                 let can_elide_flags = FlagList::can_elide_flag_storage(&flags, version);
                 let flags_debug = FlagList::debug_impl(flags, name, version, can_elide_flags);
 
@@ -1261,7 +1367,12 @@ impl AtomField {
 
                 let bitops_impl = FlagList::flags_bitops_impl(name);
                 let async_parse_repr = syn::parse_quote!([u8; 3]);
-                let async_parse_impl = FlagList::async_parse_impl(name, &async_parse_repr);
+                let async_parse_impl = FlagList::async_parse_impl(
+                    name,
+                    &async_parse_repr,
+                    definition_endianess,
+                    self.endianess.as_ref(),
+                );
 
                 let to_bits_impl = FlagList::to_bits_impl_fullbox(&flags, version, can_elide_flags);
                 let bits_impl = FlagList::bits_impl(name, &syn::parse_quote!(u32));
@@ -1295,7 +1406,7 @@ impl AtomField {
                     }
 
                     impl ::#KRATE::flags::FlagsParse<[u8; 3]> for #name {
-                        fn try_from_bits(bits: [u8; 3], opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<Self, ::#KRATE::error::ParseError> {
+                        fn try_from_bits<__Options: ::#KRATE::parse_options::Options>(bits: [u8; 3], opts: __Options) -> ::core::result::Result<Self, ::#KRATE::error::ParseError> {
                             {
                                 let [b0, b1, b2] = bits;
                                 let bits = u32::from_be_bytes([b0, b1, b2, 0]);
@@ -1316,7 +1427,7 @@ impl AtomField {
                     #flags_debug
                 }
             }
-            Self::Flags {
+            AtomFieldKind::Flags {
                 name,
                 parse_repr,
                 flags,
@@ -1328,7 +1439,12 @@ impl AtomField {
                     FlagList::flags_trait_impl(name, flags, parse_repr, version, can_elide_flags);
 
                 let bitops_impl = FlagList::flags_bitops_impl(name);
-                let async_parse_impl = FlagList::async_parse_impl(name, parse_repr);
+                let async_parse_impl = FlagList::async_parse_impl(
+                    name,
+                    parse_repr,
+                    definition_endianess,
+                    self.endianess.as_ref(),
+                );
 
                 let flags_impl = FlagList::flags_impl(name, flags, parse_repr, version);
                 let flag_storage_elision =
@@ -1366,7 +1482,7 @@ impl AtomField {
                     #bits_impl
                 }
             }
-            Self::Version { .. } => return None,
+            AtomFieldKind::Version { .. } => return None,
         })
     }
 }
@@ -1597,6 +1713,7 @@ impl StructFieldAttr {
         &self,
         field: &syn::Field,
         payload_len: Option<&PayloadLength>,
+        format_options: &proc_macro2::TokenStream,
     ) -> Option<proc_macro2::TokenStream> {
         let name = &field.ident;
         let ty = &field.ty;
@@ -1604,9 +1721,12 @@ impl StructFieldAttr {
         Some(match self {
             Self::Reserved => {
                 quote! {
-                    let _reserved = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
-                    if opts.error_on_used_reserved_fields && (_reserved != unsafe { ::core::mem::zeroed::<#ty>() }) {
-                        return Err(::#KRATE::error::ParseError::UsedReservedField);
+                    {
+                        #format_options
+                        let _reserved = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?;
+                        if ::#KRATE::parse_options::Options::options(&opts).error_on_used_reserved_fields && (_reserved != unsafe { ::core::mem::zeroed::<#ty>() }) {
+                            return Err(::#KRATE::error::ParseError::UsedReservedField);
+                        }
                     }
                 }.into()
             },
@@ -1614,9 +1734,12 @@ impl StructFieldAttr {
                 val,
             } => {
                 quote! {
-                    let _expected = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
-                    if _expected != #val {
-                        return Err(::#KRATE::error::ParseError::UnexpectedValue);
+                    {
+                        #format_options
+                        let _expected = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?;
+                        if _expected != #val {
+                            return Err(::#KRATE::error::ParseError::UnexpectedValue);
+                        }
                     }
                 }.into()
             }
@@ -1625,73 +1748,105 @@ impl StructFieldAttr {
                 zero_relative,
             } => {
                 quote! {
-                    let #name = <::#KRATE::array::DynamicArray::<__Offset, #length_ty, #ty, #zero_relative> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
+                    let #name = {
+                        #format_options
+                        <::#KRATE::array::DynamicArray::<__Offset, #length_ty, #ty, #zero_relative> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
+                    };
                 }
             }
             Self::NullTerminatedArray => {
                 quote! {
-                    let #name = <::#KRATE::array::NullTerminated::<__Offset, #ty> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
+                    let #name = {
+                        #format_options
+                        <::#KRATE::array::NullTerminated::<__Offset, #ty> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
+                    };
                 }
             }
             Self::TrailingArray { from_expr } => {
                 if let Some(LenFromExpr { size_expr, .. }) = from_expr {
                     quote! {
-                        let #name = ::#KRATE::trailing::Trailing::parse_from_len(#size_expr, reader, opts)?;
+                        let #name = {
+                            #format_options
+                            ::#KRATE::trailing::Trailing::parse_from_len(#size_expr, reader, &opts)?
+                        };
                     }
                 } else if let Some(payload_len) = payload_len {
                     let len = payload_len.as_parsed_length();
 
                     quote! {
-                        let #name = ::#KRATE::trailing::Trailing::parse_from_len(#len, reader, opts)?;
+                        let #name = {
+                            #format_options
+                            ::#KRATE::trailing::Trailing::parse_from_len(#len, reader, &opts)?
+                        };
                     }
                 } else {
                     quote! {
-                        let #name = ::#KRATE::trailing::Trailing::parse(reader, opts)?;
+                        let #name = {
+                            #format_options
+                            ::#KRATE::trailing::Trailing::parse(reader, &opts)?
+                        };
                     }
                 }
             }
             Self::Tag => {
                 quote! {
-                    let _tag = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
+                    let _tag = {
+                        #format_options
+                        <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
+                    };
                 }
             }
             Self::PayloadLength{..} => {
                 quote! {
-                    let _payload_len = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
+                    let _payload_len = {
+                        #format_options
+                        <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
+                    };
                 }
             }
             Self::Payload { from_expr } => {
                 if let Some(LenFromExpr { size_expr, .. }) = from_expr {
                     quote! {
-                        let #name = ::#KRATE::payload::Payload::parse_from_len(#size_expr, reader, opts)?;
+                        let #name = {
+                            #format_options
+                            ::#KRATE::payload::Payload::parse_from_len(#size_expr, reader, &opts)?
+                        };
                     }
-                } else if let Some(PayloadLength { offset, ..}) = payload_len {
-                    let len = if let Some(offset) = offset {
-                        quote!(_payload_len.checked_sub(#offset).ok_or(::#KRATE::error::ParseError::AtomSizeTooSmall)?)
-                    } else {
-                        quote!(_payload_len)
-                    };
+                } else if let Some(payload_len) = payload_len {
+                    let len = payload_len.as_parsed_length();
 
                     quote! {
-                        let #name = ::#KRATE::payload::Payload::parse_from_len(#len, reader, opts)?;
+                        let #name = {
+                            #format_options
+                            ::#KRATE::payload::Payload::parse_from_len(#len, reader, &opts)?
+                        };
                     }
                 } else {
                     quote! {
-                        let #name = ::#KRATE::payload::Payload::parse(reader, opts)?;
+                        let #name = {
+                            #format_options
+                            ::#KRATE::payload::Payload::parse(reader, &opts)?
+                        };
                     }
                 }
             }
             Self::Padded { from_expr } => {
                 if let Some(LenFromExpr { size_expr, ty: size_ty }) = from_expr {
                     quote! {
-                        let #name = ::#KRATE::padded::Padded::<__Offset, #size_ty, #ty>::parse_from_len(#size_expr, reader, opts)?;
+                        let #name = {
+                            #format_options
+                            ::#KRATE::padded::Padded::<__Offset, #size_ty, #ty>::parse_from_len(#size_expr, reader, &opts)?
+                        };
                     }
                 } else if let Some(payload_len) = payload_len {
                     let len = payload_len.as_parsed_length();
                     let size_ty = &payload_len.ty;
 
                     quote! {
-                        let #name = ::#KRATE::padded::Padded::<__Offset, #size_ty, #ty>::parse_from_len(#len, reader, opts)?;
+                        let #name = {
+                            #format_options
+                            ::#KRATE::padded::Padded::<__Offset, #size_ty, #ty>::parse_from_len(#len, reader, &opts)?
+                        };
                     }
                 } else {
                     panic!("neither payload length or length specifier specified for padded field")
@@ -1699,19 +1854,28 @@ impl StructFieldAttr {
             }
             Self::Normal | Self::Condition => {
                 quote! {
-                    let #name = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
+                    let #name = {
+                        #format_options
+                        <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
+                    };
                 }.into()
             }
             Self::PascalString {
                 length_ty
             } => {
                 quote! {
-                    let #name = <::#KRATE::string::PascalString::<__Offset, #length_ty> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
+                    let #name = {
+                        #format_options
+                        <::#KRATE::string::PascalString::<__Offset, #length_ty> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
+                    };
                 }
             }
             Self::NullTerminatedString => {
                 quote! {
-                    let #name = <::#KRATE::string::NullTerminatedString<__Offset> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, opts)?;
+                    let #name = {
+                        #format_options
+                        <::#KRATE::string::NullTerminatedString<__Offset> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
+                    };
                 }
             }
             // builtin parsing in versioned impl
@@ -1826,7 +1990,12 @@ impl StructFieldAttr {
         })
     }
 
-    pub fn as_sync_helper_fn(&self, field: &syn::Field) -> Option<proc_macro2::TokenStream> {
+    pub fn as_sync_helper_fn(
+        &self,
+        field: &syn::Field,
+        format_options: &proc_macro2::TokenStream,
+        options_ty: &proc_macro2::TokenStream,
+    ) -> Option<proc_macro2::TokenStream> {
         let name = &field.ident;
         let ty = &field.ty;
         let name = name.as_ref().unwrap();
@@ -1849,14 +2018,16 @@ impl StructFieldAttr {
             }
             Self::TrailingArray { .. } => {
                 quote! {
-                    pub fn #name<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<::#KRATE::trailing::TrailingIterator<'__parse_options, __Offset, __Reader, #ty>, ::#KRATE::error::ParseError> {
+                    pub fn #name<__Options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: __Reader, opts: __Options) -> ::core::result::Result<::#KRATE::trailing::TrailingIterator<#options_ty, __Offset, __Reader, #ty>, ::#KRATE::error::ParseError> {
+                        #format_options
                         ::#KRATE::trailing::TrailingIterator::from_trailing(&self.#name, reader, opts)
                     }
                 }
             }
             Self::NullTerminatedArray => {
                 quote! {
-                    pub fn #name<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::trailing::TrailingIterator<'__parse_options, __Offset, __Reader, #ty> {
+                    pub fn #name<__Options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: __Reader, opts: __Options) -> ::#KRATE::trailing::TrailingIterator<#options_ty, __Offset, __Reader, #ty> {
+                        #format_options
                         ::#KRATE::trailing::TrailingIterator::from_null_terminated(&self.#name, reader, opts)
                     }
                 }
@@ -1866,7 +2037,8 @@ impl StructFieldAttr {
                 length_ty,
             } => {
                 quote! {
-                    pub fn #name<'__parse_options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&'__parse_options self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::DynamicArrayIter<'__parse_options, __Offset, __Reader, #length_ty, #ty, #zero_relative> {
+                    pub fn #name<__Options, __Reader: ::#KRATE::reader::Reader<__Offset>>(&self, reader: __Reader, opts: __Options) -> ::#KRATE::array::DynamicArrayIter<#options_ty, __Offset, __Reader, #length_ty, #ty, #zero_relative> {
+                        #format_options
                         ::#KRATE::array::DynamicArrayIter::from_dynamic_array(&self.#name, reader, opts)
                     }
                 }
@@ -1874,7 +2046,12 @@ impl StructFieldAttr {
         })
     }
 
-    pub fn as_async_helper_fn(&self, field: &syn::Field) -> Option<proc_macro2::TokenStream> {
+    pub fn as_async_helper_fn(
+        &self,
+        field: &syn::Field,
+        format_options: &proc_macro2::TokenStream,
+        options_ty: &proc_macro2::TokenStream,
+    ) -> Option<proc_macro2::TokenStream> {
         let name = &field.ident;
         let ty = &field.ty;
         let name = name.as_ref().unwrap();
@@ -1899,7 +2076,8 @@ impl StructFieldAttr {
                 let async_name = quote::format_ident!("{name}_async");
 
                 quote! {
-                    pub fn #async_name<'__parse_options, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<::#KRATE::trailing::AsyncTrailingIterator<'__parse_options, __Offset, __Reader, #ty>, ::#KRATE::error::ParseError> {
+                    pub fn #async_name<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: __Reader, opts: __Options) -> ::core::result::Result<::#KRATE::trailing::AsyncTrailingIterator<#options_ty, __Offset, __Reader, #ty>, ::#KRATE::error::ParseError> {
+                        #format_options
                         ::#KRATE::trailing::AsyncTrailingIterator::from_trailing(&self.#name, reader, opts)
                     }
                 }
@@ -1907,7 +2085,8 @@ impl StructFieldAttr {
             Self::NullTerminatedArray => {
                 let async_name = quote::format_ident!("{name}_async");
                 quote! {
-                    pub fn #async_name<'__parse_options, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::trailing::AsyncTrailingIterator<'__parse_options, __Offset, __Reader, #ty> {
+                    pub fn #async_name<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: __Reader, opts: __Options) -> ::#KRATE::trailing::AsyncTrailingIterator<#options_ty, __Offset, __Reader, #ty> {
+                        #format_options
                         ::#KRATE::trailing::AsyncTrailingIterator::from_null_terminated(&self.#name, reader, opts)
                     }
                 }
@@ -1919,7 +2098,8 @@ impl StructFieldAttr {
                 let async_name = quote::format_ident!("{name}_async");
 
                 quote! {
-                    pub fn #async_name<'__parse_options, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&'__parse_options self, reader: &'__parse_options mut __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> ::#KRATE::array::AsyncDynamicArrayIter<'__parse_options, __Offset, __Reader, #length_ty, #ty, #zero_relative> {
+                    pub fn #async_name<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::SwapOffsets<__Offset> + ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(&self, reader: __Reader, opts: __Options) -> ::#KRATE::array::AsyncDynamicArrayIter<#options_ty, __Offset, __Reader, #length_ty, #ty, #zero_relative> {
+                        #format_options
                         ::#KRATE::array::AsyncDynamicArrayIter::from_dynamic_array(&self.#name, reader, opts)
                     }
                 }
@@ -1955,7 +2135,7 @@ pub fn format_parse_impl(
 
     quote::quote! {
         impl #impl_generics ::#KRATE::parse::Parse<__Offset> for #name #parse_generics #where_clause {
-            fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>>(reader: &mut __Reader, opts: &::#KRATE::parse_options::ParseOptions) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
+            fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>, __Options: ::#KRATE::parse_options::Options>(reader: &mut __Reader, opts: __Options) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
                 #(#sync_parsing)*
                 Ok(#name {
                     #(#field_collection)*
@@ -2119,38 +2299,48 @@ impl FieldKind<'_> {
         generic_collection: Option<&proc_macro2::TokenStream>,
         payload_len: Option<&PayloadLength>,
         tag: Option<&Tag>,
+        current_field_endianess: Option<&Endianess>,
+        next_field_endianess: Option<&Endianess>,
+        definition_endianess: Option<&Endianess>,
+        first: bool,
     ) -> proc_macro2::TokenStream {
         use quote::quote;
+        let options_transition = Endianess::format_state_transition_options(
+            current_field_endianess,
+            next_field_endianess,
+            definition_endianess,
+            first,
+        );
         match self {
             Self::Trailing(expr_len) => {
                 if let Some(LenFromExpr { size_expr, .. }) = expr_len {
-                    quote!(::#KRATE::trailing::Trailing::create_fut_from_len(#size_expr, reader, opts))
+                    quote!(::#KRATE::trailing::Trailing::create_fut_from_len(#size_expr, reader, #options_transition))
                 } else if let Some(payload_len) = payload_len {
                     let len = payload_len.as_parsed_length();
 
-                    quote!(::#KRATE::trailing::Trailing::create_fut_from_len(#len, reader, opts))
+                    quote!(::#KRATE::trailing::Trailing::create_fut_from_len(#len, reader, #options_transition))
                 } else {
-                    quote!(::#KRATE::trailing::Trailing::create_fut(reader, opts))
+                    quote!(::#KRATE::trailing::Trailing::create_fut(reader, #options_transition))
                 }
             }
             Self::Payload(expr_len) => {
                 if let Some(LenFromExpr { size_expr, .. }) = expr_len {
-                    quote!(::#KRATE::payload::Payload::create_fut_from_len(#size_expr, reader, opts))
+                    quote!(::#KRATE::payload::Payload::create_fut_from_len(#size_expr, reader, #options_transition))
                 } else if let Some(payload_len) = payload_len {
                     let len = payload_len.as_parsed_length();
 
-                    quote!(::#KRATE::payload::Payload::create_fut_from_len(#len, reader, opts))
+                    quote!(::#KRATE::payload::Payload::create_fut_from_len(#len, reader, #options_transition))
                 } else {
-                    quote!(::#KRATE::payload::Payload::create_fut(reader, opts))
+                    quote!(::#KRATE::payload::Payload::create_fut(reader, #options_transition))
                 }
             }
             Self::Padded(expr_len) => {
                 if let Some(LenFromExpr { size_expr, .. }) = expr_len {
-                    quote!(::#KRATE::padded::Padded::create_fut_from_len(#size_expr, reader, opts))
+                    quote!(::#KRATE::padded::Padded::create_fut_from_len(#size_expr, reader, #options_transition))
                 } else if let Some(payload_len) = payload_len {
                     let len = payload_len.as_parsed_length();
 
-                    quote!(::#KRATE::padded::Padded::create_fut_from_len(#len, reader, opts))
+                    quote!(::#KRATE::padded::Padded::create_fut_from_len(#len, reader, #options_transition))
                 } else {
                     unreachable!()
                 }
@@ -2208,7 +2398,7 @@ impl FieldKind<'_> {
                             payload_len.as_ref(),
                         );
                         let parse_name = quote::format_ident!("Async{}Parse", name);
-                        if let Some((nested_next_name, nested_next_ty, nested_next_kind)) =
+                        if let Some((nested_next_name, nested_next_ty, nested_next_kind, nested_next_endianess)) =
                             typed.iter().find_map(|f| f.as_ref())
                         {
                             let fut = nested_next_kind.as_next_fut(
@@ -2218,6 +2408,10 @@ impl FieldKind<'_> {
                                 generic_collection,
                                 payload_len.as_ref(),
                                 tag.as_ref(),
+                                current_field_endianess,
+                                *nested_next_endianess,
+                                definition_endianess,
+                                false,
                             );
 
                             let name = if !exhaustive {
@@ -2256,7 +2450,7 @@ impl FieldKind<'_> {
                 )
             }
             _ => {
-                quote!(<#next_ty as ::#KRATE::parse::AsyncParse<__Offset>>::create_fut(reader, opts))
+                quote!(<#next_ty as ::#KRATE::parse::AsyncParse<__Offset>>::create_fut(reader, #options_transition))
             }
         }
     }
@@ -2267,7 +2461,14 @@ pub fn prepare_fields_for_statemachine<'a>(
     mut generics: syn::Generics,
     mod_name: Option<&proc_macro2::TokenStream>,
     payload_len: Option<&PayloadLength>,
-) -> Vec<Option<(syn::Ident, proc_macro2::TokenStream, FieldKind<'a>)>> {
+) -> Vec<
+    Option<(
+        syn::Ident,
+        proc_macro2::TokenStream,
+        FieldKind<'a>,
+        Option<&'a Endianess>,
+    )>,
+> {
     let where_clause = generics
         .where_clause
         .get_or_insert_with(|| syn::WhereClause {
@@ -2287,160 +2488,172 @@ pub fn prepare_fields_for_statemachine<'a>(
     fields
         .iter()
         .enumerate()
-        .map(|(i, field)| Some(match field {
-            AtomField::FullBox { name, .. } => {
-                let ty = quote!(#mod_name #name);
-                let name = syn::Ident::new("atom_flags", proc_macro2::Span::call_site());
-                (name, ty, FieldKind::Regular)
-            }
-            AtomField::Flags {
-                field_name, name, ..
-            } => {
-                let ty = quote!(#mod_name #name);
-                let name = field_name
-                    .clone()
-                    .unwrap_or(syn::Ident::new("flags", proc_macro2::Span::call_site()));
-                (name, ty, FieldKind::Regular)
-            }
-            AtomField::Version { .. } => unreachable!(),
-            AtomField::Children { size_ty, kind, children } => {
-                match kind {
-                    ChildrenKind::Atom => {
-                        let name = syn::Ident::new("children", proc_macro2::Span::call_site());
-
-                        let ty = if let Some(size_ty) = size_ty {
-                            quote!(::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name Child>)
-                        } else {
-                            quote!(::#KRATE::children::Children<__Offset, #mod_name Child>)
-                        };
-                        (name, ty, FieldKind::Regular)
-                    }
-                    ChildrenKind::Tagged { field_name, tagged_name, len_from_expr, .. } => {
-                        (field_name.clone(), quote!(#mod_name #tagged_name), FieldKind::Tagged(len_from_expr.as_ref(), children, tagged_name))
-                    }
+        .map(|(i, field)| {
+            let (name, ty, kind) = match &field.kind {
+                AtomFieldKind::FullBox { name, .. } => {
+                    let ty = quote!(#mod_name #name);
+                    let name = syn::Ident::new("atom_flags", proc_macro2::Span::call_site());
+                    (name, ty, FieldKind::Regular)
                 }
-            }
-            AtomField::Conditional(cond) => {
-                let name = cond.field_name.clone();
-                (name, quote!(ConditionalStorage), FieldKind::Conditional(cond))
-            }
-            AtomField::Struct(field, attr) => match attr {
-                StructFieldAttr::Normal => {
-                    let name = field.ident.clone().unwrap();
-                    let ty = &field.ty;
-
-                    (name, quote!(#ty), FieldKind::Regular)
-                }
-                StructFieldAttr::VersionIdentifier => unreachable!(),
-                StructFieldAttr::Tag => {
-                    let name = quote::format_ident!("_tag");
-                    let ty = &field.ty;
-
-                    (name, quote!(#ty), FieldKind::Tag)
-                }
-                StructFieldAttr::PayloadLength{ .. } => {
-                    let name = quote::format_ident!("_payload_len");
-                    let ty = &field.ty;
-
-                    (name, quote!(#ty), FieldKind::PayloadLength)
-                }
-                StructFieldAttr::Payload { from_expr } => {
-                    let name = field.ident.clone().unwrap();
-                    let display_ty = if let Some(LenFromExpr { ty: len_ty, .. }) = from_expr {
-                        quote!(::#KRATE::payload::Payload<__Offset, #len_ty>)
-                    } else if let Some(PayloadLength { ty: len_ty,  ..}) = payload_len {
-                        quote!(::#KRATE::payload::Payload<__Offset, #len_ty>)
-                    } else {
-                        quote!(::#KRATE::payload::Payload)
-                    };
-                    (name, display_ty, FieldKind::Payload(from_expr.as_ref()))
-                }
-                StructFieldAttr::Padded { from_expr } => {
-                    let name = field.ident.clone().unwrap();
-                    let ty = &field.ty;
-                    assert!(from_expr.is_some() || payload_len.is_some(), "padded field requires either a length specifier or a payload_len field");
-                    (name, quote!(#ty), FieldKind::Padded(from_expr.as_ref()))
-                }
-                StructFieldAttr::PascalString { length_ty } => {
-                    let name = field.ident.clone().unwrap();
-                    (
-                        name,
-                        quote!(::#KRATE::string::PascalString<__Offset, #length_ty>),
-                        FieldKind::Regular,
-                    )
-                }
-                StructFieldAttr::NullTerminatedString => {
-                    let name = field.ident.clone().unwrap();
-                    (
-                        name,
-                        quote!(::#KRATE::string::NullTerminatedString<__Offset>),
-                        FieldKind::Regular,
-                    )
-                }
-                StructFieldAttr::Reserved => {
-                    let name = quote::format_ident!("__reserved_{i}");
-                    let ty = &field.ty;
-                    (name, quote!(#ty), FieldKind::Reserved)
-                }
-                StructFieldAttr::Expected { val } => {
-                    let name = quote::format_ident!("__expected_{i}");
-                    let ty = &field.ty;
-                    (name, quote!(#ty), FieldKind::Expected(val))
-                }
-                StructFieldAttr::DynamicArray {
-                    length_ty,
-                    zero_relative,
+                AtomFieldKind::Flags {
+                    field_name, name, ..
                 } => {
-                    let ty = &field.ty;
-                    let name = field.ident.clone().unwrap();
-                    (
-                        name,
-                        quote!(::#KRATE::array::DynamicArray<__Offset, #length_ty, #ty, #zero_relative>),
-                        FieldKind::Regular,
-                    )
+                    let ty = quote!(#mod_name #name);
+                    let name = field_name
+                        .clone()
+                        .unwrap_or(syn::Ident::new("flags", proc_macro2::Span::call_site()));
+                    (name, ty, FieldKind::Regular)
                 }
-                StructFieldAttr::NullTerminatedArray => {
-                    let ty = &field.ty;
-                    let name = field.ident.clone().unwrap();
-                    (
-                        name,
-                        quote!(::#KRATE::array::NullTerminated<__Offset, #ty>),
-                        FieldKind::Regular,
-                    )
-                }
-                StructFieldAttr::TrailingArray { from_expr } => {
-                    let ty = &field.ty;
-                    let name = field.ident.clone().unwrap();
-                    let display_ty = if let Some(LenFromExpr { ty: len_ty, .. }) = from_expr {
-                        quote!(::#KRATE::trailing::Trailing<__Offset, #ty, #len_ty>)
-                    } else if let Some(PayloadLength { ty: len_ty, ..}) = payload_len {
-                        quote!(::#KRATE::trailing::Trailing<__Offset, #ty, #len_ty>)
-                    } else {
-                        quote!(::#KRATE::trailing::Trailing<__Offset, #ty>)
-                    };
-                    (name, display_ty, FieldKind::Trailing(from_expr.as_ref()))
-                }
-                StructFieldAttr::Condition => {
-                    let name = field.ident.clone().unwrap();
-                    let ty = &field.ty;
+                AtomFieldKind::Version { .. } => unreachable!(),
+                AtomFieldKind::Children { size_ty, kind, children } => {
+                    match kind {
+                        ChildrenKind::Atom => {
+                            let name = syn::Ident::new("children", proc_macro2::Span::call_site());
 
-                    (name, quote!(#ty), FieldKind::Condition)
+                            let ty = if let Some(size_ty) = size_ty {
+                                quote!(::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name Child>)
+                            } else {
+                                quote!(::#KRATE::children::Children<__Offset, #mod_name Child>)
+                            };
+                            (name, ty, FieldKind::Regular)
+                        }
+                        ChildrenKind::Tagged { field_name, tagged_name, len_from_expr, .. } => {
+                            (field_name.clone(), quote!(#mod_name #tagged_name), FieldKind::Tagged(len_from_expr.as_ref(), children, tagged_name))
+                        }
+                    }
                 }
-                //ignore moving fields around until after parsing is finished
-                StructFieldAttr::ReuseCondition => return None,
-            },
-        }))
+                AtomFieldKind::Conditional(cond) => {
+                    let name = cond.field_name.clone();
+                    (name, quote!(ConditionalStorage), FieldKind::Conditional(cond))
+                }
+                AtomFieldKind::Struct(field, attr) => match attr {
+                    StructFieldAttr::Normal => {
+                        let name = field.ident.clone().unwrap();
+                        let ty = &field.ty;
+
+                        (name, quote!(#ty), FieldKind::Regular)
+                    }
+                    StructFieldAttr::VersionIdentifier => unreachable!(),
+                    StructFieldAttr::Tag => {
+                        let name = quote::format_ident!("_tag");
+                        let ty = &field.ty;
+
+                        (name, quote!(#ty), FieldKind::Tag)
+                    }
+                    StructFieldAttr::PayloadLength{ .. } => {
+                        let name = quote::format_ident!("_payload_len");
+                        let ty = &field.ty;
+
+                        (name, quote!(#ty), FieldKind::PayloadLength)
+                    }
+                    StructFieldAttr::Payload { from_expr } => {
+                        let name = field.ident.clone().unwrap();
+                        let display_ty = if let Some(LenFromExpr { ty: len_ty, .. }) = from_expr {
+                            quote!(::#KRATE::payload::Payload<__Offset, #len_ty>)
+                        } else if let Some(PayloadLength { ty: len_ty,  ..}) = payload_len {
+                            quote!(::#KRATE::payload::Payload<__Offset, #len_ty>)
+                        } else {
+                            quote!(::#KRATE::payload::Payload)
+                        };
+                        (name, display_ty, FieldKind::Payload(from_expr.as_ref()))
+                    }
+                    StructFieldAttr::Padded { from_expr } => {
+                        let name = field.ident.clone().unwrap();
+                        let ty = &field.ty;
+                        assert!(from_expr.is_some() || payload_len.is_some(), "padded field requires either a length specifier or a payload_len field");
+                        (name, quote!(#ty), FieldKind::Padded(from_expr.as_ref()))
+                    }
+                    StructFieldAttr::PascalString { length_ty } => {
+                        let name = field.ident.clone().unwrap();
+                        (
+                            name,
+                            quote!(::#KRATE::string::PascalString<__Offset, #length_ty>),
+                            FieldKind::Regular,
+                        )
+                    }
+                    StructFieldAttr::NullTerminatedString => {
+                        let name = field.ident.clone().unwrap();
+                        (
+                            name,
+                            quote!(::#KRATE::string::NullTerminatedString<__Offset>),
+                            FieldKind::Regular,
+                        )
+                    }
+                    StructFieldAttr::Reserved => {
+                        let name = quote::format_ident!("__reserved_{i}");
+                        let ty = &field.ty;
+                        (name, quote!(#ty), FieldKind::Reserved)
+                    }
+                    StructFieldAttr::Expected { val } => {
+                        let name = quote::format_ident!("__expected_{i}");
+                        let ty = &field.ty;
+                        (name, quote!(#ty), FieldKind::Expected(val))
+                    }
+                    StructFieldAttr::DynamicArray {
+                        length_ty,
+                        zero_relative,
+                    } => {
+                        let ty = &field.ty;
+                        let name = field.ident.clone().unwrap();
+                        (
+                            name,
+                            quote!(::#KRATE::array::DynamicArray<__Offset, #length_ty, #ty, #zero_relative>),
+                            FieldKind::Regular,
+                        )
+                    }
+                    StructFieldAttr::NullTerminatedArray => {
+                        let ty = &field.ty;
+                        let name = field.ident.clone().unwrap();
+                        (
+                            name,
+                            quote!(::#KRATE::array::NullTerminated<__Offset, #ty>),
+                            FieldKind::Regular,
+                        )
+                    }
+                    StructFieldAttr::TrailingArray { from_expr } => {
+                        let ty = &field.ty;
+                        let name = field.ident.clone().unwrap();
+                        let display_ty = if let Some(LenFromExpr { ty: len_ty, .. }) = from_expr {
+                            quote!(::#KRATE::trailing::Trailing<__Offset, #ty, #len_ty>)
+                        } else if let Some(PayloadLength { ty: len_ty, ..}) = payload_len {
+                            quote!(::#KRATE::trailing::Trailing<__Offset, #ty, #len_ty>)
+                        } else {
+                            quote!(::#KRATE::trailing::Trailing<__Offset, #ty>)
+                        };
+                        (name, display_ty, FieldKind::Trailing(from_expr.as_ref()))
+                    }
+                    StructFieldAttr::Condition => {
+                        let name = field.ident.clone().unwrap();
+                        let ty = &field.ty;
+
+                        (name, quote!(#ty), FieldKind::Condition)
+                    }
+                    //ignore moving fields around until after parsing is finished
+                    StructFieldAttr::ReuseCondition => return None,
+                }
+            };
+            Some((name, ty, kind, field.endianess.as_ref()))
+        })
         .collect::<Vec<_>>()
 }
 
 pub fn format_statemachine_nop_impl(
-    typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind)>],
+    typed_fields: &[Option<(
+        syn::Ident,
+        proc_macro2::TokenStream,
+        FieldKind,
+        Option<&Endianess>,
+    )>],
     generics: &syn::Generics,
     mod_name: Option<&proc_macro2::TokenStream>,
     generic_collection: Option<&proc_macro2::TokenStream>,
     payload_len: Option<&PayloadLength>,
     tag: Option<&Tag>,
-    format_state_transition: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream,
+    definition_endianess: Option<&Endianess>,
+    format_state_transition: &dyn Fn(
+        proc_macro2::TokenStream,
+        Option<Endianess>,
+    ) -> proc_macro2::TokenStream,
 ) -> (
     proc_macro2::TokenStream,
     Option<proc_macro2::TokenStream>,
@@ -2448,9 +2661,19 @@ pub fn format_statemachine_nop_impl(
     Option<proc_macro2::TokenStream>,
 ) {
     use quote::quote;
-    if let Some((name, ty, kind)) = typed_fields.iter().find_map(|f| f.as_ref()) {
-        let next_fut =
-            kind.as_next_fut(ty, generics, mod_name, generic_collection, payload_len, tag);
+    if let Some((name, ty, kind, endianess)) = typed_fields.iter().find_map(|f| f.as_ref()) {
+        let next_fut = kind.as_next_fut(
+            ty,
+            generics,
+            mod_name,
+            generic_collection,
+            payload_len,
+            tag,
+            None,
+            *endianess,
+            definition_endianess,
+            true,
+        );
 
         (
             quote! {
@@ -2461,27 +2684,33 @@ pub fn format_statemachine_nop_impl(
             None,
         )
     } else {
-        let state_transition = format_state_transition(Default::default());
+        let state_transition = format_state_transition(Default::default(), None);
 
         let pd_generics = generics.params.iter().filter_map(|p| match p {
             syn::GenericParam::Type(t) => Some(&t.ident),
             _ => None,
         });
+        let format_options =
+            Endianess::format_options_create_fut(definition_endianess, None, false);
+        let options_ty = Endianess::format_options_ty(definition_endianess, None);
+        let take_opts = Endianess::format_take_reader(definition_endianess, None);
+        let borrow_opts = Endianess::format_borrow_reader(definition_endianess, None);
 
         (
             quote! {
-                nop: (reader, opts, ::core::marker::PhantomData)
+                nop: (reader, #format_options, ::core::marker::PhantomData)
             },
             Some(quote! {
-                S0 { nop: (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions, ::core::marker::PhantomData<( __Offset, #(#pd_generics,)* )>) },
+                S0 { nop: (__Reader, #options_ty, ::core::marker::PhantomData<( __Offset, #(#pd_generics,)* )>) },
             }),
             Some(quote! {
                 Self::S0 { nop: (reader, opts, _) } => {
+                    let opts = #take_opts;
                     #state_transition
                 }
             }),
             Some(quote! {
-                Self::S0 { nop: (reader, opts, _) } => (reader, opts),
+                Self::S0 { nop: (reader, opts, _) } => (reader, #borrow_opts),
             }),
         )
     }
@@ -2493,7 +2722,12 @@ pub fn format_variant_state_change<'a>(
     enum_name: &syn::Ident,
     variant_parse_name: &syn::Ident,
     fields: &[AtomField],
-    typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind)>],
+    typed_fields: &[Option<(
+        syn::Ident,
+        proc_macro2::TokenStream,
+        FieldKind,
+        Option<&Endianess>,
+    )>],
     exhaustive: bool,
     generics: &syn::Generics,
     match_fields: impl Iterator<Item = &'a syn::Ident> + Clone,
@@ -2507,8 +2741,12 @@ pub fn format_variant_state_change<'a>(
     parse_name: &syn::Ident,
     state: &syn::Ident,
     on_poll_ready: &proc_macro2::TokenStream,
+    definition_endianess: Option<&Endianess>,
     format_conditional_state: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream,
-    format_state_transition: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream,
+    format_state_transition: &dyn Fn(
+        proc_macro2::TokenStream,
+        Option<Endianess>,
+    ) -> proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     use quote::quote;
     let variant = variant_name;
@@ -2542,9 +2780,9 @@ pub fn format_variant_state_change<'a>(
         format_conditional_state(toks)
     };
 
-    let format_state_transition = |toks| {
+    let format_state_transition = |toks, prev_endianess: Option<Endianess>| {
         let finished = typed_fields.iter().filter_map(|f| {
-            let (f, _, kind) = f.as_ref()?;
+            let (f, _, kind, _) = f.as_ref()?;
             match kind {
                 FieldKind::PayloadLength
                 | FieldKind::Tag
@@ -2591,6 +2829,8 @@ pub fn format_variant_state_change<'a>(
                 parse_name,
                 mod_name,
                 generic_collection,
+                prev_endianess.as_ref(),
+                definition_endianess,
                 format_conditional_state,
                 &generics,
                 root,
@@ -2601,7 +2841,7 @@ pub fn format_variant_state_change<'a>(
                 *self = #state;
             }
         } else {
-            format_state_transition(var)
+            format_state_transition(var, prev_endianess)
         }
     };
 
@@ -2617,6 +2857,7 @@ pub fn format_variant_state_change<'a>(
             &generics,
             generic_collection,
             mod_name,
+            definition_endianess,
             &format_nested_conditional,
             &format_state_transition,
             false,
@@ -2685,7 +2926,12 @@ fn format_none_variant_state_change(
 
 pub fn format_statemachine_fields(
     fields: &[AtomField],
-    typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind)>],
+    typed_fields: &[Option<(
+        syn::Ident,
+        proc_macro2::TokenStream,
+        FieldKind,
+        Option<&Endianess>,
+    )>],
     payload_len: Option<&PayloadLength>,
     tag: Option<&Tag>,
     struct_name: &syn::Ident,
@@ -2693,8 +2939,12 @@ pub fn format_statemachine_fields(
     generics: &syn::Generics,
     generic_collection: Option<&proc_macro2::TokenStream>,
     mod_name: Option<&proc_macro2::TokenStream>,
+    definition_endianess: Option<&Endianess>,
     format_conditional_state: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream,
-    format_state_transition: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream,
+    format_state_transition: &dyn Fn(
+        proc_macro2::TokenStream,
+        Option<Endianess>,
+    ) -> proc_macro2::TokenStream,
     root: bool,
 ) -> (
     Vec<proc_macro2::TokenStream>,
@@ -2717,7 +2967,7 @@ pub fn format_statemachine_fields(
         let state = quote::format_ident!("S{}", idx);
 
         let variant_fields = completed.iter().filter_map(|f| {
-            let (name, ty, kind) = f.as_ref()?;
+            let (name, ty, kind, _) = f.as_ref()?;
             match kind {
                 FieldKind::Reserved | FieldKind::Expected { .. } => None,
                 FieldKind::Conditional(cond) => {
@@ -2745,28 +2995,33 @@ pub fn format_statemachine_fields(
         });
 
         let in_progress_fut = {
-            let (name, ty, kind) = in_progress;
+            let (name, ty, kind, endianess) = in_progress;
+            let options_ty = Endianess::format_options_ty(
+                *endianess,
+                Some(Endianess::format_options_ty(definition_endianess, None)),
+            );
+
             match kind {
                 FieldKind::Payload(expr_len) => {
                     if let Some(LenFromExpr { ty: len_ty, .. }) = expr_len {
-                        quote!(#name: ::#KRATE::payload::PayloadParse<'__parse_options, __Offset, __Reader, #len_ty>)
+                        quote!(#name: ::#KRATE::payload::PayloadParse<#options_ty, __Offset, __Reader, #len_ty>)
                     } else if let Some(PayloadLength { ty: len, .. }) = payload_len.as_ref() {
-                        quote!(#name: ::#KRATE::payload::PayloadParse<'__parse_options, __Offset, __Reader, #len>)
+                        quote!(#name: ::#KRATE::payload::PayloadParse<#options_ty, __Offset, __Reader, #len>)
                     } else {
-                        quote!(#name: ::#KRATE::payload::PayloadParse<'__parse_options, __Offset, __Reader>)
+                        quote!(#name: ::#KRATE::payload::PayloadParse<#options_ty, __Offset, __Reader>)
                     }
                 }
                 FieldKind::Trailing(expr_len) => {
-                    let AtomField::Struct(field, _) = &fields[idx] else {
+                    let AtomFieldKind::Struct(field, _) = &fields[idx].kind else {
                         unreachable!();
                     };
                     let trailing_ty = &field.ty;
                     if let Some(LenFromExpr { ty: len_ty, .. }) = expr_len {
-                        quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty, #len_ty>)
+                        quote!(#name: ::#KRATE::trailing::TrailingParse<#options_ty, __Offset, __Reader, #trailing_ty, #len_ty>)
                     } else if let Some(PayloadLength { ty: len, .. }) = payload_len.as_ref() {
-                        quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty, #len>)
+                        quote!(#name: ::#KRATE::trailing::TrailingParse<#options_ty, __Offset, __Reader, #trailing_ty, #len>)
                     } else {
-                        quote!(#name: ::#KRATE::trailing::TrailingParse<'__parse_options, __Offset, __Reader, #trailing_ty>)
+                        quote!(#name: ::#KRATE::trailing::TrailingParse<#options_ty, __Offset, __Reader, #trailing_ty>)
                     }
                 }
                 FieldKind::Padded(expr_len) => {
@@ -2775,15 +3030,15 @@ pub fn format_statemachine_fields(
                         (_, Some(PayloadLength { ty: len_ty, .. })) => len_ty,
                         _ => unreachable!(),
                     };
-                    quote!(#name: ::#KRATE::padded::AsyncPaddedParse<'__parse_options, __Offset, __Reader, #len_ty, #ty>)
+                    quote!(#name: ::#KRATE::padded::AsyncPaddedParse<#options_ty, __Offset, __Reader, #len_ty, #ty>)
                 }
                 FieldKind::Tagged(expr_len, _, tagged_name) => {
                     let async_name = quote::format_ident!("Async{tagged_name}Parse");
                     if expr_len.is_some() || payload_len.is_some() {
                         let with_len = quote::format_ident!("{async_name}WithLen");
-                        quote!(#name: #mod_name #with_len<'__parse_options, __Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>>,)
+                        quote!(#name: #mod_name #with_len<#options_ty, __Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>>,)
                     } else {
-                        quote!(#name: #mod_name #async_name<'__parse_options, __Offset, __Reader>,)
+                        quote!(#name: #mod_name #async_name<#options_ty, __Offset, __Reader>,)
                     }
                 }
                 FieldKind::Conditional(cond) => {
@@ -2800,7 +3055,7 @@ pub fn format_statemachine_fields(
                     let mut parse_generics = generics.clone();
                     parse_generics
                         .params
-                        .push(syn::parse_quote!('__parse_options));
+                        .push(syn::parse_quote!(__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin));
                     parse_generics.params.push(syn::parse_quote!(__Offset));
                     parse_generics.params.push(syn::parse_quote!(__Reader));
                     let (_, parse_ty_generics, _) = parse_generics.split_for_impl();
@@ -2809,7 +3064,7 @@ pub fn format_statemachine_fields(
                 }
                 _ => {
                     quote! {
-                        #name: <#ty as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<'__parse_options, __Reader>,
+                        #name: <#ty as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<#options_ty, __Reader>,
                     }
                 }
             }
@@ -2824,10 +3079,21 @@ pub fn format_statemachine_fields(
 
         let name = &in_progress.0;
 
+        let (def_endianess, in_progress_endianess) =
+            if matches!(in_progress.2, FieldKind::Conditional(_)) {
+                (None, None)
+            } else {
+                (definition_endianess, in_progress.3)
+            };
+
+        let borrow_opts = Endianess::format_borrow_reader(in_progress_endianess, def_endianess);
         let borrow_reader = quote! {
             Self::#state {
                 #name, ..
-            } => #name.borrow_reader(),
+            } => {
+                let (reader, opts) = #name.borrow_reader();
+                (reader, #borrow_opts)
+            }
         };
 
         let on_poll_ready =
@@ -2840,6 +3106,8 @@ pub fn format_statemachine_fields(
                     parse_name,
                     mod_name,
                     generic_collection,
+                    in_progress.3,
+                    definition_endianess,
                     format_conditional_state,
                     &generics,
                     root,
@@ -2849,30 +3117,34 @@ pub fn format_statemachine_fields(
                     *self = #state;
                 }
             } else {
-                format_state_transition(Default::default())
+                format_state_transition(Default::default(), in_progress.3.copied())
             };
 
         let check_reserved = match in_progress.2 {
             FieldKind::Reserved => {
                 let ty = &in_progress.1;
+                let take_opts = Endianess::format_take_reader(in_progress.3, definition_endianess);
                 Some(quote! {
-                    if opts.error_on_used_reserved_fields && (#name != unsafe { ::core::mem::zeroed::<#ty>() }) {
-                        *self = Self::Done(reader, opts);
+                    if ::#KRATE::parse_options::Options::options(&opts).error_on_used_reserved_fields && (#name != unsafe { ::core::mem::zeroed::<#ty>() }) {
+                        *self = Self::Done(reader, #take_opts);
                         return ::core::task::Poll::Ready(Err(::#KRATE::error::ParseError::UsedReservedField));
                     }
                 })
             }
-            FieldKind::Expected(val) => Some(quote! {
-                if #name != #val {
-                    *self = Self::Done(reader, opts);
-                    return ::core::task::Poll::Ready(Err(::#KRATE::error::ParseError::UnexpectedValue));
-                }
-            }),
+            FieldKind::Expected(val) => {
+                let take_opts = Endianess::format_take_reader(in_progress.3, definition_endianess);
+                Some(quote! {
+                    if #name != #val {
+                        *self = Self::Done(reader, #take_opts);
+                        return ::core::task::Poll::Ready(Err(::#KRATE::error::ParseError::UnexpectedValue));
+                    }
+                })
+            }
             _ => None,
         };
 
         let match_fields = completed.iter().filter_map(|f| {
-            let (name, _, kind) = f.as_ref()?;
+            let (name, _, kind, _) = f.as_ref()?;
             if matches!(kind, FieldKind::Reserved | FieldKind::Expected(_)) {
                 return None;
             }
@@ -2912,6 +3184,7 @@ pub fn format_statemachine_fields(
                         parse_name,
                         &state,
                         &on_poll_ready,
+                        definition_endianess,
                         format_conditional_state,
                         format_state_transition,
                     );
@@ -2963,6 +3236,7 @@ pub fn format_statemachine_fields(
                             parse_name,
                             &state,
                             &on_poll_ready,
+                            definition_endianess,
                             format_conditional_state,
                             format_state_transition,
                         )
@@ -3015,6 +3289,8 @@ pub fn format_statemachine_fields(
 
             let mod_name = if root { None } else { mod_name };
 
+            let take_opts = Endianess::format_take_reader(in_progress.3, definition_endianess);
+
             quote! {
                 #mod_name #parse_name::#state {
                     #(#match_fields,)*
@@ -3030,7 +3306,7 @@ pub fn format_statemachine_fields(
                             let #name = match r {
                                 Ok(#name) => #name,
                                 Err(e) => {
-                                    *self = Self::Done(reader, opts);
+                                    *self = Self::Done(reader, #take_opts);
                                     return ::core::task::Poll::Ready(Err(e));
                                 }
                             };
@@ -3054,13 +3330,20 @@ pub fn format_statemachine_fields(
 }
 
 pub fn format_statemachine_next_state(
-    typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind)>],
+    typed_fields: &[Option<(
+        syn::Ident,
+        proc_macro2::TokenStream,
+        FieldKind,
+        Option<&Endianess>,
+    )>],
     idx: usize,
     payload_len: Option<&PayloadLength>,
     tag: Option<&Tag>,
     parse_name: &syn::Ident,
     mod_name: Option<&proc_macro2::TokenStream>,
     generic_collection: Option<&proc_macro2::TokenStream>,
+    current_field_endianess: Option<&Endianess>,
+    definition_endianess: Option<&Endianess>,
     format_conditional_state: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream,
     generics: &syn::Generics,
     root: bool,
@@ -3071,10 +3354,10 @@ pub fn format_statemachine_next_state(
 ) {
     use quote::quote;
 
-    let (next_name, next_ty, next_kind) = typed_fields[idx].as_ref().unwrap();
+    let (next_name, next_ty, next_kind, next_endianess) = typed_fields[idx].as_ref().unwrap();
     let next_state = quote::format_ident!("S{}", idx);
     let new_completed = typed_fields[..idx].iter().filter_map(|f| {
-        let (name, _, kind) = f.as_ref()?;
+        let (name, _, kind, _) = f.as_ref()?;
         if matches!(kind, FieldKind::Reserved | FieldKind::Expected(_)) {
             return None;
         }
@@ -3088,6 +3371,10 @@ pub fn format_statemachine_next_state(
         generic_collection,
         payload_len,
         tag,
+        current_field_endianess,
+        *next_endianess,
+        definition_endianess,
+        false,
     );
     let next_fut = quote! {
         let #next_name = #next_fut;
@@ -3125,6 +3412,7 @@ pub fn format_async_statemachine(
     generic_collection: Option<&proc_macro2::TokenStream>,
     payload_len: Option<&PayloadLength>,
     tag: Option<&Tag>,
+    definition_endianess: Option<&Endianess>,
 ) -> proc_macro2::TokenStream {
     let payload_len = AtomFields::nested_payload_len(payload_len, fields);
     let tag = AtomFields::nested_tag(tag, fields);
@@ -3140,16 +3428,25 @@ pub fn format_async_statemachine(
     let parse_name = quote::format_ident!("Async{}Parse", struct_name);
 
     let format_base = |toks| toks;
-    let format_state_transition = |toks| {
-        let finished = fields.iter().filter_map(|f| match f {
-            AtomField::Conditional(cond) => Some(cond.as_async_field_collection(mod_name.as_ref())),
-            field => field.as_collection(),
+    let format_state_transition = |toks, prev_endianess: Option<Endianess>| {
+        let finished = fields.iter().filter_map(|f| match &f.kind {
+            AtomFieldKind::Conditional(cond) => {
+                Some(cond.as_async_field_collection(mod_name.as_ref()))
+            }
+            _ => f.as_collection(),
         });
 
+        let def_endianess = if fields.is_empty() {
+            None
+        } else {
+            definition_endianess
+        };
+
+        let opts_transition = Endianess::format_take_reader(def_endianess, prev_endianess.as_ref());
         quote! {
             #toks
 
-            *self = Self::Done(reader, opts);
+            *self = Self::Done(reader, #opts_transition);
             return ::core::task::Poll::Ready(Ok(#struct_name {
                 #(#finished)*
                 #generic_collection
@@ -3169,6 +3466,7 @@ pub fn format_async_statemachine(
             &generics,
             generic_collection,
             mod_name.as_ref(),
+            definition_endianess,
             &format_base,
             &format_state_transition,
             true,
@@ -3181,6 +3479,7 @@ pub fn format_async_statemachine(
         generic_collection,
         payload_len.as_ref(),
         tag.as_ref(),
+        definition_endianess,
         &format_state_transition,
     );
 
@@ -3215,7 +3514,9 @@ pub fn format_async_statemachine(
     let struct_generics = generics.clone();
     let (_, struct_ty_generics, struct_where_clause) = struct_generics.split_for_impl();
 
-    generics.params.push(syn::parse_quote!('__parse_options));
+    generics.params.push(
+        syn::parse_quote!(__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin),
+    );
     generics
         .params
         .push(syn::parse_quote!(__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin));
@@ -3232,7 +3533,7 @@ pub fn format_async_statemachine(
         pub enum #parse_name #generics #where_clause {
             #(#state_machine_variants,)*
             #nop_variant
-            Done(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions),
+            Done(__Reader, __Options),
             Empty,
         }
 
@@ -3252,23 +3553,23 @@ pub fn format_async_statemachine(
         }
 
         impl #parse_impl_generics ::#KRATE::parse::AsyncParse<__Offset> for #struct_name #struct_ty_generics #struct_where_clause {
-            type Fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #parse_name #type_generics ;
-            fn create_fut<'__parse_options, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: &'__parse_options ::#KRATE::parse_options::ParseOptions) -> Self::Fut<'__parse_options, __Reader> {
+            type Fut<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #parse_name #type_generics ;
+            fn create_fut<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: __Options) -> Self::Fut<__Options, __Reader> {
                 #parse_name :: #starting_state {
                     #start
                 }
             }
         }
 
-        impl #impl_generics ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #parse_name #type_generics #where_clause {
-            fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+        impl #impl_generics ::#KRATE::reader::TakeReader<__Options, __Reader> for #parse_name #type_generics #where_clause {
+            fn take_reader(self) -> (__Reader, __Options) {
                 match self {
                     Self::Done(reader, opts) => return (reader, opts),
                     _ => unreachable!("invalid state"),
                 }
             }
 
-            fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+            fn borrow_reader(&mut self) -> (&mut __Reader, &__Options) {
                 match self {
                     #(#borrow_reader_variants)*
                     #nop_borrow

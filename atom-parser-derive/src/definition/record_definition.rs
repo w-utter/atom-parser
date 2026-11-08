@@ -1,4 +1,4 @@
-use crate::{AtomField, AtomFields, FourCC, field::ChildrenKind};
+use crate::{AtomField, AtomFieldKind, AtomFields, FourCC, field::ChildrenKind};
 
 pub struct AtomDefinition {
     pub fcc: FourCC,
@@ -50,9 +50,9 @@ impl StructDefinition {
 
         if fields.iter().any(|field| {
             matches!(
-                field,
-                AtomField::FullBox { .. }
-                    | AtomField::Children {
+                field.kind,
+                AtomFieldKind::FullBox { .. }
+                    | AtomFieldKind::Children {
                         kind: ChildrenKind::Atom,
                         ..
                     }

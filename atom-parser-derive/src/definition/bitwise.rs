@@ -205,7 +205,7 @@ impl BitFieldList {
 
         if !reserved_ranges.is_empty() {
             Some(quote! {
-                if (opts.error_on_unknown_flags && ((bits & (#((#reserved_ranges))|*))) != 0) {
+                if ::#KRATE::parse_options::Options::options(&opts).error_on_unknown_flags && ((bits & (#((#reserved_ranges))|*))) != 0 {
                     return Err(::#KRATE::error::ParseError::UnknownFlags);
                 }
             })

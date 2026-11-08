@@ -1,5 +1,3 @@
-// TODO: make this the impl for both flags & enums
-
 pub trait Bits: Sized {
     type Repr;
     fn from_bits(repr: Self::Repr) -> Self;

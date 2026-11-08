@@ -1,5 +1,5 @@
 use crate::{
-    AsyncParse, AsyncSeek, AtomHeader, FourCC, Offset, Parse, ParseError, ParseOptions, Parsed,
+    AsyncParse, AsyncSeek, AtomHeader, FourCC, Offset, Options, Parse, ParseError, Parsed,
     PollReader, Reader, TakeReader, TrailingReader, TryFromIntError, impl_take_reader,
 };
 
@@ -27,11 +27,11 @@ impl<T: Parsed> Parsed for AnonymousAtom<T> {
 }
 
 impl<O: Offset, I: Parse<O>> Parse<O> for AnonymousAtom<I> {
-    fn parse<T: Reader<O>>(
+    fn parse<T: Reader<O>, P: Options>(
         reader: &mut T,
-        opts: &ParseOptions,
+        opts: P,
     ) -> Result<<Self as Parsed>::Output<O>, ParseError> {
-        let header = AtomHeader::parse(reader, opts)?;
+        let header = AtomHeader::parse(reader, &opts)?;
         let atom_size = header
             .size
             .size()
@@ -43,7 +43,7 @@ impl<O: Offset, I: Parse<O>> Parse<O> for AnonymousAtom<I> {
         let max_offset = reader.offset() + atom_size;
 
         let mut r = TrailingReader::new(&mut *reader, max_offset);
-        let content = <I as Parse<O>>::parse(&mut r, opts)?;
+        let content = <I as Parse<O>>::parse(&mut r, &opts)?;
 
         r.seek_remaining()?;
 
@@ -54,27 +54,31 @@ impl<O: Offset, I: Parse<O>> Parse<O> for AnonymousAtom<I> {
     }
 }
 
-pub enum AsyncAnonymousAtomParse<'a, R: PollReader<O> + Unpin, T: AsyncParse<O>, O: Offset + Unpin>
-where
+pub enum AsyncAnonymousAtomParse<
+    P: Options + Unpin,
+    R: PollReader<O> + Unpin,
+    T: AsyncParse<O>,
+    O: Offset + Unpin,
+> where
     <T as Parsed>::Output<O>: Unpin,
 {
-    Header(<AtomHeader as AsyncParse<O>>::Fut<'a, R>),
+    Header(<AtomHeader as AsyncParse<O>>::Fut<P, R>),
     Content(
         AtomHeader,
-        <T as AsyncParse<O>>::Fut<'a, TrailingReader<O, R>>,
+        <T as AsyncParse<O>>::Fut<P, TrailingReader<O, R>>,
     ),
     Seek(
         AtomHeader,
         <T as Parsed>::Output<O>,
         AsyncSeek<O, TrailingReader<O, R>>,
-        &'a ParseOptions,
+        P,
     ),
-    Done(R, &'a ParseOptions),
+    Done(R, P),
     Empty,
 }
 
-impl<'a, R: PollReader<O> + Unpin, T: AsyncParse<O>, O: Offset + Unpin> Future
-    for AsyncAnonymousAtomParse<'a, R, T, O>
+impl<P: Options + Unpin, R: PollReader<O> + Unpin, T: AsyncParse<O>, O: Offset + Unpin> Future
+    for AsyncAnonymousAtomParse<P, R, T, O>
 where
     <T as Parsed>::Output<O>: Unpin,
 {
@@ -164,13 +168,13 @@ where
     }
 }
 
-impl<'a, R: PollReader<O> + Unpin, T: AsyncParse<O>, O: Offset + Unpin> TakeReader<'a, R>
-    for AsyncAnonymousAtomParse<'a, R, T, O>
+impl<P: Options + Unpin, R: PollReader<O> + Unpin, T: AsyncParse<O>, O: Offset + Unpin>
+    TakeReader<P, R> for AsyncAnonymousAtomParse<P, R, T, O>
 where
     <T as Parsed>::Output<O>: Unpin,
 {
     impl_take_reader! {}
-    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+    fn borrow_reader(&mut self) -> (&mut R, &P) {
         match self {
             Self::Header(h) => h.borrow_reader(),
             Self::Content(_, c) => {
@@ -187,12 +191,12 @@ impl<T: AsyncParse<O>, O: Offset + Unpin> AsyncParse<O> for AnonymousAtom<T>
 where
     <T as Parsed>::Output<O>: Unpin,
 {
-    type Fut<'a, R: PollReader<O> + Unpin> = AsyncAnonymousAtomParse<'a, R, T, O>;
+    type Fut<P: Options + Unpin, R: PollReader<O> + Unpin> = AsyncAnonymousAtomParse<P, R, T, O>;
 
-    fn create_fut<'a, R: PollReader<O> + Unpin>(
+    fn create_fut<P: Options + Unpin, R: PollReader<O> + Unpin>(
         reader: R,
-        options: &'a ParseOptions,
-    ) -> Self::Fut<'a, R> {
+        options: P,
+    ) -> Self::Fut<P, R> {
         AsyncAnonymousAtomParse::Header(AtomHeader::create_fut(reader, options))
     }
 }

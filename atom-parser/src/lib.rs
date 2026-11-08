@@ -31,7 +31,7 @@ pub use reader::{
     SwapOffsets, TakeReader, TrailingReader,
 };
 pub mod parse_options;
-pub use parse_options::{Endianess, ParseOptions};
+pub use parse_options::{Endianess, Options, ParseOptions};
 pub mod error;
 #[cfg(feature = "alloc")]
 pub use error::ExtentError;

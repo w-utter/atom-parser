@@ -1,23 +1,18 @@
 use crate::{
-    AsyncParse, Endianess, Offset, Parse, ParseError, ParseOptions, Parsed, PollReader, Reader,
+    AsyncParse, Endianess, Offset, Options, Parse, ParseError, Parsed, PollReader, Reader,
     TakeReader, impl_take_reader,
 };
 
-pub enum IntegerParse<'a, O, R, T, const N: usize> {
-    Waiting(
-        R,
-        &'a ParseOptions,
-        [u8; N],
-        core::marker::PhantomData<(O, T)>,
-    ),
-    Done(R, &'a ParseOptions),
+pub enum IntegerParse<P, O, R, T, const N: usize> {
+    Waiting(R, P, [u8; N], core::marker::PhantomData<(O, T)>),
+    Done(R, P),
     Empty,
 }
 
-impl<'a, O, R, T, const N: usize> TakeReader<'a, R> for IntegerParse<'a, O, R, T, N> {
+impl<P: Options, O, R, T, const N: usize> TakeReader<P, R> for IntegerParse<P, O, R, T, N> {
     impl_take_reader! {}
 
-    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+    fn borrow_reader(&mut self) -> (&mut R, &P) {
         match self {
             Self::Waiting(r, opts, ..) => (r, opts),
             Self::Done(r, opts) => (r, opts),
@@ -35,11 +30,11 @@ macro_rules! parse_integers {
             }
 
             impl <O: Offset> Parse<O> for $i {
-                fn parse<T: Reader<O>>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
+                fn parse<T: Reader<O>, P: Options>(reader: &mut T, options: P) -> Result<Self, ParseError> {
                     let mut buf = [0; core::mem::size_of::<$i>()];
                     reader.read(&mut buf)?;
 
-                    Ok(if matches!(options.endianess, Endianess::Big) {
+                    Ok(if matches!(options.endianess(), Endianess::Big) {
                         // likely path
                         <$i>::from_be_bytes(buf)
                     } else {
@@ -49,13 +44,13 @@ macro_rules! parse_integers {
             }
 
             impl <O: Offset + Unpin> AsyncParse<O> for $i {
-                type Fut<'a, R: PollReader<O> + Unpin> = IntegerParse<'a, O, R, $i, { core::mem::size_of::<$i>() }>;
-                fn create_fut<'a, R: PollReader<O> + Unpin>(reader: R, options: &'a ParseOptions) -> Self::Fut<'a, R> {
+                type Fut<P: Options + Unpin, R: PollReader<O> + Unpin> = IntegerParse<P, O, R, $i, { core::mem::size_of::<$i>() }>;
+                fn create_fut<P: Options + Unpin, R: PollReader<O> + Unpin>(reader: R, options: P) -> Self::Fut<P, R> {
                     IntegerParse::Waiting(reader, options, [0; _], core::marker::PhantomData)
                 }
             }
 
-            impl <'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for IntegerParse<'a, O, R, $i, { core::mem::size_of::<$i>() }> {
+            impl <P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for IntegerParse<P, O, R, $i, { core::mem::size_of::<$i>() }> {
                 type Output = Result<$i, ParseError>;
                 fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
                     let this = core::mem::replace(&mut *self, IntegerParse::Empty);
@@ -67,8 +62,9 @@ macro_rules! parse_integers {
                                     return core::task::Poll::Pending
                                 }
                                 core::task::Poll::Ready(res) => {
+                                    let is_big_endian = matches!(opts.endianess(), Endianess::Big);
                                     *self = Self::Done(r, opts);
-                                    return core::task::Poll::Ready(Ok(res.map(|_| if matches!(opts.endianess, Endianess::Big) {
+                                    return core::task::Poll::Ready(Ok(res.map(|_| if is_big_endian {
                                         // likely path
                                         <$i>::from_be_bytes(buf)
                                     } else {
@@ -100,30 +96,32 @@ mod bool_impl {
     }
 
     impl<O: Offset> Parse<O> for bool {
-        fn parse<T: Reader<O>>(reader: &mut T, opts: &ParseOptions) -> Result<Self, ParseError> {
-            let byte = u8::parse(reader, opts)?;
-            if opts.error_on_used_reserved_fields && (byte & !1) != 0 {
+        fn parse<T: Reader<O>, P: Options>(reader: &mut T, opts: P) -> Result<Self, ParseError> {
+            let byte = u8::parse(reader, &opts)?;
+            if opts.options().error_on_used_reserved_fields && (byte & !1) != 0 {
                 return Err(ParseError::UsedReservedField);
             }
             Ok(byte & 1 == 1)
         }
     }
 
-    pub struct AsyncBoolParse<'a, O, R> {
-        integer: IntegerParse<'a, O, R, u8, 1>,
+    pub struct AsyncBoolParse<P, O, R> {
+        integer: IntegerParse<P, O, R, u8, 1>,
     }
 
-    impl<'a, O, R> TakeReader<'a, R> for AsyncBoolParse<'a, O, R> {
-        fn take_reader(self) -> (R, &'a ParseOptions) {
+    impl<P: Options, O, R> TakeReader<P, R> for AsyncBoolParse<P, O, R> {
+        fn take_reader(self) -> (R, P) {
             self.integer.take_reader()
         }
 
-        fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+        fn borrow_reader(&mut self) -> (&mut R, &P) {
             self.integer.borrow_reader()
         }
     }
 
-    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for AsyncBoolParse<'a, O, R> {
+    impl<P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin> Future
+        for AsyncBoolParse<P, O, R>
+    {
         type Output = ::core::result::Result<bool, ParseError>;
         fn poll(
             mut self: core::pin::Pin<&mut Self>,
@@ -146,7 +144,7 @@ mod bool_impl {
 
                     let (_, opts) = self.borrow_reader();
 
-                    if opts.error_on_used_reserved_fields && (byte & !1) != 0 {
+                    if opts.options().error_on_used_reserved_fields && (byte & !1) != 0 {
                         return core::task::Poll::Ready(Err(ParseError::UsedReservedField));
                     }
                     return core::task::Poll::Ready(Ok(byte & 1 == 1));
@@ -156,11 +154,11 @@ mod bool_impl {
     }
 
     impl<O: Offset + Unpin> AsyncParse<O> for bool {
-        type Fut<'a, R: PollReader<O> + Unpin> = AsyncBoolParse<'a, O, R>;
-        fn create_fut<'a, R: PollReader<O> + Unpin>(
+        type Fut<P: Options + Unpin, R: PollReader<O> + Unpin> = AsyncBoolParse<P, O, R>;
+        fn create_fut<P: Options + Unpin, R: PollReader<O> + Unpin>(
             reader: R,
-            options: &'a ParseOptions,
-        ) -> Self::Fut<'a, R> {
+            options: P,
+        ) -> Self::Fut<P, R> {
             AsyncBoolParse {
                 integer: u8::create_fut(reader, options),
             }

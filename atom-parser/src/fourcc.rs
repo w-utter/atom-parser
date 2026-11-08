@@ -1,6 +1,6 @@
 use crate::{
-    AsyncParse, IntegerParse, Offset, Parse, ParseError, ParseOptions, Parsed, PollReader, Reader,
-    TakeReader,
+    AsyncParse, Endianess, IntegerParse, Offset, Options, Parse, ParseError, Parsed, PollReader,
+    Reader, TakeReader,
 };
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
@@ -43,17 +43,23 @@ impl Parsed for FourCC {
 }
 
 impl<O: Offset> Parse<O> for FourCC {
-    fn parse<T: Reader<O>>(reader: &mut T, options: &ParseOptions) -> Result<Self, ParseError> {
-        let inner = u32::parse(reader, options)?;
-        Ok(Self(inner.to_be_bytes()))
+    fn parse<T: Reader<O>, P: Options>(reader: &mut T, options: P) -> Result<Self, ParseError> {
+        let inner = u32::parse(reader, &options)?;
+
+        Ok(Self(match options.endianess() {
+            Endianess::Little => inner.to_le_bytes(),
+            Endianess::Big => inner.to_be_bytes(),
+        }))
     }
 }
 
-pub struct FourCCParse<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> {
-    pub inner: <u32 as AsyncParse<O>>::Fut<'a, R>,
+pub struct FourCCParse<P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin> {
+    pub inner: <u32 as AsyncParse<O>>::Fut<P, R>,
 }
 
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for FourCCParse<'a, O, R> {
+impl<P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin> Future
+    for FourCCParse<P, O, R>
+{
     type Output = Result<FourCC, ParseError>;
     fn poll(
         mut self: core::pin::Pin<&mut Self>,
@@ -73,27 +79,35 @@ impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for FourCCParse<'a,
             }
             Poll::Ready(res) => {
                 core::mem::swap(&mut this, &mut *self);
-                return Poll::Ready(res.map(|num| FourCC(num.to_be_bytes())));
+                let (_, opts) = self.borrow_reader();
+                return Poll::Ready(res.map(|num| {
+                    FourCC(match opts.endianess() {
+                        Endianess::Big => num.to_be_bytes(),
+                        Endianess::Little => num.to_le_bytes(),
+                    })
+                }));
             }
         }
     }
 }
 
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin> TakeReader<'a, R> for FourCCParse<'a, O, R> {
-    fn take_reader(self) -> (R, &'a ParseOptions) {
+impl<P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin> TakeReader<P, R>
+    for FourCCParse<P, O, R>
+{
+    fn take_reader(self) -> (R, P) {
         self.inner.take_reader()
     }
-    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+    fn borrow_reader(&mut self) -> (&mut R, &P) {
         self.inner.borrow_reader()
     }
 }
 
 impl<O: Offset + Unpin> AsyncParse<O> for FourCC {
-    type Fut<'a, R: PollReader<O> + Unpin> = FourCCParse<'a, O, R>;
-    fn create_fut<'a, R: PollReader<O> + Unpin>(
+    type Fut<P: Options + Unpin, R: PollReader<O> + Unpin> = FourCCParse<P, O, R>;
+    fn create_fut<P: Options + Unpin, R: PollReader<O> + Unpin>(
         reader: R,
-        options: &'a ParseOptions,
-    ) -> Self::Fut<'a, R> {
+        options: P,
+    ) -> Self::Fut<P, R> {
         FourCCParse {
             inner: u32::create_fut(reader, options),
         }

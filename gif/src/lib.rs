@@ -21,6 +21,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(little)]
     struct Header {
         version: FormatVersion,
         width: u16,
@@ -61,6 +62,7 @@ make_atom! {
 
 make_atom! {
     #[derive(Debug)]
+    #[endianess(little)]
     struct Segment {
         #[tag]
         kind: SegmentKind,
@@ -102,6 +104,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(little)]
     #[tag(SegmentKind, SegmentKind::Extension)]
     struct ExtensionBlock {
         #[tag]
@@ -116,6 +119,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(little)]
     #[tag(ExtensionKind, ExtensionKind::GraphicsControl)]
     struct GraphicsControl {
         #[expected(0x04)]
@@ -128,6 +132,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(little)]
     #[tag(ExtensionKind, ExtensionKind::Plaintext)]
     struct Plaintext {
         #[expected(0x0c)]
@@ -144,6 +149,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(little)]
     #[tag(ExtensionKind, ExtensionKind::Application)]
     struct Application {
         #[expected(0x0b)]
@@ -154,6 +160,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(little)]
     #[tag(ExtensionKind, ExtensionKind::Comment)]
     struct Comment {
         data: SubBlocks,
@@ -175,6 +182,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(little)]
     struct ImageHeader {
         left: u16,
         top: u16,
@@ -186,6 +194,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(little)]
     #[tag(SegmentKind, SegmentKind::ImageBlock)]
     struct ImageBlock {
         header: ImageHeader,
@@ -194,6 +203,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(little)]
     #[tag(SegmentKind, SegmentKind::Trailer)]
     struct Trailer {
 
@@ -292,6 +302,7 @@ impl<O: atom_parser::Offset> core::cmp::PartialEq for SubBlock<O> {
 
 make_atom! {
     #[derive(Debug)]
+    #[endianess(little)]
     struct Gif {
         header: Header,
         #[trailing_array]
@@ -311,10 +322,8 @@ fn gif() {
         let bytes = std::fs::read(TEST_FILE).unwrap();
         atom_parser::InMemoryReader::from_buf(bytes)
     };
-    let opts = atom_parser::ParseOptions {
-        endianess: atom_parser::Endianess::Little,
-        ..Default::default()
-    };
+
+    let opts = atom_parser::ParseOptions::default();
     use atom_parser::Parse;
 
     let gif = Gif::parse(&mut r, &opts).unwrap();
@@ -389,10 +398,7 @@ async fn gif_async() {
         let bytes = std::fs::read(TEST_FILE).unwrap();
         atom_parser::InMemoryReader::from_buf(bytes)
     };
-    let opts = atom_parser::ParseOptions {
-        endianess: atom_parser::Endianess::Little,
-        ..Default::default()
-    };
+    let opts = atom_parser::ParseOptions::default();
     use atom_parser::AsyncParse;
 
     let gif = Gif::parse_async(&mut r, &opts).await.unwrap();

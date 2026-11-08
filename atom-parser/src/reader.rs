@@ -1,4 +1,4 @@
-use crate::{ParseOptions, TryFromArraySize};
+use crate::TryFromArraySize;
 
 pub mod async_reader;
 pub use async_reader::{AsyncReadCstr, AsyncReader, AsyncSeek, PollReader};
@@ -73,15 +73,15 @@ impl<'a, O, S: SwapOffsets<O>> SwapOffsets<O> for &'a mut S {
 }
 
 /// used for stealing the current reader in an async state machine
-pub trait TakeReader<'a, R> {
-    fn take_reader(self) -> (R, &'a ParseOptions);
-    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions);
+pub trait TakeReader<P, R> {
+    fn take_reader(self) -> (R, P);
+    fn borrow_reader(&mut self) -> (&mut R, &P);
 }
 
 #[macro_export]
 macro_rules! impl_take_reader {
     () => {
-        fn take_reader(self) -> (R, &'a ParseOptions) {
+        fn take_reader(self) -> (R, P) {
             match self {
                 Self::Done(reader, opts) => return (reader, opts),
                 _ => unreachable!("invalid state"),

@@ -1,5 +1,5 @@
 use crate::field::{PayloadLength, Tag};
-use crate::{AtomField, AtomFields, KRATE, StructFieldAttr};
+use crate::{AtomField, AtomFieldKind, AtomFields, Endianess, KRATE, StructFieldAttr};
 
 #[derive(Clone)]
 pub enum Condition {
@@ -405,6 +405,7 @@ impl ConditionalVariant {
         storage_generics: &syn::Generics,
         payload_len: Option<&PayloadLength>,
         tag: Option<&Tag>,
+        definition_endianess: Option<&Endianess>,
     ) -> proc_macro2::TokenStream {
         let (parse_impl_generics, parse_ty_generics, parse_where_clause) =
             parse_generics.split_for_impl();
@@ -432,8 +433,9 @@ impl ConditionalVariant {
                 &generics,
                 generic_collection,
                 None,
+                definition_endianess,
                 &|_| Default::default(),
-                &|_| Default::default(),
+                &|_, _| Default::default(),
                 false,
             );
 
@@ -449,7 +451,8 @@ impl ConditionalVariant {
             generic_collection,
             payload_len.as_ref(),
             tag.as_ref(),
-            &|_| Default::default(),
+            definition_endianess,
+            &|_, _| Default::default(),
         );
 
         let pd_generics = generics
@@ -468,11 +471,11 @@ impl ConditionalVariant {
                 PdStorage(::core::convert::Infallible, ::core::marker::PhantomData<( __Offset, #(#pd_generics,)* )>),
             }
 
-            impl #parse_impl_generics ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #parse_name #parse_ty_generics #parse_where_clause {
-                fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+            impl #parse_impl_generics ::#KRATE::reader::TakeReader<__Options, __Reader> for #parse_name #parse_ty_generics #parse_where_clause {
+                fn take_reader(self) -> (__Reader, __Options) {
                     unreachable!("reader should not be taken from nested state")
                 }
-                fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                fn borrow_reader(&mut self) -> (&mut __Reader, &__Options) {
                     match self {
                         #(#borrow_reader_variants)*
                         #nop_borrow
@@ -491,10 +494,12 @@ impl ConditionalVariant {
     fn format_none_variants(
         exhaustive: bool,
         generics: &syn::Generics,
+        definition_endianess: Option<&Endianess>,
     ) -> (
         Option<proc_macro2::TokenStream>,
         Option<proc_macro2::TokenStream>,
     ) {
+        let options_ty = Endianess::format_options_ty(definition_endianess, None);
         use quote::quote;
         if !exhaustive {
             let pd_generics = generics.params.iter().filter_map(|p| match p {
@@ -504,7 +509,7 @@ impl ConditionalVariant {
 
             (
                 Some(quote! {
-                    None(__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions, ::core::marker::PhantomData<(#( #pd_generics,)* )>),
+                    None(__Reader, #options_ty, ::core::marker::PhantomData<(#( #pd_generics,)* )>),
                 }),
                 Some(quote! {
                     None,
@@ -527,11 +532,15 @@ impl ConditionalVariant {
         .into()
     }
 
-    fn format_none_borrow(exhaustive: bool) -> Option<proc_macro2::TokenStream> {
+    fn format_none_borrow(
+        exhaustive: bool,
+        definition_endianess: Option<&Endianess>,
+    ) -> Option<proc_macro2::TokenStream> {
+        let borrow_opts = Endianess::format_borrow_reader(definition_endianess, None);
         if !exhaustive {
             Some(
                 quote::quote! {
-                    Self::None(reader, opts, _) => (reader, opts),
+                    Self::None(reader, opts, _) => (reader, #borrow_opts),
                 }
                 .into(),
             )
@@ -557,18 +566,18 @@ impl ConditionalVariant {
         };
 
         let parsed_names = fields.iter().filter_map(|f| {
-            match f {
+            match f.kind {
                 // reused fields are not kept in parsed structs
-                AtomField::Struct(_, StructFieldAttr::ReuseCondition) => None,
-                field => field.as_collection(),
+                AtomFieldKind::Struct(_, StructFieldAttr::ReuseCondition) => None,
+                _ => f.as_collection(),
             }
         });
 
         let collected_names = fields.iter().filter_map(|f| {
-            match f {
+            match &f.kind {
                 // inline any nested conditional fields
-                AtomField::Conditional(cond) => Some(cond.as_async_field_collection(mod_name)),
-                field => field.as_collection(),
+                AtomFieldKind::Conditional(cond) => Some(cond.as_async_field_collection(mod_name)),
+                _ => f.as_collection(),
             }
         });
 
@@ -631,6 +640,7 @@ impl ConditionalVariant {
         name: &syn::Ident,
         fields: &[AtomField],
         generics: &syn::Generics,
+        definition_endianess: Option<&Endianess>,
     ) -> proc_macro2::TokenStream {
         let mut sync_generics = generics.clone();
         sync_generics
@@ -660,8 +670,12 @@ impl ConditionalVariant {
             syn::parse_quote!(__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin = usize),
         );
 
-        let sync_helper_fns = fields.iter().filter_map(|f| f.as_sync_helper_fn(None));
-        let async_helper_fns = fields.iter().filter_map(|f| f.as_async_helper_fn(None));
+        let sync_helper_fns = fields
+            .iter()
+            .filter_map(|f| f.as_sync_helper_fn(None, definition_endianess));
+        let async_helper_fns = fields
+            .iter()
+            .filter_map(|f| f.as_async_helper_fn(None, definition_endianess));
         let (impl_generics, ty_generics, where_clause) = sync_generics.split_for_impl();
         let (async_impl_generics, async_ty_generics, async_where_clause) =
             async_generics.split_for_impl();
@@ -749,6 +763,7 @@ impl Conditionals {
         generic_collection: Option<&proc_macro2::TokenStream>,
         payload_len: Option<&PayloadLength>,
         tag: Option<&Tag>,
+        definition_endianess: Option<&Endianess>,
     ) -> proc_macro2::TokenStream {
         use quote::quote;
 
@@ -776,7 +791,7 @@ impl Conditionals {
 
             parse_generics
                 .params
-                .push(syn::parse_quote!('__parse_options));
+                .push(syn::parse_quote!(__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin));
             parse_generics.params.push(
                 syn::parse_quote!(__Offset: ::#KRATE::reader::Offset + ::core::marker::Unpin),
             );
@@ -824,6 +839,7 @@ impl Conditionals {
                         &storage_generics,
                         payload_len.as_ref(),
                         tag.as_ref(),
+                        definition_endianess,
                     )
                 });
 
@@ -831,12 +847,13 @@ impl Conditionals {
                     let payload_len = AtomFields::nested_payload_len(payload_len, &v.fields);
                     let tag = AtomFields::nested_tag(tag, &v.fields);
                     v.fields.iter().filter_map(move |field| {
-                        if let AtomField::Conditional(cond) = field {
+                        if let AtomFieldKind::Conditional(cond) = &field.kind {
                             Some(cond.as_async_state(
                                 generics,
                                 generic_collection,
                                 payload_len.as_ref(),
                                 tag.as_ref(),
+                                definition_endianess,
                             ))
                         } else {
                             None
@@ -848,13 +865,18 @@ impl Conditionals {
                 let storage_name = quote::format_ident!("Async{}Storage", name);
 
                 let (none_parse_variant, none_storage_variant) =
-                    ConditionalVariant::format_none_variants(exhaustive, &storage_generics);
+                    ConditionalVariant::format_none_variants(
+                        exhaustive,
+                        &storage_generics,
+                        definition_endianess,
+                    );
 
                 let variant_borrows = variants.iter().map(|v| {
                     ConditionalVariant::format_variant_borrow(&v.variant_name, exhaustive)
                 });
 
-                let none_variant_borrow = ConditionalVariant::format_none_borrow(exhaustive);
+                let none_variant_borrow =
+                    ConditionalVariant::format_none_borrow(exhaustive, definition_endianess);
 
                 quote! {
                     #(#nested)*
@@ -865,11 +887,11 @@ impl Conditionals {
                         #none_parse_variant
                     }
 
-                    impl #parse_impl_generics ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #parse_name #parse_ty_generics #parse_where_clause {
-                        fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                    impl #parse_impl_generics ::#KRATE::reader::TakeReader<__Options, __Reader> for #parse_name #parse_ty_generics #parse_where_clause {
+                        fn take_reader(self) -> (__Reader, __Options) {
                             unreachable!("reader should not be taken from nested state")
                         }
-                        fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                        fn borrow_reader(&mut self) -> (&mut __Reader, &__Options) {
                             match self {
                                 #(#variant_borrows)*
                                 #none_variant_borrow
@@ -905,15 +927,17 @@ impl Conditionals {
                     &storage_generics,
                     payload_len.as_ref(),
                     tag.as_ref(),
+                    definition_endianess,
                 );
 
                 let nested = fields.iter().filter_map(|field| {
-                    if let AtomField::Conditional(cond) = field {
+                    if let AtomFieldKind::Conditional(cond) = &field.kind {
                         Some(cond.as_async_state(
                             generics,
                             generic_collection,
                             payload_len.as_ref(),
                             tag.as_ref(),
+                            definition_endianess,
                         ))
                     } else {
                         None
@@ -925,11 +949,16 @@ impl Conditionals {
                 let storage_name = quote::format_ident!("Async{}Storage", optional_name);
 
                 let (none_parse_variant, none_storage_variant) =
-                    ConditionalVariant::format_none_variants(exhaustive, &storage_generics);
+                    ConditionalVariant::format_none_variants(
+                        exhaustive,
+                        &storage_generics,
+                        definition_endianess,
+                    );
 
                 let variant_borrow = ConditionalVariant::format_variant_borrow(&name, exhaustive);
 
-                let none_variant_borrow = ConditionalVariant::format_none_borrow(exhaustive);
+                let none_variant_borrow =
+                    ConditionalVariant::format_none_borrow(exhaustive, definition_endianess);
 
                 quote! {
                     #(#nested)*
@@ -940,11 +969,11 @@ impl Conditionals {
                         #none_parse_variant
                     }
 
-                    impl #parse_impl_generics ::#KRATE::reader::TakeReader<'__parse_options, __Reader> for #parse_name #parse_ty_generics #parse_where_clause {
-                        fn take_reader(self) -> (__Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                    impl #parse_impl_generics ::#KRATE::reader::TakeReader<__Options, __Reader> for #parse_name #parse_ty_generics #parse_where_clause {
+                        fn take_reader(self) -> (__Reader, __Options) {
                             unreachable!("reader should not be taken from nested state")
                         }
-                        fn borrow_reader(&mut self) -> (&mut __Reader, &'__parse_options ::#KRATE::parse_options::ParseOptions) {
+                        fn borrow_reader(&mut self) -> (&mut __Reader, &__Options) {
                             match self {
                                 #variant_borrow
                                 #none_variant_borrow

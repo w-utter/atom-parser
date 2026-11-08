@@ -1,6 +1,6 @@
 use crate::{
-    AsyncParse, Extent, Offset, Parse, ParseError, ParseOptions, Parsed, PollReader, Reader,
-    TakeReader, impl_take_reader,
+    AsyncParse, Extent, Offset, Options, Parse, ParseError, Parsed, PollReader, Reader, TakeReader,
+    impl_take_reader,
 };
 
 pub struct NullTerminated<O, T> {
@@ -36,15 +36,15 @@ impl<O: Offset, I: Parse<O>> Parse<O> for NullTerminated<O, I>
 where
     <I as Parsed>::Output<O>: PartialEq,
 {
-    fn parse<T: Reader<O>>(
+    fn parse<T: Reader<O>, P: Options>(
         reader: &mut T,
-        options: &ParseOptions,
+        options: P,
     ) -> Result<<Self as Parsed>::Output<O>, ParseError> {
         let offset = reader.offset();
         let mut end;
         loop {
             end = reader.offset();
-            let item = I::parse(reader, options)?;
+            let item = I::parse(reader, &options)?;
             if item == unsafe { core::mem::zeroed() } {
                 break;
             }
@@ -58,21 +58,25 @@ where
     }
 }
 
-pub enum AsyncNullTerminatedParse<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, I: AsyncParse<O>>
-where
+pub enum AsyncNullTerminatedParse<
+    P: Options + Unpin,
+    O: Offset + Unpin,
+    R: PollReader<O> + Unpin,
+    I: AsyncParse<O>,
+> where
     <I as Parsed>::Output<O>: Unpin,
 {
     Iterating {
         offset: O,
         end: O,
-        fut: <I as AsyncParse<O>>::Fut<'a, R>,
+        fut: <I as AsyncParse<O>>::Fut<P, R>,
     },
-    Done(R, &'a ParseOptions),
+    Done(R, P),
     Empty,
 }
 
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, I: AsyncParse<O>> Future
-    for AsyncNullTerminatedParse<'a, O, R, I>
+impl<P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin, I: AsyncParse<O>> Future
+    for AsyncNullTerminatedParse<P, O, R, I>
 where
     <I as Parsed>::Output<O>: PartialEq + Unpin,
 {
@@ -131,13 +135,13 @@ where
     }
 }
 
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, I: AsyncParse<O>> TakeReader<'a, R>
-    for AsyncNullTerminatedParse<'a, O, R, I>
+impl<P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin, I: AsyncParse<O>>
+    TakeReader<P, R> for AsyncNullTerminatedParse<P, O, R, I>
 where
     <I as Parsed>::Output<O>: Unpin,
 {
     impl_take_reader! {}
-    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+    fn borrow_reader(&mut self) -> (&mut R, &P) {
         match self {
             Self::Iterating { fut, .. } => fut.borrow_reader(),
             Self::Done(reader, opts) => (reader, opts),
@@ -150,11 +154,11 @@ impl<O: Offset + Unpin, I: AsyncParse<O> + Unpin> AsyncParse<O> for NullTerminat
 where
     <I as Parsed>::Output<O>: Unpin + PartialEq,
 {
-    type Fut<'a, R: PollReader<O> + Unpin> = AsyncNullTerminatedParse<'a, O, R, I>;
-    fn create_fut<'a, R: PollReader<O> + Unpin>(
+    type Fut<P: Options + Unpin, R: PollReader<O> + Unpin> = AsyncNullTerminatedParse<P, O, R, I>;
+    fn create_fut<P: Options + Unpin, R: PollReader<O> + Unpin>(
         reader: R,
-        options: &'a ParseOptions,
-    ) -> Self::Fut<'a, R> {
+        options: P,
+    ) -> Self::Fut<P, R> {
         let offset = reader.offset();
         let end = reader.offset();
         AsyncNullTerminatedParse::Iterating {

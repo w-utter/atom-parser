@@ -1,6 +1,6 @@
 use crate::{
-    AsyncIterState, AsyncIterator, AsyncParse, BacktrackReader, FourCC, Offset, Parse, ParseError,
-    ParseOptions, Parsed, PollReader, Reader, SwapOffsets, TakeReader, TrailingReader,
+    AsyncIterState, AsyncIterator, AsyncParse, BacktrackReader, FourCC, Offset, Options, Parse,
+    ParseError, Parsed, PollReader, Reader, SwapOffsets, TakeReader, TrailingReader,
     impl_take_reader,
 };
 
@@ -41,9 +41,9 @@ mod sync_impl {
     use super::*;
 
     impl<O: Offset, S: Parse<O>, I: Parse<O>> Parse<O> for SizedChildren<O, S, I> {
-        fn parse<T: Reader<O>>(
+        fn parse<T: Reader<O>, P: Options>(
             reader: &mut T,
-            options: &ParseOptions,
+            options: P,
         ) -> Result<<Self as Parsed>::Output<O>, ParseError> {
             let len = S::parse(reader, options)?;
             let offset = reader.offset();
@@ -56,9 +56,9 @@ mod sync_impl {
     }
 
     impl<O: Offset, I: Parse<O>> Parse<O> for Children<O, I> {
-        fn parse<T: Reader<O>>(
+        fn parse<T: Reader<O>, P: Options>(
             reader: &mut T,
-            _: &ParseOptions,
+            _: P,
         ) -> Result<<Self as Parsed>::Output<O>, ParseError> {
             let offset = reader.offset();
             let size = reader.remaining_size();
@@ -70,18 +70,14 @@ mod sync_impl {
         }
     }
 
-    pub struct ChildrenIter<'a, O, R: SwapOffsets<O>, C> {
+    pub struct ChildrenIter<P, O, R: SwapOffsets<O>, C> {
         _pd: core::marker::PhantomData<C>,
-        pub reader: BacktrackReader<O, TrailingReader<O, &'a mut R>>,
-        opts: &'a ParseOptions,
+        pub reader: BacktrackReader<O, TrailingReader<O, R>>,
+        opts: P,
     }
 
-    impl<'a, O: Offset, R: SwapOffsets<O> + Reader<O>, C> ChildrenIter<'a, O, R, C> {
-        pub fn from_children(
-            children: &Children<O, C>,
-            reader: &'a mut R,
-            opts: &'a ParseOptions,
-        ) -> Self {
+    impl<P, O: Offset, R: SwapOffsets<O> + Reader<O>, C> ChildrenIter<P, O, R, C> {
+        pub fn from_children(children: &Children<O, C>, reader: R, opts: P) -> Self {
             let Children { offset, size, .. } = children;
 
             let max_offset = offset.add(*size);
@@ -95,11 +91,11 @@ mod sync_impl {
         }
     }
 
-    impl<'a, O: Offset, R: Reader<O>, C: Parse<O>> Iterator for ChildrenIter<'a, O, R, C> {
+    impl<P: Options, O: Offset, R: Reader<O>, C: Parse<O>> Iterator for ChildrenIter<P, O, R, C> {
         type Item = Result<<C as Parsed>::Output<O>, ParseError>;
         fn next(&mut self) -> Option<Self::Item> {
             if self.reader.remaining_size() > O::ZERO {
-                Some(C::parse(&mut self.reader, self.opts))
+                Some(C::parse(&mut self.reader, &self.opts))
             } else {
                 None
             }
@@ -111,7 +107,7 @@ pub use sync_impl::*;
 mod async_impl {
     use super::*;
     pub struct AsyncChildrenIter<
-        'a,
+        P: Options + Unpin,
         O: Offset + Unpin,
         R: SwapOffsets<O> + PollReader<O> + Unpin,
         C: AsyncParse<O>,
@@ -120,22 +116,22 @@ mod async_impl {
         <C as Parsed>::Output<O>: Unpin,
     {
         state: AsyncIterState<
-            'a,
-            BacktrackReader<O, TrailingReader<O, &'a mut R>>,
-            <C as AsyncParse<O>>::Fut<'a, BacktrackReader<O, TrailingReader<O, &'a mut R>>>,
+            P,
+            BacktrackReader<O, TrailingReader<O, R>>,
+            <C as AsyncParse<O>>::Fut<P, BacktrackReader<O, TrailingReader<O, R>>>,
         >,
     }
 
-    impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, C: AsyncParse<O>>
-        AsyncChildrenIter<'a, O, R, C>
+    impl<
+        P: Options + Unpin,
+        O: Offset + Unpin,
+        R: SwapOffsets<O> + PollReader<O> + Unpin,
+        C: AsyncParse<O>,
+    > AsyncChildrenIter<P, O, R, C>
     where
         <C as Parsed>::Output<O>: Unpin,
     {
-        pub fn from_children(
-            children: &Children<O, C>,
-            reader: &'a mut R,
-            opts: &'a ParseOptions,
-        ) -> Self {
+        pub fn from_children(children: &Children<O, C>, reader: R, opts: P) -> Self {
             let Children { offset, size, .. } = children;
 
             let max_offset = offset.add(*size);
@@ -152,18 +148,18 @@ mod async_impl {
             Self { state }
         }
 
-        pub fn reader(&mut self) -> &mut BacktrackReader<O, TrailingReader<O, &'a mut R>> {
+        pub fn reader(&mut self) -> &mut BacktrackReader<O, TrailingReader<O, R>> {
             let (reader, _) = self.state.borrow_reader();
             reader
         }
     }
 
     impl<
-        'a,
+        P: Options + Unpin,
         O: Offset + Unpin + Copy,
         R: SwapOffsets<O> + PollReader<O> + Unpin,
         C: AsyncParse<O> + Unpin,
-    > AsyncIterator for AsyncChildrenIter<'a, O, R, C>
+    > AsyncIterator for AsyncChildrenIter<P, O, R, C>
     where
         <C as Parsed>::Output<O>: Unpin,
     {
@@ -208,32 +204,25 @@ mod async_impl {
         }
     }
 
-    impl<'a, O: Offset + Unpin, R: SwapOffsets<O> + PollReader<O> + Unpin, C: AsyncParse<O> + Unpin>
-        TakeReader<'a, BacktrackReader<O, TrailingReader<O, &'a mut R>>>
-        for AsyncChildrenIter<'a, O, R, C>
+    impl<
+        P: Options + Unpin,
+        O: Offset + Unpin,
+        R: SwapOffsets<O> + PollReader<O> + Unpin,
+        C: AsyncParse<O> + Unpin,
+    > TakeReader<P, BacktrackReader<O, TrailingReader<O, R>>> for AsyncChildrenIter<P, O, R, C>
     where
         <C as Parsed>::Output<O>: Unpin,
     {
-        fn take_reader(
-            self,
-        ) -> (
-            BacktrackReader<O, TrailingReader<O, &'a mut R>>,
-            &'a ParseOptions,
-        ) {
+        fn take_reader(self) -> (BacktrackReader<O, TrailingReader<O, R>>, P) {
             self.state.take_reader()
         }
-        fn borrow_reader(
-            &mut self,
-        ) -> (
-            &mut BacktrackReader<O, TrailingReader<O, &'a mut R>>,
-            &'a ParseOptions,
-        ) {
+        fn borrow_reader(&mut self) -> (&mut BacktrackReader<O, TrailingReader<O, R>>, &P) {
             self.state.borrow_reader()
         }
     }
 
     pub enum SizedChildrenParse<
-        'a,
+        P: Options + Unpin,
         O: Offset + Unpin,
         R: PollReader<O> + Unpin,
         S: AsyncParse<O> + Unpin,
@@ -243,20 +232,20 @@ mod async_impl {
         <S as Parsed>::Output<O>: Unpin,
     {
         Size {
-            fut: <S as AsyncParse<O>>::Fut<'a, R>,
+            fut: <S as AsyncParse<O>>::Fut<P, R>,
             _pd: core::marker::PhantomData<C>,
         },
-        Done(R, &'a ParseOptions),
+        Done(R, P),
         Empty,
     }
 
     impl<
-        'a,
+        P: Options + Unpin,
         O: Offset + Unpin,
         R: PollReader<O> + Unpin,
         S: AsyncParse<O> + Unpin,
         C: AsyncParse<O> + Unpin,
-    > Future for SizedChildrenParse<'a, O, R, S, C>
+    > Future for SizedChildrenParse<P, O, R, S, C>
     where
         <S as Parsed>::Output<O>: Unpin,
         <C as Parsed>::Output<O>: Unpin,
@@ -296,18 +285,18 @@ mod async_impl {
     }
 
     impl<
-        'a,
+        P: Options + Unpin,
         O: Offset + Unpin,
         R: PollReader<O> + Unpin,
         S: AsyncParse<O> + Unpin,
         C: AsyncParse<O>,
-    > TakeReader<'a, R> for SizedChildrenParse<'a, O, R, S, C>
+    > TakeReader<P, R> for SizedChildrenParse<P, O, R, S, C>
     where
         <S as Parsed>::Output<O>: Unpin,
         <C as Parsed>::Output<O>: Unpin,
     {
         impl_take_reader! {}
-        fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+        fn borrow_reader(&mut self) -> (&mut R, &P) {
             match self {
                 Self::Size { fut, .. } => fut.borrow_reader(),
                 Self::Done(r, opts) => (r, opts),
@@ -322,11 +311,11 @@ mod async_impl {
         <S as Parsed>::Output<O>: Unpin,
         <C as Parsed>::Output<O>: Unpin,
     {
-        type Fut<'a, R: PollReader<O> + Unpin> = SizedChildrenParse<'a, O, R, S, C>;
-        fn create_fut<'a, R: PollReader<O> + Unpin>(
+        type Fut<P: Options + Unpin, R: PollReader<O> + Unpin> = SizedChildrenParse<P, O, R, S, C>;
+        fn create_fut<P: Options + Unpin, R: PollReader<O> + Unpin>(
             reader: R,
-            options: &'a ParseOptions,
-        ) -> Self::Fut<'a, R> {
+            options: P,
+        ) -> Self::Fut<P, R> {
             SizedChildrenParse::Size {
                 fut: S::create_fut(reader, options),
                 _pd: core::marker::PhantomData,
@@ -334,13 +323,9 @@ mod async_impl {
         }
     }
 
-    pub struct ChildrenParse<'a, O: Offset + Unpin, R, C>(
-        R,
-        &'a ParseOptions,
-        core::marker::PhantomData<(O, C)>,
-    );
-    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, C: AsyncParse<O>> Future
-        for ChildrenParse<'a, O, R, C>
+    pub struct ChildrenParse<P, O: Offset + Unpin, R, C>(R, P, core::marker::PhantomData<(O, C)>);
+    impl<P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin, C: AsyncParse<O>> Future
+        for ChildrenParse<P, O, R, C>
     where
         <C as Parsed>::Output<O>: Unpin,
     {
@@ -359,16 +344,16 @@ mod async_impl {
         }
     }
 
-    impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, C: AsyncParse<O>> TakeReader<'a, R>
-        for ChildrenParse<'a, O, R, C>
+    impl<P, O: Offset + Unpin, R: PollReader<O> + Unpin, C: AsyncParse<O>> TakeReader<P, R>
+        for ChildrenParse<P, O, R, C>
     where
         <C as Parsed>::Output<O>: Unpin,
     {
-        fn take_reader(self) -> (R, &'a ParseOptions) {
+        fn take_reader(self) -> (R, P) {
             (self.0, self.1)
         }
-        fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
-            (&mut self.0, self.1)
+        fn borrow_reader(&mut self) -> (&mut R, &P) {
+            (&mut self.0, &self.1)
         }
     }
 
@@ -376,11 +361,11 @@ mod async_impl {
     where
         <C as Parsed>::Output<O>: Unpin,
     {
-        type Fut<'a, R: PollReader<O> + Unpin> = ChildrenParse<'a, O, R, C>;
-        fn create_fut<'a, R: PollReader<O> + Unpin>(
+        type Fut<P: Options + Unpin, R: PollReader<O> + Unpin> = ChildrenParse<P, O, R, C>;
+        fn create_fut<P: Options + Unpin, R: PollReader<O> + Unpin>(
             reader: R,
-            options: &'a ParseOptions,
-        ) -> Self::Fut<'a, R> {
+            options: P,
+        ) -> Self::Fut<P, R> {
             ChildrenParse(reader, options, core::marker::PhantomData)
         }
     }

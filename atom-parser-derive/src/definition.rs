@@ -1,4 +1,4 @@
-use crate::FourCC;
+use crate::{Endianess, FourCC};
 
 mod enum_definition;
 pub use enum_definition::EnumDefinition;
@@ -12,9 +12,10 @@ pub use bitwise::{BitFieldDefinition, BitFieldList, FlagsDefinition};
 pub struct Definition {
     pub version: Option<syn::LitInt>,
     pub kind: DefinitionKind,
+    pub endianess: Option<Endianess>,
 }
 
-fn singular_attr<T>(
+pub(crate) fn singular_attr<T>(
     attrs: &mut Vec<syn::Attribute>,
     name: &str,
     f: impl FnOnce(syn::Attribute) -> syn::Result<T>,
@@ -51,6 +52,10 @@ impl syn::parse::Parse for Definition {
         })?;
         let enum_repr = singular_attr(&mut attrs, "enum_repr", |attr| {
             attr.parse_args::<syn::Type>()
+        })?;
+
+        let endianess = singular_attr(&mut attrs, "endianess", |attr| {
+            attr.parse_args_with(Endianess::parse_from_syn)
         })?;
 
         let tag = singular_attr(&mut attrs, "tag", |attr| {
@@ -109,7 +114,11 @@ impl syn::parse::Parse for Definition {
                 ),
             };
 
-            Ok(Self { version, kind })
+            Ok(Self {
+                version,
+                kind,
+                endianess,
+            })
         } else if lookahead.peek(syn::Token![enum]) {
             let _: syn::Token![enum] = input.parse()?;
             if version.is_some() || fcc.is_some() {
@@ -123,6 +132,7 @@ impl syn::parse::Parse for Definition {
             Ok(Self {
                 version: None,
                 kind: DefinitionKind::Enum(kind),
+                endianess,
             })
         } else {
             panic!("unknown layout")

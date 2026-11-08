@@ -114,7 +114,7 @@ fn null_terminated() {
         0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0, 128,
     ];
     let mut r = atom_parser::InMemoryReader::from_buf(bytes);
-    let opts = Default::default();
+    let opts = atom_parser::ParseOptions::default();
     use atom_parser::Parse;
     let a = A::parse(&mut r, &opts).unwrap();
     let nums = a
@@ -144,7 +144,7 @@ fn padding() {
     let bytes = vec![0, 0, 0, 2, 100, 123, 0, 200];
 
     let mut r = atom_parser::InMemoryReader::from_buf(bytes);
-    let opts = Default::default();
+    let opts = atom_parser::ParseOptions::default();
     use atom_parser::Parse;
     let padded = Padded::parse(&mut r, &opts).unwrap();
     assert_eq!(padded.padded.padded, 100);

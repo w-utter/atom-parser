@@ -3,6 +3,7 @@ use atom_parser::make_atom;
 
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("root")]
     struct Root {
         #[children]
@@ -14,6 +15,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("ftyp")]
     struct FileType {
         major_brand: FourCC,
@@ -23,6 +25,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("moov")]
     struct Movie {
         #[children]
@@ -38,6 +41,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("mdat")]
     struct MovieData {
         #[payload]
@@ -77,10 +81,12 @@ impl<O: atom_parser::Offset> MovieData<O> {
 // empty atoms
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("wide")]
     struct Wide {}
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("free")]
     struct Free {
         #[payload]
@@ -88,6 +94,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("skip")]
     struct Skip {
         #[payload]
@@ -97,6 +104,7 @@ make_atom! {
 
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("udta")]
     struct Userdata {
         #[children]
@@ -192,12 +200,14 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     struct UserdataEntries {
         #[trailing_array]
         entries: StringEntry,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     struct StringEntry {
         #[payload_len]
         len: u16,
@@ -210,12 +220,14 @@ make_atom! {
 // userdata
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("AllF")]
     struct PlayAllFrames {
         play_all: bool,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("name")]
     struct Name {
         #[payload]
@@ -230,24 +242,25 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("LOOP")]
     struct Loop {
         kind: LoopKind,
     }
 
     #[derive(Debug)]
+    #[endianess(little)]
     #[enum_repr(u16)]
-    // NOTE: values are stored in little endian
-    // so each value (1-4) is shifted over 8 bits
     enum DisplaySize {
         Normal = 0,
-        Double = 0x100,
-        Half = 0x200,
-        ScaleToFillScreen = 0x300,
-        CurrentSize = 0x400,
+        Double = 1,
+        Half = 2,
+        ScaleToFillScreen = 3,
+        CurrentSize = 4,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("ptv ")]
     struct PrintToVideo {
         display_size: DisplaySize,
@@ -258,12 +271,14 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("SelO")]
     struct PlaySelectionOnly {
         selection_only: bool
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("WLOC")]
     struct DefaultWindowLocation {
         x: u16,
@@ -274,6 +289,7 @@ make_atom! {
 // compressed movie data
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("cmov")]
     struct CompressedMovie {
         #[children]
@@ -284,12 +300,14 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("dcom")]
     struct DataCompression {
         compression_algorithm: FourCC,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("cmvd")]
     struct CompressedMovieData {
         #[payload]
@@ -300,6 +318,7 @@ make_atom! {
 // reference movies
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("rmra")]
     struct ReferenceMovie {
         #[trailing_array]
@@ -307,6 +326,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("rmda")]
     struct ReferenceMovieDescriptor {
         #[children]
@@ -320,6 +340,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("rdrf")]
     struct DataReference2 {
         #[flags(u32)]
@@ -330,6 +351,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("rmdr")]
     struct DataRate {
         #[flags(u32)]
@@ -340,6 +362,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("rmcs")]
     struct CPUSpeed {
         #[flags(u32)]
@@ -350,6 +373,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("rmvc")]
     struct VersionCheck {
         #[flags(u32)]
@@ -363,6 +387,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("rmcd")]
     struct ComponentDetect {
         #[flags(u32)]
@@ -383,6 +408,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("rmqu")]
     struct Quality {
         quality: u32,
@@ -393,6 +419,7 @@ make_atom! {
 make_atom! {
     #[derive(Debug)]
     #[version(0)]
+    #[endianess(big)]
     #[atom("mvhd")]
     struct MovieHeader {
         #[full_box]
@@ -418,6 +445,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("ctab")]
     struct ColorTable {
         seed: u32,
@@ -431,6 +459,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     struct Color {
         #[reserved]
         reserved: u16,
@@ -440,6 +469,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("trak")]
     struct Track {
         #[children]
@@ -461,6 +491,7 @@ make_atom! {
 // can be used in movies/tracks
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("clip")]
     struct Clipping {
         #[children]
@@ -470,6 +501,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("crgn")]
     struct ClippingRegion {
         region_size: u16,
@@ -483,6 +515,7 @@ make_atom! {
 make_atom! {
     #[derive(Debug)]
     #[version(0)]
+    #[endianess(big)]
     #[atom("tkhd")]
     struct TrackHeader {
         #[full_box]
@@ -511,6 +544,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("matt")]
     struct TrackMatte {
         #[children]
@@ -521,6 +555,7 @@ make_atom! {
 
     #[derive(Debug)]
     #[version(0)]
+    #[endianess(big)]
     #[atom("kmat")]
     struct CompressedMatte {
         #[full_box]
@@ -533,6 +568,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("edts")]
     struct Edit {
         #[children]
@@ -543,6 +579,7 @@ make_atom! {
 
     #[derive(Debug)]
     #[version(0)]
+    #[endianess(big)]
     #[atom("elst")]
     struct EditList {
         #[full_box]
@@ -552,8 +589,8 @@ make_atom! {
         #[dynamic_array(size_type = u32, zero_relative = false)]
         table_entries: EditListEntry,
     }
-
     #[derive(Debug)]
+    #[endianess(big)]
     struct EditListEntry {
         duration: u32,
         media_time: u32,
@@ -561,6 +598,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("tref")]
     struct TrackReference {
         #[children]
@@ -575,6 +613,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("tmcd")]
     struct TimeCode {
         #[trailing_array]
@@ -582,6 +621,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("chap")]
     struct ChapterList {
         #[trailing_array]
@@ -589,6 +629,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("sync")]
     struct Synchonization {
         #[trailing_array]
@@ -596,6 +637,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("scpt")]
     struct Transcript {
         #[trailing_array]
@@ -603,6 +645,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("ssrc")]
     struct NonprimarySource {
         #[trailing_array]
@@ -610,6 +653,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("hint")]
     struct Hint {
         #[trailing_array]
@@ -617,6 +661,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("load")]
     struct TrackLoadingSettings {
         preload_start_time: u32,
@@ -630,6 +675,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("imap")]
     struct TrackInputMap {
         #[children]
@@ -639,6 +685,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom(b"\0\0in")]
     struct TrackInput {
         id: u32,
@@ -655,18 +702,21 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom(b"\0\0ty")]
     struct InputType {
         ty: u32,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("obid")]
     struct ObjectId {
         object_id: u32,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("mdia")]
     struct Media {
         #[children]
@@ -686,6 +736,7 @@ const DATA_COMPONENT_TYPE: FourCC = FourCC::new(*b"dhlr");
 make_atom! {
     #[derive(Debug)]
     #[version(0)]
+    #[endianess(big)]
     #[atom("mdhd")]
     struct MediaHeader {
         #[full_box]
@@ -701,6 +752,7 @@ make_atom! {
     }
 
     #[derive(Debug, PartialEq)]
+    #[endianess(big)]
     #[enum_repr(FourCC)]
     enum MediaComponentSubtype {
         Video = FourCC::new(*b"vide"),
@@ -727,6 +779,7 @@ make_atom! {
 
     #[derive(Debug)]
     #[version(0)]
+    #[endianess(big)]
     #[atom("hdlr")]
     struct HandlerReference {
         #[full_box]
@@ -768,6 +821,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("minf")]
     struct MediaInformation {
         #[children]
@@ -797,6 +851,7 @@ impl<O: atom_parser::Offset> mvhd::v0::MovieHeaderV0<O> {
 }
 
 make_atom! {
+    #[endianess(big)]
     #[flags_repr(u16)]
     struct TextFaceFlags {
         const BOLD = 1 << 0;
@@ -812,6 +867,7 @@ make_atom! {
 // media information
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom("vmhd")]
     struct VideoMediaInformationHeader {
@@ -824,6 +880,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom("smhd")]
     struct SoundMediaInformationHeader {
@@ -837,12 +894,14 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("gmhd")]
     struct BaseMediaInformationHeader {
         // empty...
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom("gmin")]
     struct BaseMediaInformation {
@@ -858,6 +917,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom("tmci")]
     struct TimecodeMediaInformation {
@@ -890,6 +950,7 @@ where
 // sample table
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("stbl")]
     struct SampleTable {
         #[children]
@@ -904,6 +965,7 @@ make_atom! {
         },
     }
 
+    #[endianess(big)]
     struct SampleDescriptionEntry<D> {
         #[reserved]
         reserved: [u8; 6],
@@ -911,6 +973,7 @@ make_atom! {
         description: D,
     }
 
+    #[endianess(big)]
     struct UnknownSampleDesciption {
         #[payload]
         payload: Vec<u8>
@@ -930,6 +993,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom("stts")]
     struct TimeToSample {
@@ -942,12 +1006,14 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     struct TimeToSampleTableEntry {
         sample_count: u32,
         sample_duration: u32,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom("stss")]
     struct SyncSample {
@@ -960,6 +1026,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom("stsc")]
     struct SampleToChunk {
@@ -972,6 +1039,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     struct SampleToChunkTableEntry {
         first_chunk: u32,
         samples_per_chunk: u32,
@@ -979,6 +1047,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom("stsz")]
     struct SampleSize {
@@ -1212,6 +1281,7 @@ impl<O: atom_parser::Offset> stsz::v0::SampleSizeV0<O> {
 // data information
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("dinf")]
     struct DataInformation {
         #[children]
@@ -1221,6 +1291,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom("dref")]
     struct DataReference {
@@ -1237,6 +1308,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom("alis")]
     struct MacAlias {
@@ -1249,6 +1321,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom("rsrc")]
     struct MacResource {
@@ -1261,6 +1334,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom(b"url\0")]
     struct Url {
@@ -1273,6 +1347,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[version(0)]
     #[atom("stco")]
     struct ChunkOffset {
@@ -1496,6 +1571,7 @@ pub mod sample_description {
     use super::*;
     make_atom! {
         #[derive(Debug)]
+        #[endianess(big)]
         // this isnt an atom, but it has children so it is treated like one
         #[atom(b"fake")]
         struct Video {
@@ -1528,6 +1604,7 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("gama")]
         struct Gamma {
             gamma_level: u32,
@@ -1543,6 +1620,7 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("fiel")]
         struct FieldHandling {
             #[condition]
@@ -1558,6 +1636,7 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("mjqt")]
         struct MjpegDefaultQuantizationTable {
             #[payload]
@@ -1565,6 +1644,7 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("mjht")]
         struct MjpegDefaultHuffmanTable {
             #[payload]
@@ -1572,6 +1652,7 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         struct Sound {
             #[version]
             version: u16,
@@ -1599,6 +1680,7 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         struct Timecode {
             #[reserved]
             reserved: u32,
@@ -1618,6 +1700,7 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("fak2")]
         struct Text {
             #[flags(u32)]
@@ -1661,6 +1744,7 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("styl")]
         struct TextStyleInformation {
             #[dynamic_array(size_type = u16, zero_relative = false)]
@@ -1668,6 +1752,7 @@ pub mod sample_description {
         }
 
         // from ScrapSTElement in TextEdit docs
+        #[endianess(big)]
         struct TextStyleTableEntry {
             start_char: u32,
             height: u16,
@@ -1679,6 +1764,7 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         struct FontTableEntry {
             font_number: u16,
             #[pascal_string(u8)]
@@ -1686,6 +1772,7 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("ftab")]
         struct FontNameTable {
             #[trailing_array]
@@ -1693,6 +1780,7 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("hlit")]
         struct HighlightInformation {
             highlight_starting_offset: u32,
@@ -1700,12 +1788,14 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("hclr")]
         struct HighlightColor {
             color: [u16; 3]
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("drpo")]
         struct DropShadowOffset {
             horizontal_offset: u16,
@@ -1713,12 +1803,14 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("drpt")]
         struct DropShadowTransparency {
             transparency: u16,
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("imag")]
         struct ImageFontData {
             #[children]
@@ -1729,12 +1821,14 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("metr")]
         struct ImageFontHighlighting {
             // empty
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         struct Music {
             #[flags(u32)]
             flags: struct Flags {
@@ -1743,26 +1837,31 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         struct Mpeg {
             // empty
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         struct Sprite {
             // empty
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         struct Tween {
             // empty
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         struct Q3D {
             // empty
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         struct Streaming {
             version: u32,
             #[reserved]
@@ -1771,6 +1870,7 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("fak3")]
         struct Hint {
             version: u16,
@@ -1786,34 +1886,40 @@ pub mod sample_description {
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("tims")]
         struct RtpTimescale {
             timescale: u32,
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("tsro")]
         struct RtpTimestampOffset {
             offset: u32,
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         #[atom("snro")]
         struct RtpSequenceNumberOffset {
             offset: u32,
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         struct QuickTimeVR {
             //
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         struct Panoramic {
 
         }
 
         #[derive(Debug)]
+        #[endianess(big)]
         struct Object {
 
         }
@@ -1846,6 +1952,7 @@ const SDP_CONTENT_TYPE: FourCC = FourCC::new(*b"sdp ");
 // hints
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("hnti")]
     struct MovieHintInfo {
         #[children]
@@ -1855,16 +1962,23 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("hinf")]
     struct HintTrackStatistics {
         #[children]
         enum Child {
-            TrackPayloadSizeHint64,
-            TrackPayloadSizeHint32,
-            NetworkPacketHint64,
-            NetworkPacketHint32,
-            ByteCountHint64,
-            ByteCountHint32,
+            #[override_fourcc("trpY")]
+            TrackPayloadSizeHint<u64> as TrackPayloadSizeHint64,
+            #[override_fourcc("totl")]
+            TrackPayloadSizeHint<u32> as TrackPayloadSizeHint32,
+            #[override_fourcc("nump")]
+            NetworkPacketHint<u64> as NetworkPacketHint64,
+            #[override_fourcc("npck")]
+            NetworkPacketHint<u32> as NetworkPacketHint32,
+            #[override_fourcc("tpyl")]
+            ByteCountHint<u64> as ByteCountHint64,
+            #[override_fourcc("tpaY")]
+            ByteCountHint<u32> as ByteCountHint32,
             DatarateHint,
             MediaTrackBytesHint,
             ImmediateBytesHint,
@@ -1878,6 +1992,7 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("rtp ")]
     struct RtpHint {
         #[condition]
@@ -1893,43 +2008,23 @@ make_atom! {
         }
     }
 
-    #[derive(Debug)]
-    #[atom("trpY")]
-    struct TrackPayloadSizeHint64 {
-        byte_len: u64,
+    #[endianess(big)]
+    struct TrackPayloadSizeHint<T> {
+        byte_len: T,
+    }
+
+    #[endianess(big)]
+    struct NetworkPacketHint<T> {
+        network_packet_count: T,
+    }
+
+    #[endianess(big)]
+    struct ByteCountHint<T> {
+        total_bytes_minus_rtp_headers: T,
     }
 
     #[derive(Debug)]
-    #[atom("totl")]
-    struct TrackPayloadSizeHint32 {
-        byte_len: u32,
-    }
-
-    #[derive(Debug)]
-    #[atom("nump")]
-    struct NetworkPacketHint64 {
-        network_packet_count: u64,
-    }
-
-    #[derive(Debug)]
-    #[atom("npck")]
-    struct NetworkPacketHint32 {
-        network_packet_count: u32,
-    }
-
-    #[derive(Debug)]
-    #[atom("tpyl")]
-    struct ByteCountHint64 {
-        total_bytes_minus_rtp_headers: u64,
-    }
-
-    #[derive(Debug)]
-    #[atom("tpaY")]
-    struct ByteCountHint32 {
-        total_bytes_minus_rtp_headers: u32,
-    }
-
-    #[derive(Debug)]
+    #[endianess(big)]
     #[atom("maxr")]
     struct DatarateHint {
         granularity_ms: u32,
@@ -1937,48 +2032,56 @@ make_atom! {
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("dmed")]
     struct MediaTrackBytesHint {
         byte_count: u64,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("dimm")]
     struct ImmediateBytesHint {
         byte_count: u64,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("drep")]
     struct RepeatedBytesHint {
         byte_count: u64,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("tmin")]
     struct MinTransmissionTimeHint {
         shortest_transmission_ms: u32,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("tmax")]
     struct MaxTransmissionTimeHint {
         longest_transmission_ms: u32,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("pmax")]
     struct LargestPacketHint {
         byte_count: u32,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("dmax")]
     struct LargestPacketDurationHint {
         largest_duration_ms: u32,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("payt")]
     struct PayloadTypeHint {
         payload_number: u32,
@@ -1987,15 +2090,53 @@ make_atom! {
     }
 }
 
+impl<O, T: atom_parser::Parsed> core::fmt::Debug for TrackPayloadSizeHint<T, O>
+where
+    <T as atom_parser::Parsed>::Output<O>: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TrackPayloadSizeHint")
+            .field("byte_len", &self.byte_len)
+            .finish()
+    }
+}
+
+impl<O, T: atom_parser::Parsed> core::fmt::Debug for NetworkPacketHint<T, O>
+where
+    <T as atom_parser::Parsed>::Output<O>: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NetworkPacketHint")
+            .field("network_packet_count", &self.network_packet_count)
+            .finish()
+    }
+}
+
+impl<O, T: atom_parser::Parsed> core::fmt::Debug for ByteCountHint<T, O>
+where
+    <T as atom_parser::Parsed>::Output<O>: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ByteCountHint")
+            .field(
+                "total_bytes_minus_rtp_headers",
+                &self.total_bytes_minus_rtp_headers,
+            )
+            .finish()
+    }
+}
+
 // image format
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("idsc")]
     struct ImageDescription {
         description: atom_parser::AnonymousAtom<VideoSampleDescription>,
     }
 
     #[derive(Debug)]
+    #[endianess(big)]
     #[atom("idat")]
     struct ImageData {
         #[payload]
@@ -2257,6 +2398,7 @@ where
 
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[enum_repr(FourCC)]
     enum AudioCodec {
         NotCompressed = FourCC::new(*b"NONE"),
@@ -2332,6 +2474,7 @@ impl<O: atom_parser::Offset> SoundSampleEntry<O> {
 
 make_atom! {
     #[derive(Debug)]
+    #[endianess(big)]
     #[enum_repr(FourCC)]
     enum VideoCodec {
         Cinepak = FourCC::new(*b"cvid"),
@@ -2519,7 +2662,7 @@ fn ftyp() {
                                         let mut handler_ref = None;
                                         let mut sample_desc_table = None;
 
-                                        let mut child_iter = m.children(r, &opts);
+                                        let mut child_iter = m.children(&mut *r, &opts);
                                         while let Some(child) = child_iter.next() {
                                             let r = &mut child_iter.reader;
                                             match child.unwrap() {
@@ -2564,7 +2707,7 @@ fn ftyp() {
                                                     if let Some(dinfo) = data_information {
                                                         println!("dinfo: {dinfo:?}");
                                                         let mut child_iter =
-                                                            dinfo.children(r, &opts);
+                                                            dinfo.children(&mut *r, &opts);
                                                         while let Some(child) = child_iter.next() {
                                                             let r = &mut child_iter.reader;
                                                             match child.unwrap() {
@@ -3230,7 +3373,7 @@ async fn ftyp_async() {
                                         let mut handler_ref = None;
                                         let mut sample_desc_table = None;
 
-                                        let mut child_iter = m.children_async(r, &opts);
+                                        let mut child_iter = m.children_async(&mut *r, &opts);
                                         while let Some(child) = child_iter.next().await {
                                             let r = child_iter.reader();
                                             match child.unwrap() {
@@ -3272,7 +3415,7 @@ async fn ftyp_async() {
                                                     if let Some(dinfo) = data_information {
                                                         println!("dinfo: {dinfo:?}");
                                                         let mut child_iter =
-                                                            dinfo.children_async(r, &opts);
+                                                            dinfo.children_async(&mut *r, &opts);
                                                         while let Some(child) =
                                                             child_iter.next().await
                                                         {
@@ -3397,7 +3540,8 @@ async fn ftyp_async() {
                                                 stsd::SampleDescriptionVersions::V0(stsd) => stsd,
                                                 v => panic!("unknown stsd version: {v:?}"),
                                             };
-                                            let mut desc_iter = stsd.descriptions_async(r, &opts);
+                                            let mut desc_iter =
+                                                stsd.descriptions_async(&mut *r, &opts);
                                             match (media_info, handler_ref) {
                                                 (
                                                     MediaKind::Video {

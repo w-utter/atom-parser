@@ -1,6 +1,6 @@
 use crate::{
-    AsyncIterState, AsyncParse, Offset, Parse, ParseError, ParseOptions, Parsed, PollReader,
-    Reader, TakeReader,
+    AsyncIterState, AsyncParse, Offset, Options, Parse, ParseError, Parsed, PollReader, Reader,
+    TakeReader,
 };
 
 pub struct ArrayGuard<'a, T, const N: usize> {
@@ -53,15 +53,15 @@ impl<const N: usize, I: Parsed> Parsed for [I; N] {
 }
 
 impl<const N: usize, O: Offset, I: Parse<O> + Parsed> Parse<O> for [I; N] {
-    fn parse<T: Reader<O>>(
+    fn parse<T: Reader<O>, P: Options>(
         reader: &mut T,
-        options: &ParseOptions,
+        options: P,
     ) -> Result<<Self as Parsed>::Output<O>, ParseError> {
         let mut arr = ArrayGuard::<<I as Parsed>::Output<O>, N>::uninit();
         {
             let mut guard = ArrayGuard::<_, N>::new(&mut arr);
             for _ in 0..N {
-                let item = I::parse(reader, options)?;
+                let item = I::parse(reader, &options)?;
                 unsafe {
                     guard.push(item);
                 }
@@ -72,7 +72,7 @@ impl<const N: usize, O: Offset, I: Parse<O> + Parsed> Parse<O> for [I; N] {
 }
 
 pub struct ArrayParse<
-    'a,
+    P: Options + Unpin,
     O: Offset + Unpin,
     R: PollReader<O> + Unpin,
     I: Parsed + AsyncParse<O> + Unpin,
@@ -82,12 +82,17 @@ pub struct ArrayParse<
 {
     initialized: usize,
     storage: [core::mem::MaybeUninit<<I as Parsed>::Output<O>>; N],
-    state: AsyncIterState<'a, R, I::Fut<'a, R>>,
+    state: AsyncIterState<P, R, I::Fut<P, R>>,
     _pd: core::marker::PhantomData<O>,
 }
 
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, I: AsyncParse<O> + Unpin, const N: usize> Drop
-    for ArrayParse<'a, O, R, I, N>
+impl<
+    P: Options + Unpin,
+    O: Offset + Unpin,
+    R: PollReader<O> + Unpin,
+    I: AsyncParse<O> + Unpin,
+    const N: usize,
+> Drop for ArrayParse<P, O, R, I, N>
 where
     <I as Parsed>::Output<O>: Unpin,
 {
@@ -105,12 +110,12 @@ where
 }
 
 impl<
-    'a,
+    P: Options + Unpin,
     O: Offset + Unpin,
     R: PollReader<O> + Unpin,
     I: Parsed + AsyncParse<O> + Unpin,
     const N: usize,
-> Future for ArrayParse<'a, O, R, I, N>
+> Future for ArrayParse<P, O, R, I, N>
 where
     <I as Parsed>::Output<O>: Unpin,
     <I as Parsed>::Output<O>: Unpin,
@@ -175,16 +180,21 @@ where
     }
 }
 
-impl<'a, O: Offset + Unpin, R: PollReader<O> + Unpin, I: AsyncParse<O> + Unpin, const N: usize>
-    TakeReader<'a, R> for ArrayParse<'a, O, R, I, N>
+impl<
+    P: Options + Unpin,
+    O: Offset + Unpin,
+    R: PollReader<O> + Unpin,
+    I: AsyncParse<O> + Unpin,
+    const N: usize,
+> TakeReader<P, R> for ArrayParse<P, O, R, I, N>
 where
     <I as Parsed>::Output<O>: Unpin,
 {
-    fn take_reader(mut self) -> (R, &'a ParseOptions) {
+    fn take_reader(mut self) -> (R, P) {
         let state = core::mem::replace(&mut self.state, AsyncIterState::Empty);
         state.take_reader()
     }
-    fn borrow_reader(&mut self) -> (&mut R, &'a ParseOptions) {
+    fn borrow_reader(&mut self) -> (&mut R, &P) {
         self.state.borrow_reader()
     }
 }
@@ -193,11 +203,11 @@ impl<const N: usize, O: Offset + Unpin, I: Parsed + AsyncParse<O> + Unpin> Async
 where
     <I as Parsed>::Output<O>: Unpin,
 {
-    type Fut<'a, R: PollReader<O> + Unpin> = ArrayParse<'a, O, R, I, N>;
-    fn create_fut<'a, R: PollReader<O> + Unpin>(
+    type Fut<P: Options + Unpin, R: PollReader<O> + Unpin> = ArrayParse<P, O, R, I, N>;
+    fn create_fut<P: Options + Unpin, R: PollReader<O> + Unpin>(
         reader: R,
-        options: &'a ParseOptions,
-    ) -> Self::Fut<'a, R> {
+        options: P,
+    ) -> Self::Fut<P, R> {
         let state = if N == 0 {
             AsyncIterState::Done(reader, options)
         } else {

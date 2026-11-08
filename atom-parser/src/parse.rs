@@ -1,9 +1,9 @@
-use crate::{AsyncReader, Offset, ParseError, ParseOptions, PollReader, Reader, TakeReader};
+use crate::{AsyncReader, Offset, Options, ParseError, PollReader, Reader, TakeReader};
 
 pub trait Parse<O: Offset>: Sized + Parsed {
-    fn parse<T: Reader<O>>(
+    fn parse<T: Reader<O>, P: Options>(
         reader: &mut T,
-        options: &ParseOptions,
+        options: P,
     ) -> Result<<Self as Parsed>::Output<O>, ParseError>;
 }
 
@@ -11,18 +11,18 @@ pub trait AsyncParse<O: Offset + Unpin>: Sized + Parsed
 where
     <Self as Parsed>::Output<O>: Unpin,
 {
-    type Fut<'a, R: PollReader<O> + Unpin>: Future<Output = Result<<Self as Parsed>::Output<O>, ParseError>>
-        + TakeReader<'a, R>
+    type Fut<P: Options + Unpin, R: PollReader<O> + Unpin>: Future<Output = Result<<Self as Parsed>::Output<O>, ParseError>>
+        + TakeReader<P, R>
         + Unpin;
-    fn create_fut<'a, R: PollReader<O> + Unpin>(
+    fn create_fut<P: Options + Unpin, R: PollReader<O> + Unpin>(
         reader: R,
-        options: &'a ParseOptions,
-    ) -> Self::Fut<'a, R>;
+        options: P,
+    ) -> Self::Fut<P, R>;
 
-    fn parse_async<'a, 'r, T: AsyncReader<O>>(
+    fn parse_async<'r, P: Options + Unpin, T: AsyncReader<O>>(
         reader: &'r mut T,
-        options: &'a ParseOptions,
-    ) -> <Self as AsyncParse<O>>::Fut<'a, &'r mut T> {
+        options: P,
+    ) -> <Self as AsyncParse<O>>::Fut<P, &'r mut T> {
         <Self as AsyncParse<O>>::create_fut(reader, options)
     }
 }
