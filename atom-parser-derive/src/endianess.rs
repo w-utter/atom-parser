@@ -115,7 +115,10 @@ impl Endianess {
         field_endianess: Option<&Self>,
     ) -> proc_macro2::TokenStream {
         use quote::quote;
-        let take = Self::format_take_reader(endianess, field_endianess);
-        quote!(&#take)
+        if let Some(take) = Self::get_options_inner(endianess, field_endianess) {
+            quote!(&#take)
+        } else {
+            quote!(opts)
+        }
     }
 }
