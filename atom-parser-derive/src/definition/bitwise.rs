@@ -181,8 +181,8 @@ impl syn::parse::Parse for BitFieldList {
 }
 
 impl BitFieldList {
-    fn mask_from_width_and_offset(bit_width: usize, offset: usize) -> syn::Index {
-        syn::Index::from(((1 << bit_width) - 1) << offset)
+    fn mask_from_width_and_offset(bit_width: usize, offset: usize) -> proc_macro2::Literal {
+        proc_macro2::Literal::u128_unsuffixed(((1 << (bit_width as u128)) - 1) << (offset as u128))
     }
 
     pub fn check_reserved_fields(fields: &[BitField]) -> Option<proc_macro2::TokenStream> {
