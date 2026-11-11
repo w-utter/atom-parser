@@ -19,6 +19,33 @@ impl FourCC {
     pub const fn from_be_bits(bits: u32) -> Self {
         Self::new(bits.to_be_bytes())
     }
+
+    pub const fn has_prefix<const N: usize>(&self, pre: &[u8; N]) -> bool {
+        assert!(N <= 4);
+
+        let mut i = 0;
+        while i < N {
+            if self.0[i] != pre[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    pub fn has_postfix<const N: usize>(&self, post: &[u8; N]) -> bool {
+        assert!(N <= 4);
+        let mut i = 4 - N;
+        let mut j = 0;
+        while i < 4 {
+            if self.0[i] != post[j] {
+                return false;
+            }
+            i += 1;
+            j += 1;
+        }
+        true
+    }
 }
 
 impl core::fmt::Debug for FourCC {
