@@ -46,6 +46,25 @@ impl FourCC {
         }
         true
     }
+
+    pub const fn subslice<const START: usize, const LEN: usize>(self) -> [u8; LEN] {
+        assert!(LEN <= 4);
+        assert!(START + LEN <= 4);
+        let mut arr = [0u8; LEN];
+        let mut i = START;
+        let mut j = 0;
+
+        while i < 4 {
+            arr[j] = self.0[i];
+            i += 1;
+            j += 1;
+        }
+        arr
+    }
+
+    pub const fn prefix<const LEN: usize>(self) -> [u8; LEN] {
+        self.subslice::<0, LEN>()
+    }
 }
 
 impl core::fmt::Debug for FourCC {
