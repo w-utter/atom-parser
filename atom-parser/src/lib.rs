@@ -63,6 +63,8 @@ pub mod padded;
 pub use padded::Padded;
 pub mod tag;
 pub use tag::{Atom, Tag};
+pub mod character_code;
+pub use character_code::CharacterCode;
 
 pub use atom_parser_derive::make_atom;
 pub use futures_core::Stream as AsyncIterator;
