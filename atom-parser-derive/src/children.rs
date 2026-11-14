@@ -5,6 +5,70 @@ use std::collections::HashSet;
 pub enum TagOverride {
     Tag(syn::Expr),
     FourCC(crate::FourCC),
+    Pattern {
+        pattern: syn::Pat,
+        rebind: Option<Option<TagRebind>>,
+    },
+}
+
+#[derive(Clone)]
+pub struct TagRebind {
+    ty: syn::Type,
+    expr: syn::Expr,
+}
+
+impl syn::parse::Parse for TagRebind {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let ty = input.parse()?;
+        let _: syn::Token![,] = input.parse()?;
+        let expr = input.parse()?;
+        Ok(Self { ty, expr })
+    }
+}
+
+impl TagRebind {
+    fn tag_binding(
+        this: Option<&TagOverride>,
+    ) -> (
+        Option<proc_macro2::TokenStream>,
+        Option<proc_macro2::TokenStream>,
+    ) {
+        use quote::quote;
+        match this {
+            Some(TagOverride::Pattern {
+                rebind: Some(rebind),
+                ..
+            }) => {
+                let bind = quote!(tag @ );
+                let rebind = match rebind {
+                    None => quote!(tag),
+                    Some(TagRebind { expr, .. }) => quote!((#expr)(tag)),
+                };
+                (Some(bind), Some(quote!(#rebind, )))
+            }
+            _ => (None, None),
+        }
+    }
+
+    fn rebind_ty(
+        this: Option<&TagOverride>,
+        tag_type: &syn::Type,
+    ) -> Option<proc_macro2::TokenStream> {
+        use quote::quote;
+        match this {
+            Some(TagOverride::Pattern {
+                rebind: Some(rebind),
+                ..
+            }) => {
+                let rebind_ty = match rebind {
+                    None => tag_type,
+                    Some(rebind) => &rebind.ty,
+                };
+                Some(quote!(#rebind_ty,))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -21,6 +85,7 @@ impl syn::parse::Parse for Child {
 
         let mut version_num = None;
         let mut tag_override = None;
+        let mut tag_rebind = None;
         for attr in attrs.into_iter() {
             let path = attr.path();
             if path.is_ident("version") {
@@ -40,6 +105,34 @@ impl syn::parse::Parse for Child {
                 tag_override = Some(TagOverride::FourCC(crate::FourCC::from_expr(
                     attr.parse_args()?,
                 )?));
+            } else if path.is_ident("tag_pattern") {
+                if tag_override.is_some() {
+                    panic!("duplicate tag override");
+                }
+
+                tag_override = Some(TagOverride::Pattern{
+                    pattern: attr.parse_args_with(crate::conditional::syn_impl::parse_match_pattern_multi_with_leading_vert_and_guard)?,
+                    rebind: None,
+                });
+            } else if path.is_ident("rebind_tag") {
+                if tag_rebind.is_some() {
+                    panic!("duplicate tag rebind")
+                }
+
+                use syn::Meta;
+                let ty_and_expr = match &attr.meta {
+                    Meta::Path(_) => None,
+                    Meta::List(list) => {
+                        let parser = TagRebind::parse;
+                        use syn::parse::Parser;
+
+                        Some(parser.parse2(list.tokens.clone())?)
+                    }
+                    Meta::NameValue(_) => {
+                        panic!("name-value pair for conditional is not supported")
+                    }
+                };
+                tag_rebind = Some(ty_and_expr)
             } else {
                 panic!("unknown attr");
             }
@@ -58,6 +151,15 @@ impl syn::parse::Parse for Child {
             Ok((input.parse()?, None))
         };
         let (name, specified_type) = f()?;
+
+        let tag_override = match (tag_override, tag_rebind) {
+            (Some(TagOverride::Pattern { pattern, .. }), rebind) => {
+                Some(TagOverride::Pattern { pattern, rebind })
+            }
+            (Some(ovr), None) => Some(ovr),
+            (None, None) => None,
+            _ => panic!("invalid tag override"),
+        };
         Ok(Self {
             name,
             specified_type,
@@ -119,6 +221,7 @@ impl ChildList {
             .enumerate()
             .filter_map(|(i, child)| {
                 let val = match child.tag_override.as_ref()? {
+                    TagOverride::Pattern { .. } => return None,
                     TagOverride::Tag(expr) => quote!(#expr),
                     TagOverride::FourCC(fcc) => {
                         let [fcc_0, fcc_1, fcc_2, fcc_3] = fcc.as_fcc();
@@ -144,9 +247,13 @@ impl ChildList {
         use quote::quote;
         let ty = Self::ty_from_child(child);
 
-        let tag = if child.tag_override.is_some() {
-            let tag = Self::format_overridden_tag(idx);
-            quote!(#tag)
+        let tag = if let Some(ovr) = child.tag_override.as_ref() {
+            if let TagOverride::Pattern { pattern, .. } = ovr {
+                quote!(#pattern)
+            } else {
+                let tag = Self::format_overridden_tag(idx);
+                quote!(#tag)
+            }
         } else if atom {
             quote! {
                 <#ty as ::#KRATE::tag::Atom>::FCC
@@ -181,11 +288,13 @@ impl ChildList {
             let name = &child.name;
             let (ty, tag) = Self::ty_and_tag_from_child(child, tag_type, i, atom);
 
+            let (tag_bind, tag_rebind) = TagRebind::tag_binding(child.tag_override.as_ref());
+
             quote!{
-                #tag => {
+                #tag_bind #tag => {
                     let tagged = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(&mut reader, opts)?;
                     #seek
-                    #mod_name #tagged_name::#name(tagged)
+                    #mod_name #tagged_name::#name(#tag_rebind tagged)
                 }
             }
         }).collect()
@@ -205,10 +314,11 @@ impl ChildList {
         .map(|(i, child)| {
             let name = &child.name;
             let (ty, tag) = Self::ty_and_tag_from_child(child, tag_type, i, atom);
+            let (tag_bind, tag_rebind) = TagRebind::tag_binding(child.tag_override.as_ref());
 
             quote!{
-                #tag => {
-                    #mod_name #tagged_name :: #name (<#ty as ::#KRATE::parse::AsyncParse<__Offset>>::create_fut(reader, opts))
+                #tag_bind #tag => {
+                    #mod_name #tagged_name :: #name (#tag_rebind <#ty as ::#KRATE::parse::AsyncParse<__Offset>>::create_fut(reader, opts))
                 }
             }
         }).collect()
@@ -218,6 +328,7 @@ impl ChildList {
         children: &[Child],
         version: Option<&syn::LitInt>,
         trailing_reader: bool,
+        tag_type: &syn::Type,
     ) -> Vec<proc_macro2::TokenStream> {
         use quote::quote;
 
@@ -232,8 +343,10 @@ impl ChildList {
                 let name = &child.name;
                 let ty = Self::ty_from_child(child);
 
+                let tag_rebind = TagRebind::rebind_ty(child.tag_override.as_ref(), tag_type);
+
                 quote! {
-                    #name(<#ty as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<__Options, #reader>),
+                    #name(#tag_rebind <#ty as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<__Options, #reader>),
                 }
             })
             .collect()
@@ -242,6 +355,7 @@ impl ChildList {
     pub fn tagged_variants(
         children: &[Child],
         version: Option<&syn::LitInt>,
+        tag_type: &syn::Type,
     ) -> Vec<proc_macro2::TokenStream> {
         use quote::quote;
 
@@ -249,9 +363,10 @@ impl ChildList {
             .map(|child| {
                 let name = &child.name;
                 let ty = Self::ty_from_child(child);
+                let tag_rebind = TagRebind::rebind_ty(child.tag_override.as_ref(), tag_type);
 
                 quote! {
-                    #name(<#ty as ::#KRATE::parse::Parsed>::Output<__Offset>),
+                    #name(#tag_rebind <#ty as ::#KRATE::parse::Parsed>::Output<__Offset>),
                 }
             })
             .collect()
@@ -280,8 +395,15 @@ impl ChildList {
             .map(|child| {
                 let name = &child.name;
 
+                let ignore_tag = match child.tag_override.as_ref() {
+                    Some(TagOverride::Pattern { rebind, .. }) if rebind.is_some() => {
+                        Some(quote!(_,))
+                    }
+                    _ => None,
+                };
+
                 quote! {
-                    Self::#name(fut) => #borrow_reader
+                    Self::#name(#ignore_tag fut) => #borrow_reader
                 }
             })
             .collect()
@@ -311,11 +433,18 @@ impl ChildList {
             .map(|child| {
                 let name = &child.name;
 
+                let tag_bind = match child.tag_override.as_ref() {
+                    Some(TagOverride::Pattern { rebind, .. }) if rebind.is_some() => {
+                        Some(quote!(tag,))
+                    }
+                    _ => None,
+                };
+
                 quote! {
-                    Self::#name(mut fut) => {
+                    Self::#name(#tag_bind mut fut) => {
                         match ::core::pin::Pin::new(&mut fut).poll(cx) {
                             ::core::task::Poll::Pending => {
-                                *self = Self::#name (fut);
+                                *self = Self::#name (#tag_bind fut);
                                 return ::core::task::Poll::Pending;
                             }
                             ::core::task::Poll::Ready(res) => {
@@ -327,7 +456,7 @@ impl ChildList {
                                         return ::core::task::Poll::Ready(Err(e));
                                     }
                                 };
-                                let child = #children_name::#name(child);
+                                let child = #children_name::#name(#tag_bind child);
                                 #state_transition
                             }
                         }

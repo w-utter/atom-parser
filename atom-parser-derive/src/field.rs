@@ -921,7 +921,12 @@ impl AtomField {
                             &quote::format_ident!("Self"),
                             true,
                         );
-                        let async_sm = ChildList::async_statemachine(&children, version, true);
+
+                        let tag_ty = tag
+                            .map(|tag| tag.ty.clone())
+                            .unwrap_or(syn::parse_quote!(::#KRATE::fourcc::FourCC));
+                        let async_sm =
+                            ChildList::async_statemachine(&children, version, true, &tag_ty);
                         let borrow_reader_variants =
                             ChildList::borrow_reader_variants(&children, version, true);
                         (
@@ -1046,11 +1051,16 @@ impl AtomField {
                         )
                     }
                     ChildrenKind::Tagged { skip_seek, .. } => {
+                        let tag_ty = tag
+                            .map(|tag| tag.ty.clone())
+                            .unwrap_or(syn::parse_quote!(::#KRATE::fourcc::FourCC));
+
                         let async_children_name_with_len =
                             quote::format_ident!("{async_children_name}WithLen");
-                        let async_sm = ChildList::async_statemachine(&children, version, false);
+                        let async_sm =
+                            ChildList::async_statemachine(&children, version, false, &tag_ty);
                         let async_sm_with_len =
-                            ChildList::async_statemachine(&children, version, false);
+                            ChildList::async_statemachine(&children, version, false, &tag_ty);
                         let borrow_reader_variants =
                             ChildList::borrow_reader_variants(&children, version, false);
                         let borrow_reader_variants_with_len =
@@ -1155,7 +1165,7 @@ impl AtomField {
                     .map(|tag| tag.ty.clone())
                     .unwrap_or(syn::parse_quote!(::#KRATE::fourcc::FourCC));
 
-                let tagged_variants = ChildList::tagged_variants(&children, version);
+                let tagged_variants = ChildList::tagged_variants(&children, version, &tag_ty);
 
                 let seek_skip = match kind {
                     ChildrenKind::Atom => false,

@@ -183,8 +183,8 @@ pub struct MatchArm {
 
 // copied from https://docs.rs/syn/latest/syn/enum.Pat.html
 // `Pat::parse_multi_with_leading_vert_and_guard` is pub(crate) for whatever reason
-mod syn_impl {
-    pub(super) fn parse_match_pattern_multi_with_leading_vert_and_guard(
+pub(crate) mod syn_impl {
+    pub(crate) fn parse_match_pattern_multi_with_leading_vert_and_guard(
         input: syn::parse::ParseStream,
     ) -> syn::Result<syn::Pat> {
         let leading_vert: Option<syn::Token![|]> = input.parse()?;
