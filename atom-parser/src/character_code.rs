@@ -13,7 +13,7 @@ impl<const N: usize> CharacterCode<N> {
     }
 
     pub const fn has_prefix<const M: usize>(&self, pre: &[u8; M]) -> bool {
-        assert!(M <= 4);
+        assert!(M <= N);
 
         let mut i = 0;
         while i < M {
@@ -26,10 +26,10 @@ impl<const N: usize> CharacterCode<N> {
     }
 
     pub fn has_postfix<const M: usize>(&self, post: &[u8; M]) -> bool {
-        assert!(M <= 4);
-        let mut i = 4 - M;
+        assert!(M <= N);
+        let mut i = N - M;
         let mut j = 0;
-        while i < 4 {
+        while i < N {
             if self.0[i] != post[j] {
                 return false;
             }
@@ -40,13 +40,13 @@ impl<const N: usize> CharacterCode<N> {
     }
 
     pub const fn subslice<const START: usize, const LEN: usize>(self) -> CharacterCode<LEN> {
-        assert!(LEN <= 4);
-        assert!(START + LEN <= 4);
+        assert!(LEN <= N);
+        assert!(START + LEN <= N);
         let mut arr = [0u8; LEN];
         let mut i = START;
         let mut j = 0;
 
-        while i < 4 {
+        while i < START + LEN {
             arr[j] = self.0[i];
             i += 1;
             j += 1;
