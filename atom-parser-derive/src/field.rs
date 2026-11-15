@@ -305,7 +305,7 @@ impl AtomFields {
             ) => panic!(
                 "length specified with children is unsupported (it is gotten from the atom size)"
             ),
-            (_, Some((i, _))) if i != fields.len() - 1 => {
+            (None, Some((i, _))) if i != fields.len() - 1 => {
                 panic!("trailing field is not the last field declared")
             }
             (Some(_), None) => panic!("trailing length specified but no trailing field"),
@@ -717,7 +717,7 @@ impl AtomField {
                     },
                     _,
                 ) => {
-                    let reader = reader_from_lengths(len_from_expr.as_ref(), payload_len);
+                    let reader = reader_from_lengths(len_from_expr.as_ref(), payload_len, true);
 
                     let tag_ty = &tag.expect("no tag for tagged").ty;
 
@@ -2226,6 +2226,7 @@ impl PayloadLength {
 fn reader_from_lengths(
     len_from_expr: Option<&LenFromExpr>,
     payload_len: Option<&PayloadLength>,
+    sync: bool,
 ) -> proc_macro2::TokenStream {
     use quote::quote;
     if len_from_expr.is_some() || payload_len.is_some() {
@@ -2239,6 +2240,11 @@ fn reader_from_lengths(
             _ => unreachable!(),
         };
 
+        let reader = if sync {
+            quote!(&mut *reader)
+        } else {
+            quote!(reader)
+        };
         quote! {
             {
                 let offset = reader.offset();
@@ -2247,7 +2253,7 @@ fn reader_from_lengths(
                     .map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError))?;
 
                 let max_offset = offset + size;
-                ::#KRATE::reader::TrailingReader::new(reader, max_offset)
+                ::#KRATE::reader::TrailingReader::new(#reader, max_offset)
             }
         }
     } else {
@@ -2358,7 +2364,7 @@ impl FieldKind<'_> {
             Self::Tagged(expr_len, children, tagged_name) => {
                 let tag_ty = &tag.expect("no tag for given tagged field").ty;
 
-                let reader = reader_from_lengths(*expr_len, payload_len);
+                let reader = reader_from_lengths(*expr_len, payload_len, false);
 
                 let async_name = quote::format_ident!("Async{}Parse", tagged_name);
                 let parse_name = if expr_len.is_some() || payload_len.is_some() {
