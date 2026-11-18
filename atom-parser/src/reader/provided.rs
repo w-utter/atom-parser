@@ -130,6 +130,37 @@ mod in_memory {
             buf[..bytes.len()].copy_from_slice(bytes);
             Ok(())
         }
+
+        fn read_with_hash<H: crate::Hasher>(
+            &mut self,
+            bytes: &mut [u8],
+            hasher: &mut H,
+        ) -> Result<(), IoError> {
+            self.read(bytes)?;
+            hasher.hash(bytes);
+            Ok(())
+        }
+        fn seek_with_hash<H: crate::Hasher>(
+            &mut self,
+            amt: usize,
+            hasher: &mut H,
+        ) -> Result<(), IoError> {
+            let starting_offset = self.offset;
+            self.seek(amt)?;
+            let ending_offset = self.offset;
+            hasher.hash(&self.bytes.bytes()[starting_offset..ending_offset]);
+            Ok(())
+        }
+        fn read_cstr_with_hash<H: crate::Hasher>(
+            &mut self,
+            hasher: &mut H,
+        ) -> Result<usize, IoError> {
+            let starting_offset = self.offset;
+            let res = self.read_cstr()?;
+            let ending_offset = self.offset;
+            hasher.hash(&self.bytes.bytes()[starting_offset..ending_offset]);
+            Ok(res)
+        }
     }
 
     impl PollReader<usize> for InMemoryReader<'_> {
@@ -228,6 +259,48 @@ mod in_memory {
             let bytes = &self.bytes.bytes()[extent.offset..(extent.offset + extent.len)];
 
             buf[..bytes.len()].copy_from_slice(bytes);
+            core::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_read_with_hash<H: crate::Hasher>(
+            self: core::pin::Pin<&mut Self>,
+            cx: &mut core::task::Context<'_>,
+            buf: &mut [u8],
+            hasher: &mut H,
+        ) -> core::task::Poll<Result<(), IoError>> {
+            core::task::ready!(self.poll_read(cx, buf))?;
+            hasher.hash(buf);
+            core::task::Poll::Ready(Ok(()))
+        }
+        fn poll_read_cstr_with_hash<H: crate::Hasher>(
+            mut self: core::pin::Pin<&mut Self>,
+            cx: &mut core::task::Context<'_>,
+            hasher: &mut H,
+        ) -> core::task::Poll<Result<usize, IoError>> {
+            let starting_offset = self.offset;
+            let res = core::task::ready!(self.as_mut().poll_read_cstr(cx))?;
+            let ending_offset = self.offset;
+            hasher.hash(&self.bytes.bytes()[starting_offset..ending_offset]);
+            core::task::Poll::Ready(Ok(res))
+        }
+
+        fn seek_start_with_hash<H: crate::Hasher>(
+            mut self: core::pin::Pin<&mut Self>,
+            cx: &mut core::task::Context<'_>,
+            amt: usize,
+            hasher: &mut H,
+        ) -> Result<(), IoError> {
+            let starting_offset = self.offset;
+            self.as_mut().seek_start(cx, amt)?;
+            let ending_offset = self.offset;
+            hasher.hash(&self.bytes.bytes()[starting_offset..ending_offset]);
+            Ok(())
+        }
+        fn poll_seek_complete_with_hash<H: crate::Hasher>(
+            self: core::pin::Pin<&mut Self>,
+            _: &mut core::task::Context<'_>,
+            _: &mut H,
+        ) -> core::task::Poll<Result<(), IoError>> {
             core::task::Poll::Ready(Ok(()))
         }
     }
@@ -446,6 +519,96 @@ mod file_backed {
 
             Ok(())
         }
+
+        fn read_with_hash<H: crate::Hasher>(
+            &mut self,
+            bytes: &mut [u8],
+            hasher: &mut H,
+        ) -> Result<(), IoError> {
+            self.read(bytes)?;
+            hasher.hash(bytes);
+            Ok(())
+        }
+
+        fn seek_with_hash<H: crate::Hasher>(
+            &mut self,
+            mut amt: u64,
+            hasher: &mut H,
+        ) -> Result<(), IoError> {
+            let remaining = Reader::remaining_size(self);
+            if amt > remaining {
+                return Err(IoError::UnexpectedEndOfData);
+            }
+
+            match self.buffer_offset.as_mut() {
+                Some(offset) if N.checked_sub(*offset).unwrap_or_default() as u64 > amt => {
+                    hasher.hash(&self.buffer[*offset..*offset + (amt as usize)]);
+                    *offset += amt as usize;
+                }
+                _ => {
+                    if let Some(offset) = core::mem::take(&mut self.buffer_offset) {
+                        self.file_offset += offset as u64;
+                    }
+
+                    let fd = self.fd.borrow();
+                    use std::os::unix::fs::FileExt;
+                    loop {
+                        let remaining = self.remaining_size() as usize;
+                        let read_buf = &mut self.buffer[..core::cmp::min(remaining, N)];
+
+                        fd.read_exact_at(read_buf, self.file_offset)?;
+                        if amt < N as u64 {
+                            hasher.hash(&mut self.buffer[..(amt as usize)]);
+                            self.buffer_offset = Some(amt as usize);
+                            break;
+                        }
+                        hasher.hash(&self.buffer);
+                        self.file_offset += N as u64;
+                        amt -= N as u64;
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn read_cstr_with_hash<H: crate::Hasher>(
+            &mut self,
+            hasher: &mut H,
+        ) -> Result<u64, IoError> {
+            let mut len = 0;
+            if let Some(offset) = self.buffer_offset.as_mut() {
+                let bytes = &self.buffer[*offset..];
+
+                if let Some(pos) = bytes.iter().position(|&byte| byte == b'\0') {
+                    hasher.hash(&self.buffer[*offset..*offset + pos + 1]);
+                    *offset += pos + 1;
+                    return Ok(pos as u64);
+                }
+                len = bytes.len();
+            }
+
+            if let Some(offset) = core::mem::take(&mut self.buffer_offset) {
+                self.file_offset += offset as u64;
+            }
+
+            loop {
+                let remaining = Reader::remaining_size(self);
+                let read_buf = &mut self.buffer[..core::cmp::min(remaining as usize, N)];
+
+                use std::os::unix::fs::FileExt;
+                let fd = self.fd.borrow();
+                fd.read_exact_at(read_buf, self.file_offset)?;
+
+                if let Some(pos) = read_buf.iter().position(|&byte| byte == b'\0') {
+                    hasher.hash(&read_buf[..pos]);
+                    self.buffer_offset = Some(pos + 1);
+                    return Ok((len + pos) as u64);
+                }
+                len += read_buf.len();
+                hasher.hash(read_buf);
+                self.file_offset += read_buf.len() as u64;
+            }
+        }
     }
 
     pub struct AsyncFileReader<F, const N: usize> {
@@ -457,6 +620,17 @@ mod file_backed {
         io_task: Option<std::thread::JoinHandle<Result<[u8; N], IoError>>>,
         cstr_task: Option<std::thread::JoinHandle<Result<u64, IoError>>>,
         extent_task: Option<std::thread::JoinHandle<Result<Vec<u8>, IoError>>>,
+        cstr_hash_task:
+            Option<std::thread::JoinHandle<Result<(u64, Option<usize>, [u8; N]), IoError>>>,
+        seek_hash_task: Option<
+            Result<
+                (),
+                (
+                    u64,
+                    std::thread::JoinHandle<Result<(u64, Option<usize>, [u8; N]), IoError>>,
+                ),
+            >,
+        >,
         tasks_finished: std::sync::Arc<std::sync::atomic::AtomicU8>,
     }
 
@@ -471,12 +645,16 @@ mod file_backed {
                 io_task: None,
                 cstr_task: None,
                 extent_task: None,
+                cstr_hash_task: None,
+                seek_hash_task: None,
                 tasks_finished: std::sync::Arc::new(std::sync::atomic::AtomicU8::from(0)),
             }
         }
         const IO_TASK: u8 = 1 << 0;
         const CSTR_TASK: u8 = 1 << 1;
         const EXTENT_TASK: u8 = 1 << 2;
+        const HASH_SEEK_TASK: u8 = 1 << 3;
+        const HASH_CSTR_TASK: u8 = 1 << 4;
     }
 
     impl<F: Clone + core::borrow::Borrow<std::fs::File>, const N: usize> Clone
@@ -803,6 +981,221 @@ mod file_backed {
                 Ok(v)
             }));
             core::task::Poll::Pending
+        }
+
+        fn poll_read_with_hash<H: crate::Hasher>(
+            self: core::pin::Pin<&mut Self>,
+            cx: &mut core::task::Context<'_>,
+            buf: &mut [u8],
+            hasher: &mut H,
+        ) -> core::task::Poll<Result<(), IoError>> {
+            core::task::ready!(self.poll_read(cx, buf))?;
+            hasher.hash(buf);
+            core::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_read_cstr_with_hash<H: crate::Hasher>(
+            mut self: core::pin::Pin<&mut Self>,
+            cx: &mut core::task::Context<'_>,
+            hasher: &mut H,
+        ) -> core::task::Poll<Result<u64, IoError>> {
+            if self.cstr_hash_task.is_some() {
+                if self
+                    .tasks_finished
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    & Self::HASH_CSTR_TASK
+                    == 0
+                {
+                    return core::task::Poll::Pending;
+                }
+                // clear bit
+                self.tasks_finished
+                    .fetch_and(!Self::HASH_CSTR_TASK, std::sync::atomic::Ordering::SeqCst);
+
+                return match core::mem::take(&mut self.cstr_hash_task)
+                    .unwrap()
+                    .join()
+                    .unwrap()
+                {
+                    Ok((offset, found, bytes)) => {
+                        if let Some(max_len) = found {
+                            self.buffer = bytes;
+                            self.buffer_offset = Some(max_len);
+                            self.file_offset += offset + 1;
+                            hasher.hash(&bytes[..max_len]);
+                            hasher.hash(&[0]);
+                            core::task::Poll::Ready(Ok(offset + 1))
+                        } else {
+                            hasher.hash(&bytes);
+                            self.read_cstr_with_hash_task(cx, offset);
+                            core::task::Poll::Pending
+                        }
+                    }
+                    Err(e) => core::task::Poll::Ready(Err(e)),
+                };
+            }
+
+            let this = &mut *self;
+            if let Some(offset) = this.buffer_offset.as_mut() {
+                let bytes = &this.buffer[*offset..];
+
+                if let Some(pos) = bytes.iter().position(|&byte| byte == b'\0') {
+                    *offset += pos + 1;
+                    return core::task::Poll::Ready(Ok(pos as u64));
+                }
+            }
+
+            if let Some(offset) = core::mem::take(&mut self.buffer_offset) {
+                self.file_offset += offset as u64;
+            }
+
+            self.read_cstr_with_hash_task(cx, 0);
+            core::task::Poll::Pending
+        }
+
+        fn seek_start_with_hash<H: crate::Hasher>(
+            mut self: core::pin::Pin<&mut Self>,
+            cx: &mut core::task::Context<'_>,
+            amt: u64,
+            hasher: &mut H,
+        ) -> Result<(), IoError> {
+            let remaining = PollReader::remaining_size(&*self);
+            if amt > remaining {
+                return Err(IoError::UnexpectedEndOfData);
+            }
+
+            match self.buffer_offset.as_mut() {
+                Some(offset) if N.checked_sub(*offset).unwrap_or_default() as u64 > amt => {
+                    let start = *offset;
+                    *offset += amt as usize;
+                    let bytes = &self.buffer[start..start + (amt as usize)];
+                    hasher.hash(bytes);
+                    self.seek_hash_task = Some(Ok(()));
+                }
+                _ => {
+                    if let Some(offset) = core::mem::take(&mut self.buffer_offset) {
+                        self.file_offset += offset as u64;
+                    }
+                    self.seek_with_hash_task(cx, amt, 0)
+                }
+            }
+            Ok(())
+        }
+
+        fn poll_seek_complete_with_hash<H: crate::Hasher>(
+            mut self: core::pin::Pin<&mut Self>,
+            cx: &mut core::task::Context<'_>,
+            hasher: &mut H,
+        ) -> core::task::Poll<Result<(), IoError>> {
+            if self.seek_hash_task.is_none() {
+                panic!("tried to poll seek completion with hash but no task was in flight")
+            }
+
+            let (amt, handle) = match core::mem::take(&mut self.seek_hash_task).unwrap() {
+                Ok(_) => return core::task::Poll::Ready(Ok(())),
+                Err(io) => {
+                    if self
+                        .tasks_finished
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        & Self::HASH_SEEK_TASK
+                        == 0
+                    {
+                        self.seek_hash_task = Some(Err(io));
+                        return core::task::Poll::Pending;
+                    }
+                    // clear finished bit
+                    self.tasks_finished
+                        .fetch_and(!Self::HASH_SEEK_TASK, std::sync::atomic::Ordering::SeqCst);
+
+                    io
+                }
+            };
+            let bytes = handle.join().unwrap();
+            match bytes {
+                Ok((current_amt, max_take_len, bytes)) => {
+                    if let Some(max_len) = max_take_len {
+                        hasher.hash(&bytes[..max_len]);
+                        self.buffer = bytes;
+                        self.buffer_offset = Some(max_len);
+                        self.file_offset += current_amt;
+                        core::task::Poll::Ready(Ok(()))
+                    } else {
+                        hasher.hash(&bytes);
+                        self.seek_with_hash_task(cx, amt, current_amt);
+                        core::task::Poll::Pending
+                    }
+                }
+                Err(e) => core::task::Poll::Ready(Err(e)),
+            }
+        }
+    }
+
+    impl<F: core::borrow::Borrow<std::fs::File> + Clone + Send + 'static, const N: usize>
+        AsyncFileReader<F, N>
+    {
+        fn seek_with_hash_task(
+            &mut self,
+            cx: &mut core::task::Context<'_>,
+            amt: u64,
+            current_amt: u64,
+        ) {
+            let file_offset = self.file_offset + current_amt;
+            let fd = self.fd.clone();
+            let waker = cx.waker().clone();
+            let tasks_finished = self.tasks_finished.clone();
+
+            let remaining = self.file_len.checked_sub(file_offset).unwrap_or_default();
+
+            self.seek_hash_task = Some(Err((
+                amt,
+                std::thread::spawn(move || {
+                    let fd = fd.borrow();
+                    let mut bytes = [0; N];
+                    let read_buf = &mut bytes[..core::cmp::min(remaining as usize, N)];
+
+                    use std::os::unix::fs::FileExt;
+                    fd.read_exact_at(read_buf, file_offset)?;
+                    tasks_finished
+                        .fetch_or(Self::HASH_SEEK_TASK, std::sync::atomic::Ordering::SeqCst);
+                    waker.wake_by_ref();
+                    Ok(if current_amt + (read_buf.len() as u64) >= amt {
+                        (current_amt, Some((amt - current_amt) as usize), bytes)
+                    } else {
+                        (current_amt + read_buf.len() as u64, None, bytes)
+                    })
+                }),
+            )));
+        }
+
+        fn read_cstr_with_hash_task(&mut self, cx: &mut core::task::Context<'_>, offset: u64) {
+            let file_offset = self.file_offset + offset;
+
+            let fd = self.fd.clone();
+            let waker = cx.waker().clone();
+            let tasks_finished = self.tasks_finished.clone();
+
+            let remaining = self.file_len.checked_sub(file_offset).unwrap_or_default();
+
+            self.cstr_hash_task = Some(std::thread::spawn(move || {
+                let fd = fd.borrow();
+                let mut bytes = [0; N];
+
+                let read_buf = &mut bytes[..core::cmp::min(remaining as usize, N)];
+
+                use std::os::unix::fs::FileExt;
+                fd.read_exact_at(read_buf, file_offset)?;
+
+                tasks_finished.fetch_or(Self::HASH_CSTR_TASK, std::sync::atomic::Ordering::SeqCst);
+                waker.wake_by_ref();
+
+                Ok(
+                    if let Some(pos) = read_buf.iter().position(|&byte| byte == b'\0') {
+                        (file_offset + (pos as u64), Some(pos), bytes)
+                    } else {
+                        (file_offset + (N as u64), None, bytes)
+                    },
+                )
+            }));
         }
     }
 }

@@ -706,12 +706,13 @@ fn format_struct_impl(
 
                 let payload_len = AtomFields::payload_len(fields);
                 let tag = AtomFields::tag(fields);
+                let error_detection = AtomFields::error_detection(fields);
 
                 let version_mod = Versioned::version_mod_from_lit(v);
 
 
-                let version_specific = fields.iter().filter_map(|field| field.as_inline_definition(Some(v), &attrs, &generics, generic_collection, payload_len.as_ref(), tag.as_ref(), definition_endianess));
-                let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(Some(v), &mod_name, Some(&version_mod), payload_len.as_ref(), tag.as_ref(), definition_endianess)).collect::<Vec<_>>();
+                let version_specific = fields.iter().filter_map(|field| field.as_inline_definition(Some(v), &attrs, &generics, generic_collection, payload_len.as_ref(), tag.as_ref(), definition_endianess, error_detection.as_ref()));
+                let sync_parsing = fields.iter().filter_map(|f| f.as_sync_parse(Some(v), &mod_name, Some(&version_mod), payload_len.as_ref(), tag.as_ref(), definition_endianess, error_detection.as_ref())).collect::<Vec<_>>();
                 let field_collection = fields.iter().filter_map(|f| f.as_collection()).collect::<Vec<_>>();
                 let sync_helper_fns = fields.iter().filter_map(|f| f.as_sync_helper_fn(None, definition_endianess)).collect::<Vec<_>>();
                 let async_helper_fns = fields.iter().filter_map(|f| f.as_async_helper_fn(None, definition_endianess)).collect::<Vec<_>>();
@@ -746,8 +747,8 @@ fn format_struct_impl(
                     )
                 };
 
-                let parse_impl = format_parse_impl(&name, &sync_parsing, &field_collection, &generics, generic_collection.as_ref());
-                let async_parse_impl = format_async_statemachine(fields, &name, generics.clone(), None, generic_collection.as_ref(), payload_len.as_ref(), tag.as_ref(), definition_endianess);
+                let parse_impl = format_parse_impl(&name, &sync_parsing, &field_collection, &generics, generic_collection.as_ref(), error_detection.as_ref());
+                let async_parse_impl = format_async_statemachine(fields, &name, generics.clone(), None, generic_collection.as_ref(), payload_len.as_ref(), tag.as_ref(), definition_endianess, error_detection.as_ref());
                 let fields = fields.iter().filter_map(|field| field.as_field_decl(None, payload_len.as_ref(), &generics)).collect::<Vec<_>>();
 
                 let mut parse_generics = generics.clone();
@@ -870,6 +871,7 @@ fn format_struct_impl(
         Ok(Err(fields)) => {
             let payload_len = AtomFields::payload_len(&fields);
             let tag = AtomFields::tag(&fields);
+            let error_detection = AtomFields::error_detection(&fields);
             // since some fields are omitted
             // (e.g reserved/padding)
             let atom_fields = fields
@@ -889,6 +891,7 @@ fn format_struct_impl(
                 payload_len.as_ref(),
                 tag.as_ref(),
                 definition_endianess,
+                error_detection.as_ref(),
             );
             let attrs = attrs.iter();
 
@@ -902,6 +905,7 @@ fn format_struct_impl(
                         payload_len.as_ref(),
                         tag.as_ref(),
                         definition_endianess,
+                        error_detection.as_ref(),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -920,8 +924,14 @@ fn format_struct_impl(
                 .filter_map(|f| f.as_async_helper_fn(Some(&mod_name), definition_endianess))
                 .collect::<Vec<_>>();
 
-            let parse_impl =
-                format_parse_impl(&name, &sync_parsing, &field_collection, &generics, None);
+            let parse_impl = format_parse_impl(
+                &name,
+                &sync_parsing,
+                &field_collection,
+                &generics,
+                None,
+                error_detection.as_ref(),
+            );
             let async_parse_impl = format_async_statemachine(
                 &fields,
                 &name,
@@ -931,6 +941,7 @@ fn format_struct_impl(
                 payload_len.as_ref(),
                 tag.as_ref(),
                 definition_endianess,
+                error_detection.as_ref(),
             );
 
             let parsed_output = format_parsed_ty(&name, &generics);

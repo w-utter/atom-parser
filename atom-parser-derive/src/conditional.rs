@@ -1,4 +1,4 @@
-use crate::field::{PayloadLength, Tag};
+use crate::field::{ErrorDetection, PayloadLength, Tag};
 use crate::{AtomField, AtomFieldKind, AtomFields, Endianess, KRATE, StructFieldAttr};
 
 #[derive(Clone)]
@@ -406,6 +406,7 @@ impl ConditionalVariant {
         payload_len: Option<&PayloadLength>,
         tag: Option<&Tag>,
         definition_endianess: Option<&Endianess>,
+        error_detection: Option<&ErrorDetection>,
     ) -> proc_macro2::TokenStream {
         let (parse_impl_generics, parse_ty_generics, parse_where_clause) =
             parse_generics.split_for_impl();
@@ -434,6 +435,7 @@ impl ConditionalVariant {
                 generic_collection,
                 None,
                 definition_endianess,
+                error_detection,
                 &|_| Default::default(),
                 &|_, _| Default::default(),
                 false,
@@ -452,6 +454,7 @@ impl ConditionalVariant {
             payload_len.as_ref(),
             tag.as_ref(),
             definition_endianess,
+            error_detection,
             &|_, _| Default::default(),
         );
 
@@ -764,6 +767,7 @@ impl Conditionals {
         payload_len: Option<&PayloadLength>,
         tag: Option<&Tag>,
         definition_endianess: Option<&Endianess>,
+        error_detection: Option<&ErrorDetection>,
     ) -> proc_macro2::TokenStream {
         use quote::quote;
 
@@ -840,6 +844,7 @@ impl Conditionals {
                         payload_len.as_ref(),
                         tag.as_ref(),
                         definition_endianess,
+                        error_detection,
                     )
                 });
 
@@ -854,6 +859,7 @@ impl Conditionals {
                                 payload_len.as_ref(),
                                 tag.as_ref(),
                                 definition_endianess,
+                                error_detection,
                             ))
                         } else {
                             None
@@ -928,6 +934,7 @@ impl Conditionals {
                     payload_len.as_ref(),
                     tag.as_ref(),
                     definition_endianess,
+                    error_detection,
                 );
 
                 let nested = fields.iter().filter_map(|field| {
@@ -938,6 +945,7 @@ impl Conditionals {
                             payload_len.as_ref(),
                             tag.as_ref(),
                             definition_endianess,
+                            error_detection,
                         ))
                     } else {
                         None

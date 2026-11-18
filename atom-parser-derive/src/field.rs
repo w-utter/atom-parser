@@ -7,6 +7,7 @@ use crate::{
 pub struct AtomField {
     pub endianess: Option<Endianess>,
     pub kind: AtomFieldKind,
+    pub skip_error_detection: bool,
 }
 
 #[derive(Clone)]
@@ -121,6 +122,7 @@ fn is_struct_attr(path: &syn::Path) -> bool {
         || path.is_ident("condition")
         || path.is_ident("reuse_condition")
         || path.is_ident("version")
+        || path.is_ident("error_detection")
 }
 
 impl syn::parse::Parse for AtomField {
@@ -129,6 +131,10 @@ impl syn::parse::Parse for AtomField {
         let endianess = crate::definition::singular_attr(&mut attrs, "endianess", |attr| {
             attr.parse_args_with(Endianess::parse_from_syn)
         })?;
+
+        let skip_error_detection =
+            crate::definition::singular_attr(&mut attrs, "skip_error_detection", |_| Ok(()))?
+                .is_some();
 
         enum AttrKind {
             Atom,
@@ -166,7 +172,11 @@ impl syn::parse::Parse for AtomField {
             }
         };
 
-        Ok(Self { kind, endianess })
+        Ok(Self {
+            kind,
+            endianess,
+            skip_error_detection,
+        })
     }
 }
 
@@ -186,6 +196,7 @@ impl AtomFields {
         payload_len: Option<&PayloadLength>,
         tag: Option<&Tag>,
         definition_endianess: Option<&Endianess>,
+        error_detection: Option<&ErrorDetection>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
         let payload_len = AtomFields::nested_payload_len(payload_len, fields);
@@ -199,6 +210,7 @@ impl AtomFields {
                 payload_len.as_ref(),
                 tag.as_ref(),
                 definition_endianess,
+                error_detection,
             )
         });
 
@@ -254,6 +266,26 @@ impl AtomFields {
             (Some(existing), None) => Some(existing.clone()),
             (None, Some(new)) => Some(new),
             (None, None) => None,
+        }
+    }
+
+    pub fn error_detection(fields: &[AtomField]) -> Option<ErrorDetection> {
+        let mut hashes = fields.iter().filter_map(|field| match &field.kind {
+            AtomFieldKind::Struct(_, StructFieldAttr::ErrorDetection { hasher_ty }) => {
+                Some(hasher_ty)
+            }
+            _ => None,
+        });
+
+        if hashes.clone().count() > 1 {
+            panic!("more than one tag specified");
+        }
+
+        match hashes.next() {
+            Some(hasher) => Some(ErrorDetection {
+                hasher: hasher.clone(),
+            }),
+            None => None,
         }
     }
 
@@ -538,6 +570,7 @@ impl AtomField {
                 let this = AtomField {
                     kind: AtomFieldKind::Struct(field.clone(), StructFieldAttr::Normal),
                     endianess: self.endianess.clone(),
+                    skip_error_detection: self.skip_error_detection.clone(),
                 };
                 this.as_field_decl(None, payload_len, generics)
             }
@@ -665,6 +698,7 @@ impl AtomField {
         payload_len: Option<&PayloadLength>,
         tag: Option<&Tag>,
         definition_endianess: Option<&Endianess>,
+        error_detection: Option<&ErrorDetection>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
 
@@ -683,9 +717,23 @@ impl AtomField {
             true,
         );
 
+        let format_reader = ErrorDetection::format_sync_reader(
+            error_detection,
+            self.skip_error_detection
+                || matches!(
+                    self.kind,
+                    AtomFieldKind::Struct(_, StructFieldAttr::ErrorDetection { .. })
+                ),
+        );
+
         Some(match &self.kind {
             AtomFieldKind::Struct(field, attr) => {
-                return attr.as_sync_parse(field, payload_len, &format_options);
+                return attr.as_sync_parse(
+                    field,
+                    payload_len,
+                    &format_options,
+                    format_reader.as_ref(),
+                );
             }
             AtomFieldKind::Children {
                 size_ty,
@@ -695,6 +743,7 @@ impl AtomField {
                 (ChildrenKind::Atom, Some(size_ty)) => {
                     quote! {
                         let children = {
+                            #format_reader
                             #format_options
                             <::#KRATE::children::SizedChildren<__Offset, #size_ty, #mod_name::Child>>::parse(reader, &opts)?
                         };
@@ -703,6 +752,7 @@ impl AtomField {
                 (ChildrenKind::Atom, None) => {
                     quote! {
                         let children = {
+                            #format_reader
                             #format_options
                             <::#KRATE::children::Children<__Offset, #mod_name::Child>>::parse(reader, &opts)?
                         };
@@ -717,7 +767,13 @@ impl AtomField {
                     },
                     _,
                 ) => {
-                    let reader = reader_from_lengths(len_from_expr.as_ref(), payload_len, true);
+                    let reader = reader_from_lengths(
+                        len_from_expr.as_ref(),
+                        payload_len,
+                        true,
+                        error_detection,
+                        self.skip_error_detection,
+                    );
 
                     let tag_ty = &tag.expect("no tag for tagged").ty;
 
@@ -736,6 +792,7 @@ impl AtomField {
 
                     quote! {
                         let #field_name = {
+                            #format_reader
                             #format_options
                             #(#tag_bindings)*
 
@@ -776,6 +833,7 @@ impl AtomField {
                                 payload_len.as_ref(),
                                 tag.as_ref(),
                                 definition_endianess,
+                                error_detection,
                             )
                         });
                         let collection = fields.iter().filter_map(|f| f.as_collection());
@@ -820,6 +878,7 @@ impl AtomField {
             AtomFieldKind::FullBox { name, .. } => {
                 quote! {
                     let atom_flags = {
+                        #format_reader
                         #format_options
                         let bytes = <[u8; 3]>::parse(reader, &opts)?;
                         <#mod_name::#name as ::#KRATE::flags::FlagsParse<[u8; 3]>>::try_from_bits(bytes, &opts)?
@@ -834,6 +893,7 @@ impl AtomField {
             } => {
                 quote! {
                     let #field_name = {
+                        #format_reader
                         #format_options
                         use ::#KRATE::flags::FlagsParse;
                         let flags = <#parse_repr>::parse(reader, &opts)?;
@@ -887,6 +947,7 @@ impl AtomField {
         payload_len: Option<&PayloadLength>,
         tag: Option<&Tag>,
         definition_endianess: Option<&Endianess>,
+        error_detection: Option<&ErrorDetection>,
     ) -> Option<proc_macro2::TokenStream> {
         use quote::quote;
         Some(match &self.kind {
@@ -1229,6 +1290,7 @@ impl AtomField {
                     payload_len,
                     tag,
                     definition_endianess,
+                    error_detection,
                 );
 
                 match cond.group().unwrap() {
@@ -1255,6 +1317,7 @@ impl AtomField {
                                 payload_len.as_ref(),
                                 tag.as_ref(),
                                 definition_endianess,
+                                error_detection,
                             )
                         });
 
@@ -1343,6 +1406,7 @@ impl AtomField {
                                     payload_len.as_ref(),
                                     tag.as_ref(),
                                     definition_endianess,
+                                    error_detection,
                                 )
                             })
                         });
@@ -1615,6 +1679,19 @@ pub enum StructFieldAttr {
     // specifies that the field of the same name marked as #[condition] is used
     // e.g, the field is stored but not parsed in the conditional
     ReuseCondition,
+    // specifies that the field is a form of error detection (crc, checksum, etc.)
+    // the type specified must implement HasherFull, which is used to compare against the value of
+    // the field
+    // individual fields can be ommitted from error detection with #[skip_error_detection]
+    //
+    // some_field: u8,
+    // #[skip_error_detection]
+    // some_other_field: u16,
+    // #[error_detection(CheckSum)]
+    // checksum: u32,
+    ErrorDetection {
+        hasher_ty: syn::Type,
+    },
     // just a normal field
     //
     // field: u8,
@@ -1714,6 +1791,9 @@ impl StructFieldAttr {
             Self::Condition
         } else if path.is_ident("reuse_condition") {
             Self::ReuseCondition
+        } else if path.is_ident("error_detection") {
+            let hasher_ty = attr.parse_args()?;
+            Self::ErrorDetection { hasher_ty }
         } else {
             unreachable!("unknown attr");
         })
@@ -1724,6 +1804,7 @@ impl StructFieldAttr {
         field: &syn::Field,
         payload_len: Option<&PayloadLength>,
         format_options: &proc_macro2::TokenStream,
+        format_reader: Option<&proc_macro2::TokenStream>,
     ) -> Option<proc_macro2::TokenStream> {
         let name = &field.ident;
         let ty = &field.ty;
@@ -1732,6 +1813,7 @@ impl StructFieldAttr {
             Self::Reserved => {
                 quote! {
                     {
+                        #format_reader
                         #format_options
                         let _reserved = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?;
                         if ::#KRATE::parse_options::Options::options(&opts).error_on_used_reserved_fields && (_reserved != unsafe { ::core::mem::zeroed::<#ty>() }) {
@@ -1745,6 +1827,7 @@ impl StructFieldAttr {
             } => {
                 quote! {
                     {
+                        #format_reader
                         #format_options
                         let _expected = <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?;
                         if _expected != #val {
@@ -1759,6 +1842,7 @@ impl StructFieldAttr {
             } => {
                 quote! {
                     let #name = {
+                        #format_reader
                         #format_options
                         <::#KRATE::array::DynamicArray::<__Offset, #length_ty, #ty, #zero_relative> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
                     };
@@ -1767,6 +1851,7 @@ impl StructFieldAttr {
             Self::NullTerminatedArray => {
                 quote! {
                     let #name = {
+                        #format_reader
                         #format_options
                         <::#KRATE::array::NullTerminated::<__Offset, #ty> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
                     };
@@ -1776,6 +1861,7 @@ impl StructFieldAttr {
                 if let Some(LenFromExpr { size_expr, .. }) = from_expr {
                     quote! {
                         let #name = {
+                            #format_reader
                             #format_options
                             ::#KRATE::trailing::Trailing::parse_from_len(#size_expr, reader, &opts)?
                         };
@@ -1785,6 +1871,7 @@ impl StructFieldAttr {
 
                     quote! {
                         let #name = {
+                            #format_reader
                             #format_options
                             ::#KRATE::trailing::Trailing::parse_from_len(#len, reader, &opts)?
                         };
@@ -1792,6 +1879,7 @@ impl StructFieldAttr {
                 } else {
                     quote! {
                         let #name = {
+                            #format_reader
                             #format_options
                             ::#KRATE::trailing::Trailing::parse(reader, &opts)?
                         };
@@ -1801,6 +1889,7 @@ impl StructFieldAttr {
             Self::Tag => {
                 quote! {
                     let _tag = {
+                        #format_reader
                         #format_options
                         <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
                     };
@@ -1809,6 +1898,7 @@ impl StructFieldAttr {
             Self::PayloadLength{..} => {
                 quote! {
                     let _payload_len = {
+                        #format_reader
                         #format_options
                         <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
                     };
@@ -1818,6 +1908,7 @@ impl StructFieldAttr {
                 if let Some(LenFromExpr { size_expr, .. }) = from_expr {
                     quote! {
                         let #name = {
+                            #format_reader
                             #format_options
                             ::#KRATE::payload::Payload::parse_from_len(#size_expr, reader, &opts)?
                         };
@@ -1827,6 +1918,7 @@ impl StructFieldAttr {
 
                     quote! {
                         let #name = {
+                            #format_reader
                             #format_options
                             ::#KRATE::payload::Payload::parse_from_len(#len, reader, &opts)?
                         };
@@ -1834,6 +1926,7 @@ impl StructFieldAttr {
                 } else {
                     quote! {
                         let #name = {
+                            #format_reader
                             #format_options
                             ::#KRATE::payload::Payload::parse(reader, &opts)?
                         };
@@ -1844,6 +1937,7 @@ impl StructFieldAttr {
                 if let Some(LenFromExpr { size_expr, ty: size_ty }) = from_expr {
                     quote! {
                         let #name = {
+                            #format_reader
                             #format_options
                             ::#KRATE::padded::Padded::<__Offset, #size_ty, #ty>::parse_from_len(#size_expr, reader, &opts)?
                         };
@@ -1854,6 +1948,7 @@ impl StructFieldAttr {
 
                     quote! {
                         let #name = {
+                            #format_reader
                             #format_options
                             ::#KRATE::padded::Padded::<__Offset, #size_ty, #ty>::parse_from_len(#len, reader, &opts)?
                         };
@@ -1865,6 +1960,7 @@ impl StructFieldAttr {
             Self::Normal | Self::Condition => {
                 quote! {
                     let #name = {
+                        #format_reader
                         #format_options
                         <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
                     };
@@ -1875,6 +1971,7 @@ impl StructFieldAttr {
             } => {
                 quote! {
                     let #name = {
+                        #format_reader
                         #format_options
                         <::#KRATE::string::PascalString::<__Offset, #length_ty> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
                     };
@@ -1883,8 +1980,17 @@ impl StructFieldAttr {
             Self::NullTerminatedString => {
                 quote! {
                     let #name = {
+                        #format_reader
                         #format_options
                         <::#KRATE::string::NullTerminatedString<__Offset> as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
+                    };
+                }
+            }
+            Self::ErrorDetection { .. } => {
+                quote! {
+                    let _hash = {
+                        #format_options
+                        <#ty as ::#KRATE::parse::Parse<__Offset>>::parse(reader, &opts)?
                     };
                 }
             }
@@ -1904,6 +2010,7 @@ impl StructFieldAttr {
             | Self::VersionIdentifier
             | Self::PayloadLength { .. }
             | Self::Tag
+            | Self::ErrorDetection { .. }
             | Self::Condition => {
                 return None;
             }
@@ -1938,6 +2045,7 @@ impl StructFieldAttr {
             | Self::PayloadLength { .. }
             | Self::Tag
             | Self::Condition
+            | Self::ErrorDetection { .. }
             | Self::ReuseCondition => return None,
             Self::Normal | Self::Padded { .. } => {
                 quote! {
@@ -2023,6 +2131,7 @@ impl StructFieldAttr {
             | Self::Condition
             | Self::ReuseCondition
             | Self::PascalString { .. }
+            | Self::ErrorDetection { .. }
             | Self::NullTerminatedString => {
                 return None;
             }
@@ -2079,6 +2188,7 @@ impl StructFieldAttr {
             | Self::Condition
             | Self::ReuseCondition
             | Self::PascalString { .. }
+            | Self::ErrorDetection { .. }
             | Self::NullTerminatedString => {
                 return None;
             }
@@ -2124,6 +2234,7 @@ pub fn format_parse_impl(
     field_collection: &[proc_macro2::TokenStream],
     generics: &syn::Generics,
     generic_collection: Option<&proc_macro2::TokenStream>,
+    error_detection: Option<&ErrorDetection>,
 ) -> proc_macro2::TokenStream {
     let mut generics = generics.clone();
 
@@ -2143,10 +2254,15 @@ pub fn format_parse_impl(
     let (impl_generics, _, where_clause) = generics.split_for_impl();
     let (_, parse_generics, _) = parsed_generics.split_for_impl();
 
+    let hasher = error_detection.map(ErrorDetection::create_hasher);
+    let check_hash = ErrorDetection::format_hash_check(error_detection);
+
     quote::quote! {
         impl #impl_generics ::#KRATE::parse::Parse<__Offset> for #name #parse_generics #where_clause {
             fn parse<__Reader: ::#KRATE::reader::Reader<__Offset>, __Options: ::#KRATE::parse_options::Options>(reader: &mut __Reader, opts: __Options) -> ::core::result::Result<<Self as ::#KRATE::parse::Parsed>::Output<__Offset>, ::#KRATE::error::ParseError> {
+                #hasher
                 #(#sync_parsing)*
+                #check_hash
                 Ok(#name {
                     #(#field_collection)*
                     _offset: ::core::marker::PhantomData,
@@ -2166,6 +2282,172 @@ pub enum ChildrenKind {
         tagged_name: syn::Ident,
         skip_seek: bool,
     },
+}
+
+pub struct ErrorDetection {
+    hasher: syn::Type,
+}
+
+impl ErrorDetection {
+    fn create_hasher(&self) -> proc_macro2::TokenStream {
+        let hasher = &self.hasher;
+        quote::quote! {
+            #[cfg(feature = "error_detection")]
+            let mut _hasher = <#hasher as ::core::default::Default>::default();
+        }
+    }
+
+    fn format_sync_reader(
+        error_detection: Option<&Self>,
+        skip_error_detection: bool,
+    ) -> Option<proc_macro2::TokenStream> {
+        let has_error_detection_reader = match (error_detection.is_some(), skip_error_detection) {
+            (_, true) => false,
+            (true, _) => true,
+            _ => false,
+        };
+        if has_error_detection_reader {
+            Some(quote::quote! {
+                #[cfg(feature = "error_detection")]
+                let mut reader = ::#KRATE::reader::ErrorDetectionReader::new_with(&mut *reader, &mut _hasher);
+                #[cfg(feature = "error_detection")]
+                let reader = &mut reader;
+            })
+        } else {
+            None
+        }
+    }
+
+    fn format_hash_check(error_detection: Option<&Self>) -> Option<proc_macro2::TokenStream> {
+        error_detection.map(|_| {
+            quote::quote! {
+                #[cfg(feature = "error_detection")]
+                if ::#KRATE::hash::FullHasher::finish(_hasher) != _hash {
+                    // in order to work with both sync & async
+                    Err(::#KRATE::error::ParseError::ErrorDetectionMismatch)?;
+                }
+            }
+        })
+    }
+
+    fn format_async_fut_reader(
+        error_detection: Option<&Self>,
+        skip_next_field_detection: bool,
+    ) -> Option<Result<proc_macro2::TokenStream, proc_macro2::TokenStream>> {
+        let ed = error_detection?;
+        let hasher = &ed.hasher;
+        use quote::quote;
+        Some(if !skip_next_field_detection {
+            Ok(quote! {
+                {
+                    #[cfg(feature = "error_detection")]
+                    {
+                        ::#KRATE::reader::ErrorDetectionReader::new_with(reader, _hasher)
+                    }
+                    #[cfg(not(feature = "error_detection"))]
+                    {
+                        reader
+                    }
+                }
+            })
+        } else {
+            Err(quote::quote! {
+                #[cfg(feature = "error_detection")]
+                _hasher: #hasher,
+            })
+        })
+    }
+
+    fn format_with_reader_ty(
+        hasher_ty: Option<&syn::Type>,
+        mut f: impl FnMut(proc_macro2::TokenStream) -> proc_macro2::TokenStream,
+    ) -> proc_macro2::TokenStream {
+        use quote::quote;
+        let without_hasher = f(quote!(__Reader));
+        if let Some(hasher_ty) = hasher_ty {
+            let with_hasher =
+                f(quote!(::#KRATE::reader::ErrorDetectionReader<#hasher_ty, __Reader>));
+            quote! {
+                #[cfg(feature = "error_detection")]
+                #with_hasher
+                #[cfg(not(feature = "error_detection"))]
+                #without_hasher
+            }
+        } else {
+            quote!(#without_hasher)
+        }
+    }
+
+    fn format_reader_ty_and_hash_storage(
+        error_detection: Option<&Self>,
+        skip_detection: bool,
+    ) -> (
+        Option<&syn::Type>,
+        (
+            Option<proc_macro2::TokenStream>,
+            Option<proc_macro2::TokenStream>,
+            Option<proc_macro2::TokenStream>,
+        ),
+    ) {
+        use quote::quote;
+        match (error_detection, skip_detection) {
+            (Some(detection), false) => {
+                let hasher_ty = &detection.hasher;
+                (
+                    Some(hasher_ty),
+                    (
+                        None,
+                        None,
+                        Some(quote! {
+                            #[cfg(feature = "error_detection")]
+                            let (_hasher, reader) = reader.split();
+                        }),
+                    ),
+                )
+            }
+            (Some(detection), true) => {
+                let hasher_ty = &detection.hasher;
+                (
+                    None,
+                    (
+                        Some(quote! {
+                            #[cfg(feature = "error_detection")]
+                            _hasher: #hasher_ty
+                        }),
+                        Some(quote! {
+                            #[cfg(feature = "error_detection")]
+                            _hasher,
+                        }),
+                        None,
+                    ),
+                )
+            }
+            _ => (None, (None, None, None)),
+        }
+    }
+
+    fn format_borrow_reader(
+        error_detection: Option<&Self>,
+        skip_detection: bool,
+    ) -> proc_macro2::TokenStream {
+        use quote::quote;
+        if skip_detection || error_detection.is_none() {
+            quote!(reader)
+        } else {
+            quote! {
+                {
+                    #[cfg(feature = "error_detection")]
+                    {
+                        reader.reader()
+                    }
+                    #[cfg(not(feature = "error_detection"))]
+                    {
+                        reader
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2227,6 +2509,8 @@ fn reader_from_lengths(
     len_from_expr: Option<&LenFromExpr>,
     payload_len: Option<&PayloadLength>,
     sync: bool,
+    error_detection: Option<&ErrorDetection>,
+    skip_error_detection: bool,
 ) -> proc_macro2::TokenStream {
     use quote::quote;
     if len_from_expr.is_some() || payload_len.is_some() {
@@ -2243,11 +2527,21 @@ fn reader_from_lengths(
         let reader = if sync {
             quote!(&mut *reader)
         } else {
-            quote!(reader)
+            ErrorDetection::format_async_fut_reader(error_detection, skip_error_detection)
+                .map(|r| r.ok())
+                .flatten()
+                .unwrap_or(quote!(reader))
         };
+
+        let reader_trait = if sync {
+            quote!(::#KRATE::reader::Reader::<__Offset>)
+        } else {
+            quote!(::#KRATE::reader::PollReader::<__Offset>)
+        };
+
         quote! {
             {
-                let offset = reader.offset();
+                let offset = #reader_trait ::offset(&reader);
                 let size: __Offset = #len
                     .try_into()
                     .map_err(|_| ::#KRATE::error::ParseError::IntegerConversion(::#KRATE::error::TryFromIntError))?;
@@ -2304,6 +2598,7 @@ pub enum FieldKind<'a> {
     Condition,
     Tag,
     Tagged(Option<&'a LenFromExpr>, &'a [Child], &'a syn::Ident),
+    ErrorDetection,
 }
 
 impl FieldKind<'_> {
@@ -2315,9 +2610,11 @@ impl FieldKind<'_> {
         generic_collection: Option<&proc_macro2::TokenStream>,
         payload_len: Option<&PayloadLength>,
         tag: Option<&Tag>,
+        error_detection_reader: Option<&proc_macro2::TokenStream>,
         current_field_endianess: Option<&Endianess>,
         next_field_endianess: Option<&Endianess>,
         definition_endianess: Option<&Endianess>,
+        error_detection: Option<&ErrorDetection>,
         first: bool,
     ) -> proc_macro2::TokenStream {
         use quote::quote;
@@ -2327,36 +2624,40 @@ impl FieldKind<'_> {
             definition_endianess,
             first,
         );
+
+        let default_reader = quote!(reader);
+        let reader_transition = error_detection_reader.unwrap_or(&default_reader);
+
         match self {
             Self::Trailing(expr_len) => {
                 if let Some(LenFromExpr { size_expr, .. }) = expr_len {
-                    quote!(::#KRATE::trailing::Trailing::create_fut_from_len(#size_expr, reader, #options_transition))
+                    quote!(::#KRATE::trailing::Trailing::create_fut_from_len(#size_expr, #reader_transition, #options_transition))
                 } else if let Some(payload_len) = payload_len {
                     let len = payload_len.as_parsed_length();
 
-                    quote!(::#KRATE::trailing::Trailing::create_fut_from_len(#len, reader, #options_transition))
+                    quote!(::#KRATE::trailing::Trailing::create_fut_from_len(#len, #reader_transition, #options_transition))
                 } else {
-                    quote!(::#KRATE::trailing::Trailing::create_fut(reader, #options_transition))
+                    quote!(::#KRATE::trailing::Trailing::create_fut(#reader_transition, #options_transition))
                 }
             }
             Self::Payload(expr_len) => {
                 if let Some(LenFromExpr { size_expr, .. }) = expr_len {
-                    quote!(::#KRATE::payload::Payload::create_fut_from_len(#size_expr, reader, #options_transition))
+                    quote!(::#KRATE::payload::Payload::create_fut_from_len(#size_expr, #reader_transition, #options_transition))
                 } else if let Some(payload_len) = payload_len {
                     let len = payload_len.as_parsed_length();
 
-                    quote!(::#KRATE::payload::Payload::create_fut_from_len(#len, reader, #options_transition))
+                    quote!(::#KRATE::payload::Payload::create_fut_from_len(#len, #reader_transition, #options_transition))
                 } else {
-                    quote!(::#KRATE::payload::Payload::create_fut(reader, #options_transition))
+                    quote!(::#KRATE::payload::Payload::create_fut(#reader_transition, #options_transition))
                 }
             }
             Self::Padded(expr_len) => {
                 if let Some(LenFromExpr { size_expr, .. }) = expr_len {
-                    quote!(::#KRATE::padded::Padded::create_fut_from_len(#size_expr, reader, #options_transition))
+                    quote!(::#KRATE::padded::Padded::create_fut_from_len(#size_expr, #reader_transition, #options_transition))
                 } else if let Some(payload_len) = payload_len {
                     let len = payload_len.as_parsed_length();
 
-                    quote!(::#KRATE::padded::Padded::create_fut_from_len(#len, reader, #options_transition))
+                    quote!(::#KRATE::padded::Padded::create_fut_from_len(#len, #reader_transition, #options_transition))
                 } else {
                     unreachable!()
                 }
@@ -2364,7 +2665,13 @@ impl FieldKind<'_> {
             Self::Tagged(expr_len, children, tagged_name) => {
                 let tag_ty = &tag.expect("no tag for given tagged field").ty;
 
-                let reader = reader_from_lengths(*expr_len, payload_len, false);
+                let reader = reader_from_lengths(
+                    *expr_len,
+                    payload_len,
+                    false,
+                    error_detection,
+                    error_detection_reader.is_none(),
+                );
 
                 let async_name = quote::format_ident!("Async{}Parse", tagged_name);
                 let parse_name = if expr_len.is_some() || payload_len.is_some() {
@@ -2414,9 +2721,11 @@ impl FieldKind<'_> {
                             payload_len.as_ref(),
                         );
                         let parse_name = quote::format_ident!("Async{}Parse", name);
-                        if let Some((nested_next_name, nested_next_ty, nested_next_kind, nested_next_endianess)) =
+                        if let Some((nested_next_name, nested_next_ty, nested_next_kind, nested_next_field)) =
                             typed.iter().find_map(|f| f.as_ref())
                         {
+                            let error_detection_reader = ErrorDetection::format_async_fut_reader(error_detection, nested_next_field.skip_error_detection || matches!(nested_next_kind, FieldKind::ErrorDetection));
+
                             let fut = nested_next_kind.as_next_fut(
                                 nested_next_ty,
                                 generics,
@@ -2424,9 +2733,11 @@ impl FieldKind<'_> {
                                 generic_collection,
                                 payload_len.as_ref(),
                                 tag.as_ref(),
+                                error_detection_reader.as_ref().map(|r| r.as_ref().ok()).flatten(),
                                 current_field_endianess,
-                                *nested_next_endianess,
+                                nested_next_field.endianess.as_ref(),
                                 definition_endianess,
+                                error_detection,
                                 false,
                             );
 
@@ -2439,9 +2750,15 @@ impl FieldKind<'_> {
                             let starting_idx = typed.iter().position(|f| f.is_some()).unwrap();
                             let starting_state = quote::format_ident!("S{}", starting_idx);
 
+                            let hasher_storage = error_detection_reader.as_ref().map(|h| h.as_ref().err()).flatten().map(|_| quote!{
+                                #[cfg(feature = "error_detection")]
+                                _hasher,
+                            });
+
                             quote! {
                                 #mod_name #enum_name:: #name (#mod_name #parse_name::#starting_state {
                                     #nested_next_name: #fut,
+                                    #hasher_storage
                                 })
                             }
                         } else {
@@ -2466,7 +2783,7 @@ impl FieldKind<'_> {
                 )
             }
             _ => {
-                quote!(<#next_ty as ::#KRATE::parse::AsyncParse<__Offset>>::create_fut(reader, #options_transition))
+                quote!(<#next_ty as ::#KRATE::parse::AsyncParse<__Offset>>::create_fut(#reader_transition, #options_transition))
             }
         }
     }
@@ -2482,7 +2799,7 @@ pub fn prepare_fields_for_statemachine<'a>(
         syn::Ident,
         proc_macro2::TokenStream,
         FieldKind<'a>,
-        Option<&'a Endianess>,
+        &'a AtomField,
     )>,
 > {
     let where_clause = generics
@@ -2548,6 +2865,12 @@ pub fn prepare_fields_for_statemachine<'a>(
                         let ty = &field.ty;
 
                         (name, quote!(#ty), FieldKind::Regular)
+                    }
+                    StructFieldAttr::ErrorDetection {
+                        ..
+                    } => {
+                        let ty = &field.ty;
+                        (quote::format_ident!("_hash"), quote!(#ty), FieldKind::ErrorDetection)
                     }
                     StructFieldAttr::VersionIdentifier => unreachable!(),
                     StructFieldAttr::Tag => {
@@ -2648,24 +2971,20 @@ pub fn prepare_fields_for_statemachine<'a>(
                     StructFieldAttr::ReuseCondition => return None,
                 }
             };
-            Some((name, ty, kind, field.endianess.as_ref()))
+            Some((name, ty, kind, field))
         })
         .collect::<Vec<_>>()
 }
 
 pub fn format_statemachine_nop_impl(
-    typed_fields: &[Option<(
-        syn::Ident,
-        proc_macro2::TokenStream,
-        FieldKind,
-        Option<&Endianess>,
-    )>],
+    typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind, &AtomField)>],
     generics: &syn::Generics,
     mod_name: Option<&proc_macro2::TokenStream>,
     generic_collection: Option<&proc_macro2::TokenStream>,
     payload_len: Option<&PayloadLength>,
     tag: Option<&Tag>,
     definition_endianess: Option<&Endianess>,
+    error_detection: Option<&ErrorDetection>,
     format_state_transition: &dyn Fn(
         proc_macro2::TokenStream,
         Option<Endianess>,
@@ -2677,7 +2996,12 @@ pub fn format_statemachine_nop_impl(
     Option<proc_macro2::TokenStream>,
 ) {
     use quote::quote;
-    if let Some((name, ty, kind, endianess)) = typed_fields.iter().find_map(|f| f.as_ref()) {
+    if let Some((name, ty, kind, field)) = typed_fields.iter().find_map(|f| f.as_ref()) {
+        let error_detection_reader = ErrorDetection::format_async_fut_reader(
+            error_detection,
+            field.skip_error_detection || matches!(kind, FieldKind::ErrorDetection),
+        );
+
         let next_fut = kind.as_next_fut(
             ty,
             generics,
@@ -2685,15 +3009,28 @@ pub fn format_statemachine_nop_impl(
             generic_collection,
             payload_len,
             tag,
+            error_detection_reader
+                .as_ref()
+                .map(|r| r.as_ref().ok())
+                .flatten(),
             None,
-            *endianess,
+            field.endianess.as_ref(),
             definition_endianess,
+            error_detection,
             true,
         );
 
+        let hasher_storage = error_detection_reader.map(|h| h.err()).flatten().map(|_| {
+            quote! {
+                #[cfg(feature = "error_detection")]
+                _hasher,
+            }
+        });
+
         (
             quote! {
-                #name: #next_fut
+                #name: #next_fut,
+                #hasher_storage
             },
             None,
             None,
@@ -2738,12 +3075,7 @@ pub fn format_variant_state_change<'a>(
     enum_name: &syn::Ident,
     variant_parse_name: &syn::Ident,
     fields: &[AtomField],
-    typed_fields: &[Option<(
-        syn::Ident,
-        proc_macro2::TokenStream,
-        FieldKind,
-        Option<&Endianess>,
-    )>],
+    typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind, &AtomField)>],
     exhaustive: bool,
     generics: &syn::Generics,
     match_fields: impl Iterator<Item = &'a syn::Ident> + Clone,
@@ -2758,6 +3090,7 @@ pub fn format_variant_state_change<'a>(
     state: &syn::Ident,
     on_poll_ready: &proc_macro2::TokenStream,
     definition_endianess: Option<&Endianess>,
+    error_detection: Option<&ErrorDetection>,
     format_conditional_state: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream,
     format_state_transition: &dyn Fn(
         proc_macro2::TokenStream,
@@ -2847,6 +3180,7 @@ pub fn format_variant_state_change<'a>(
                 generic_collection,
                 prev_endianess.as_ref(),
                 definition_endianess,
+                error_detection,
                 format_conditional_state,
                 &generics,
                 root,
@@ -2874,6 +3208,7 @@ pub fn format_variant_state_change<'a>(
             generic_collection,
             mod_name,
             definition_endianess,
+            error_detection,
             &format_nested_conditional,
             &format_state_transition,
             false,
@@ -2942,12 +3277,7 @@ fn format_none_variant_state_change(
 
 pub fn format_statemachine_fields(
     fields: &[AtomField],
-    typed_fields: &[Option<(
-        syn::Ident,
-        proc_macro2::TokenStream,
-        FieldKind,
-        Option<&Endianess>,
-    )>],
+    typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind, &AtomField)>],
     payload_len: Option<&PayloadLength>,
     tag: Option<&Tag>,
     struct_name: &syn::Ident,
@@ -2956,6 +3286,7 @@ pub fn format_statemachine_fields(
     generic_collection: Option<&proc_macro2::TokenStream>,
     mod_name: Option<&proc_macro2::TokenStream>,
     definition_endianess: Option<&Endianess>,
+    error_detection: Option<&ErrorDetection>,
     format_conditional_state: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream,
     format_state_transition: &dyn Fn(
         proc_macro2::TokenStream,
@@ -3010,86 +3341,108 @@ pub fn format_statemachine_fields(
             }
         });
 
-        let in_progress_fut = {
-            let (name, ty, kind, endianess) = in_progress;
+        let (in_progress_fut, (hasher_storage, hasher_as_field, split_reader_and_hash)) = {
+            let (name, ty, kind, field) = in_progress;
             let options_ty = Endianess::format_options_ty(
-                *endianess,
+                field.endianess.as_ref(),
                 Some(Endianess::format_options_ty(definition_endianess, None)),
             );
 
-            match kind {
-                FieldKind::Payload(expr_len) => {
-                    if let Some(LenFromExpr { ty: len_ty, .. }) = expr_len {
-                        quote!(#name: ::#KRATE::payload::PayloadParse<#options_ty, __Offset, __Reader, #len_ty>)
-                    } else if let Some(PayloadLength { ty: len, .. }) = payload_len.as_ref() {
-                        quote!(#name: ::#KRATE::payload::PayloadParse<#options_ty, __Offset, __Reader, #len>)
-                    } else {
-                        quote!(#name: ::#KRATE::payload::PayloadParse<#options_ty, __Offset, __Reader>)
-                    }
-                }
-                FieldKind::Trailing(expr_len) => {
-                    let AtomFieldKind::Struct(field, _) = &fields[idx].kind else {
-                        unreachable!();
-                    };
-                    let trailing_ty = &field.ty;
-                    if let Some(LenFromExpr { ty: len_ty, .. }) = expr_len {
-                        quote!(#name: ::#KRATE::trailing::TrailingParse<#options_ty, __Offset, __Reader, #trailing_ty, #len_ty>)
-                    } else if let Some(PayloadLength { ty: len, .. }) = payload_len.as_ref() {
-                        quote!(#name: ::#KRATE::trailing::TrailingParse<#options_ty, __Offset, __Reader, #trailing_ty, #len>)
-                    } else {
-                        quote!(#name: ::#KRATE::trailing::TrailingParse<#options_ty, __Offset, __Reader, #trailing_ty>)
-                    }
-                }
-                FieldKind::Padded(expr_len) => {
-                    let len_ty = match (expr_len, payload_len.as_ref()) {
-                        (Some(LenFromExpr { ty: len_ty, .. }), _) => len_ty,
-                        (_, Some(PayloadLength { ty: len_ty, .. })) => len_ty,
-                        _ => unreachable!(),
-                    };
-                    quote!(#name: ::#KRATE::padded::AsyncPaddedParse<#options_ty, __Offset, __Reader, #len_ty, #ty>)
-                }
-                FieldKind::Tagged(expr_len, _, tagged_name) => {
-                    let async_name = quote::format_ident!("Async{tagged_name}Parse");
-                    if expr_len.is_some() || payload_len.is_some() {
-                        let with_len = quote::format_ident!("{async_name}WithLen");
-                        quote!(#name: #mod_name #with_len<#options_ty, __Offset, ::#KRATE::reader::TrailingReader<__Offset, __Reader>>,)
-                    } else {
-                        quote!(#name: #mod_name #async_name<#options_ty, __Offset, __Reader>,)
-                    }
-                }
-                FieldKind::Conditional(cond) => {
-                    let field_name = &cond.field_name;
-                    let parse_name = match cond.group().unwrap() {
-                        GroupedConditionals::Struct { name, .. } => {
-                            quote::format_ident!("AsyncOptional{}Parse", name)
-                        }
-                        GroupedConditionals::Enum { name, .. } => {
-                            quote::format_ident!("Async{}Parse", name)
-                        }
-                    };
+            let (reader_hash_ty, hash_storage) = ErrorDetection::format_reader_ty_and_hash_storage(
+                error_detection,
+                field.skip_error_detection || matches!(kind, FieldKind::ErrorDetection),
+            );
 
-                    let mut parse_generics = generics.clone();
-                    parse_generics
-                        .params
-                        .push(syn::parse_quote!(__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin));
-                    parse_generics.params.push(syn::parse_quote!(__Offset));
-                    parse_generics.params.push(syn::parse_quote!(__Reader));
-                    let (_, parse_ty_generics, _) = parse_generics.split_for_impl();
-
-                    quote!(#field_name: #mod_name #parse_name #parse_ty_generics)
-                }
-                _ => {
-                    quote! {
-                        #name: <#ty as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<#options_ty, __Reader>,
+            (
+                match kind {
+                    FieldKind::Payload(expr_len) => {
+                        ErrorDetection::format_with_reader_ty(reader_hash_ty, |reader_ty| {
+                            if let Some(LenFromExpr { ty: len_ty, .. }) = expr_len {
+                                quote!(#name: ::#KRATE::payload::PayloadParse<#options_ty, __Offset, #reader_ty, #len_ty>)
+                            } else if let Some(PayloadLength { ty: len, .. }) = payload_len.as_ref()
+                            {
+                                quote!(#name: ::#KRATE::payload::PayloadParse<#options_ty, __Offset, #reader_ty, #len>)
+                            } else {
+                                quote!(#name: ::#KRATE::payload::PayloadParse<#options_ty, __Offset, #reader_ty>)
+                            }
+                        })
                     }
-                }
-            }
+                    FieldKind::Trailing(expr_len) => {
+                        let AtomFieldKind::Struct(field, _) = &fields[idx].kind else {
+                            unreachable!();
+                        };
+                        let trailing_ty = &field.ty;
+                        ErrorDetection::format_with_reader_ty(reader_hash_ty, |reader_ty| {
+                            if let Some(LenFromExpr { ty: len_ty, .. }) = expr_len {
+                                quote!(#name: ::#KRATE::trailing::TrailingParse<#options_ty, __Offset, #reader_ty, #trailing_ty, #len_ty>)
+                            } else if let Some(PayloadLength { ty: len, .. }) = payload_len.as_ref()
+                            {
+                                quote!(#name: ::#KRATE::trailing::TrailingParse<#options_ty, __Offset, #reader_ty, #trailing_ty, #len>)
+                            } else {
+                                quote!(#name: ::#KRATE::trailing::TrailingParse<#options_ty, __Offset, #reader_ty, #trailing_ty>)
+                            }
+                        })
+                    }
+                    FieldKind::Padded(expr_len) => {
+                        let len_ty = match (expr_len, payload_len.as_ref()) {
+                            (Some(LenFromExpr { ty: len_ty, .. }), _) => len_ty,
+                            (_, Some(PayloadLength { ty: len_ty, .. })) => len_ty,
+                            _ => unreachable!(),
+                        };
+
+                        ErrorDetection::format_with_reader_ty(
+                            reader_hash_ty,
+                            |reader_ty| quote!(#name: ::#KRATE::padded::AsyncPaddedParse<#options_ty, __Offset, #reader_ty, #len_ty, #ty>),
+                        )
+                    }
+                    FieldKind::Tagged(expr_len, _, tagged_name) => {
+                        let async_name = quote::format_ident!("Async{tagged_name}Parse");
+                        ErrorDetection::format_with_reader_ty(reader_hash_ty, |reader_ty| {
+                            if expr_len.is_some() || payload_len.is_some() {
+                                let with_len = quote::format_ident!("{async_name}WithLen");
+                                quote!(#name: #mod_name #with_len<#options_ty, __Offset, ::#KRATE::reader::TrailingReader<__Offset, #reader_ty>>,)
+                            } else {
+                                quote!(#name: #mod_name #async_name<#options_ty, __Offset, #reader_ty>,)
+                            }
+                        })
+                    }
+                    FieldKind::Conditional(cond) => {
+                        let field_name = &cond.field_name;
+                        let parse_name = match cond.group().unwrap() {
+                            GroupedConditionals::Struct { name, .. } => {
+                                quote::format_ident!("AsyncOptional{}Parse", name)
+                            }
+                            GroupedConditionals::Enum { name, .. } => {
+                                quote::format_ident!("Async{}Parse", name)
+                            }
+                        };
+                        ErrorDetection::format_with_reader_ty(reader_hash_ty, |reader_ty| {
+                            let mut parse_generics = generics.clone();
+                            parse_generics
+                            .params
+                            .push(syn::parse_quote!(__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin));
+                            parse_generics.params.push(syn::parse_quote!(__Offset));
+                            parse_generics.params.push(syn::parse_quote!(#reader_ty));
+                            let (_, parse_ty_generics, _) = parse_generics.split_for_impl();
+
+                            quote!(#field_name: #mod_name #parse_name #parse_ty_generics)
+                        })
+                    }
+                    _ => ErrorDetection::format_with_reader_ty(reader_hash_ty, |reader_ty| {
+                        quote! {
+                            #name: <#ty as ::#KRATE::parse::AsyncParse<__Offset>>::Fut<#options_ty, #reader_ty>,
+                        }
+                    }),
+                },
+                hash_storage,
+            )
         };
 
         let variant = quote! {
             #state {
                 #(#variant_fields)*
                 #in_progress_fut
+                #hasher_storage
             }
         };
 
@@ -3099,16 +3452,22 @@ pub fn format_statemachine_fields(
             if matches!(in_progress.2, FieldKind::Conditional(_)) {
                 (None, None)
             } else {
-                (definition_endianess, in_progress.3)
+                (definition_endianess, in_progress.3.endianess.as_ref())
             };
 
         let borrow_opts = Endianess::format_borrow_reader(in_progress_endianess, def_endianess);
+        let reader_borrow = ErrorDetection::format_borrow_reader(
+            error_detection,
+            in_progress.3.skip_error_detection
+                || matches!(in_progress.2, FieldKind::ErrorDetection),
+        );
         let borrow_reader = quote! {
             Self::#state {
-                #name, ..
+                #name, #hasher_as_field
+                ..
             } => {
                 let (reader, opts) = #name.borrow_reader();
-                (reader, #borrow_opts)
+                (#reader_borrow, #borrow_opts)
             }
         };
 
@@ -3122,8 +3481,9 @@ pub fn format_statemachine_fields(
                     parse_name,
                     mod_name,
                     generic_collection,
-                    in_progress.3,
+                    in_progress.3.endianess.as_ref(),
                     definition_endianess,
+                    error_detection,
                     format_conditional_state,
                     &generics,
                     root,
@@ -3133,13 +3493,16 @@ pub fn format_statemachine_fields(
                     *self = #state;
                 }
             } else {
-                format_state_transition(Default::default(), in_progress.3.copied())
+                format_state_transition(Default::default(), in_progress.3.endianess.clone())
             };
 
         let check_reserved = match in_progress.2 {
             FieldKind::Reserved => {
                 let ty = &in_progress.1;
-                let take_opts = Endianess::format_take_reader(in_progress.3, definition_endianess);
+                let take_opts = Endianess::format_take_reader(
+                    in_progress.3.endianess.as_ref(),
+                    definition_endianess,
+                );
                 Some(quote! {
                     if ::#KRATE::parse_options::Options::options(&opts).error_on_used_reserved_fields && (#name != unsafe { ::core::mem::zeroed::<#ty>() }) {
                         *self = Self::Done(reader, #take_opts);
@@ -3148,7 +3511,10 @@ pub fn format_statemachine_fields(
                 })
             }
             FieldKind::Expected(val) => {
-                let take_opts = Endianess::format_take_reader(in_progress.3, definition_endianess);
+                let take_opts = Endianess::format_take_reader(
+                    in_progress.3.endianess.as_ref(),
+                    definition_endianess,
+                );
                 Some(quote! {
                     if #name != #val {
                         *self = Self::Done(reader, #take_opts);
@@ -3201,6 +3567,7 @@ pub fn format_statemachine_fields(
                         &state,
                         &on_poll_ready,
                         definition_endianess,
+                        error_detection,
                         format_conditional_state,
                         format_state_transition,
                     );
@@ -3253,6 +3620,7 @@ pub fn format_statemachine_fields(
                             &state,
                             &on_poll_ready,
                             definition_endianess,
+                            error_detection,
                             format_conditional_state,
                             format_state_transition,
                         )
@@ -3285,6 +3653,7 @@ pub fn format_statemachine_fields(
             quote! {
                 #mod_name #parse_name::#state {
                     #(#match_fields,)*
+                    #hasher_as_field
                     mut #name,
                 } => {
                     #sm_parse
@@ -3297,6 +3666,7 @@ pub fn format_statemachine_fields(
                 quote! {
                     #mod_name #parse_name::#state {
                         #(#match_fields,)*
+                        #hasher_as_field
                         #name,
                     }
                 }
@@ -3305,11 +3675,15 @@ pub fn format_statemachine_fields(
 
             let mod_name = if root { None } else { mod_name };
 
-            let take_opts = Endianess::format_take_reader(in_progress.3, definition_endianess);
+            let take_opts = Endianess::format_take_reader(
+                in_progress.3.endianess.as_ref(),
+                definition_endianess,
+            );
 
             quote! {
                 #mod_name #parse_name::#state {
                     #(#match_fields,)*
+                    #hasher_as_field
                     mut #name,
                 } => {
                     match ::core::pin::Pin::new(&mut #name).poll(cx) {
@@ -3319,6 +3693,8 @@ pub fn format_statemachine_fields(
                         }
                         ::core::task::Poll::Ready(r) => {
                             let (reader, opts) = ::#KRATE::reader::TakeReader::take_reader(#name);
+                            #split_reader_and_hash
+
                             let #name = match r {
                                 Ok(#name) => #name,
                                 Err(e) => {
@@ -3346,12 +3722,7 @@ pub fn format_statemachine_fields(
 }
 
 pub fn format_statemachine_next_state(
-    typed_fields: &[Option<(
-        syn::Ident,
-        proc_macro2::TokenStream,
-        FieldKind,
-        Option<&Endianess>,
-    )>],
+    typed_fields: &[Option<(syn::Ident, proc_macro2::TokenStream, FieldKind, &AtomField)>],
     idx: usize,
     payload_len: Option<&PayloadLength>,
     tag: Option<&Tag>,
@@ -3360,6 +3731,7 @@ pub fn format_statemachine_next_state(
     generic_collection: Option<&proc_macro2::TokenStream>,
     current_field_endianess: Option<&Endianess>,
     definition_endianess: Option<&Endianess>,
+    error_detection: Option<&ErrorDetection>,
     format_conditional_state: &dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream,
     generics: &syn::Generics,
     root: bool,
@@ -3370,7 +3742,7 @@ pub fn format_statemachine_next_state(
 ) {
     use quote::quote;
 
-    let (next_name, next_ty, next_kind, next_endianess) = typed_fields[idx].as_ref().unwrap();
+    let (next_name, next_ty, next_kind, next_field) = typed_fields[idx].as_ref().unwrap();
     let next_state = quote::format_ident!("S{}", idx);
     let new_completed = typed_fields[..idx].iter().filter_map(|f| {
         let (name, _, kind, _) = f.as_ref()?;
@@ -3380,6 +3752,11 @@ pub fn format_statemachine_next_state(
         Some(name)
     });
 
+    let error_detection_reader = ErrorDetection::format_async_fut_reader(
+        error_detection,
+        next_field.skip_error_detection || matches!(next_kind, FieldKind::ErrorDetection),
+    );
+
     let next_fut = next_kind.as_next_fut(
         next_ty,
         generics,
@@ -3387,11 +3764,28 @@ pub fn format_statemachine_next_state(
         generic_collection,
         payload_len,
         tag,
+        error_detection_reader
+            .as_ref()
+            .map(|r| r.as_ref().ok())
+            .flatten(),
         current_field_endianess,
-        *next_endianess,
+        next_field.endianess.as_ref(),
         definition_endianess,
+        error_detection,
         false,
     );
+
+    let hasher_storage = error_detection_reader
+        .as_ref()
+        .map(|h| h.as_ref().err())
+        .flatten()
+        .map(|_| {
+            quote! {
+                #[cfg(feature = "error_detection")]
+                _hasher,
+            }
+        });
+
     let next_fut = quote! {
         let #next_name = #next_fut;
     };
@@ -3402,6 +3796,7 @@ pub fn format_statemachine_next_state(
         #mod_name #parse_name::#next_state {
             #(#new_completed,)*
             #next_name,
+            #hasher_storage
             #generic_collection
         }
     };
@@ -3429,6 +3824,7 @@ pub fn format_async_statemachine(
     payload_len: Option<&PayloadLength>,
     tag: Option<&Tag>,
     definition_endianess: Option<&Endianess>,
+    error_detection: Option<&ErrorDetection>,
 ) -> proc_macro2::TokenStream {
     let payload_len = AtomFields::nested_payload_len(payload_len, fields);
     let tag = AtomFields::nested_tag(tag, fields);
@@ -3458,11 +3854,14 @@ pub fn format_async_statemachine(
             definition_endianess
         };
 
+        let check_hash = ErrorDetection::format_hash_check(error_detection);
+
         let opts_transition = Endianess::format_take_reader(def_endianess, prev_endianess.as_ref());
         quote! {
             #toks
 
             *self = Self::Done(reader, #opts_transition);
+            #check_hash
             return ::core::task::Poll::Ready(Ok(#struct_name {
                 #(#finished)*
                 #generic_collection
@@ -3483,6 +3882,7 @@ pub fn format_async_statemachine(
             generic_collection,
             mod_name.as_ref(),
             definition_endianess,
+            error_detection,
             &format_base,
             &format_state_transition,
             true,
@@ -3496,6 +3896,7 @@ pub fn format_async_statemachine(
         payload_len.as_ref(),
         tag.as_ref(),
         definition_endianess,
+        error_detection,
         &format_state_transition,
     );
 
@@ -3545,6 +3946,8 @@ pub fn format_async_statemachine(
     let starting_idx = typed_fields.iter().position(|f| f.is_some()).unwrap_or(0);
     let starting_state = quote::format_ident!("S{}", starting_idx);
 
+    let hasher = error_detection.map(ErrorDetection::create_hasher);
+
     quote! {
         pub enum #parse_name #generics #where_clause {
             #(#state_machine_variants,)*
@@ -3571,6 +3974,7 @@ pub fn format_async_statemachine(
         impl #parse_impl_generics ::#KRATE::parse::AsyncParse<__Offset> for #struct_name #struct_ty_generics #struct_where_clause {
             type Fut<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin> = #parse_name #type_generics ;
             fn create_fut<__Options: ::#KRATE::parse_options::Options + ::core::marker::Unpin, __Reader: ::#KRATE::reader::PollReader<__Offset> + ::core::marker::Unpin>(reader: __Reader, opts: __Options) -> Self::Fut<__Options, __Reader> {
+                #hasher
                 #parse_name :: #starting_state {
                     #start
                 }

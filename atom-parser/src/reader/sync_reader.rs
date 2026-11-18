@@ -9,6 +9,14 @@ pub trait Reader<O: Offset>: SwapOffsets<O> {
     fn read_cstr(&mut self) -> Result<O, IoError>;
     fn seek(&mut self, amt: O) -> Result<(), IoError>;
 
+    fn read_with_hash<H: crate::Hasher>(
+        &mut self,
+        bytes: &mut [u8],
+        hasher: &mut H,
+    ) -> Result<(), IoError>;
+    fn seek_with_hash<H: crate::Hasher>(&mut self, amt: O, hasher: &mut H) -> Result<(), IoError>;
+    fn read_cstr_with_hash<H: crate::Hasher>(&mut self, hasher: &mut H) -> Result<O, IoError>;
+
     fn seek_remaining(&mut self) -> Result<(), IoError> {
         self.seek(self.remaining_size())
     }
@@ -103,5 +111,19 @@ impl<'a, O: Offset, R: Reader<O>> Reader<O> for &'a mut R {
 
     fn read_extent_with(&self, extent: crate::Extent<O, O>, buf: &mut [u8]) -> Result<(), IoError> {
         R::read_extent_with(self, extent, buf)
+    }
+
+    fn read_with_hash<H: crate::Hasher>(
+        &mut self,
+        bytes: &mut [u8],
+        hasher: &mut H,
+    ) -> Result<(), IoError> {
+        R::read_with_hash(self, bytes, hasher)
+    }
+    fn seek_with_hash<H: crate::Hasher>(&mut self, amt: O, hasher: &mut H) -> Result<(), IoError> {
+        R::seek_with_hash(self, amt, hasher)
+    }
+    fn read_cstr_with_hash<H: crate::Hasher>(&mut self, hasher: &mut H) -> Result<O, IoError> {
+        R::read_cstr_with_hash(self, hasher)
     }
 }

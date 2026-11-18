@@ -1,4 +1,4 @@
-use crate::{IoError, Offset, PollReader, Reader, SwapOffsets};
+use crate::{CombinedHasher, IoError, Offset, PollReader, Reader, SwapOffsets};
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
@@ -69,6 +69,24 @@ mod backtrack_reader {
         ) -> Result<(), IoError> {
             self.reader.read_extent_with(extent, buf)
         }
+
+        fn read_with_hash<H: crate::Hasher>(
+            &mut self,
+            bytes: &mut [u8],
+            hasher: &mut H,
+        ) -> Result<(), IoError> {
+            self.reader.read_with_hash(bytes, hasher)
+        }
+        fn seek_with_hash<H: crate::Hasher>(
+            &mut self,
+            amt: O,
+            hasher: &mut H,
+        ) -> Result<(), IoError> {
+            self.reader.seek_with_hash(amt, hasher)
+        }
+        fn read_cstr_with_hash<H: crate::Hasher>(&mut self, hasher: &mut H) -> Result<O, IoError> {
+            self.reader.read_cstr_with_hash(hasher)
+        }
     }
 
     impl<O: Offset + Unpin, R: PollReader<O> + SwapOffsets<O> + Unpin> PollReader<O>
@@ -102,6 +120,37 @@ mod backtrack_reader {
             cx: &mut Context<'_>,
         ) -> Poll<Result<(), IoError>> {
             Pin::new(&mut self.reader).poll_seek_complete(cx)
+        }
+
+        fn poll_read_with_hash<H: crate::Hasher>(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+            hasher: &mut H,
+        ) -> Poll<Result<(), IoError>> {
+            Pin::new(&mut self.reader).poll_read_with_hash(cx, buf, hasher)
+        }
+        fn poll_read_cstr_with_hash<H: crate::Hasher>(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            hasher: &mut H,
+        ) -> Poll<Result<O, IoError>> {
+            Pin::new(&mut self.reader).poll_read_cstr_with_hash(cx, hasher)
+        }
+        fn seek_start_with_hash<H: crate::Hasher>(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            amt: O,
+            hasher: &mut H,
+        ) -> Result<(), IoError> {
+            Pin::new(&mut self.reader).seek_start_with_hash(cx, amt, hasher)
+        }
+        fn poll_seek_complete_with_hash<H: crate::Hasher>(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            hasher: &mut H,
+        ) -> Poll<Result<(), IoError>> {
+            Pin::new(&mut self.reader).poll_seek_complete_with_hash(cx, hasher)
         }
 
         fn offset(&self) -> O {
@@ -215,6 +264,24 @@ mod trailing_reader {
         ) -> Result<(), IoError> {
             self.reader.read_extent_with(extent, buf)
         }
+
+        fn read_with_hash<H: crate::Hasher>(
+            &mut self,
+            bytes: &mut [u8],
+            hasher: &mut H,
+        ) -> Result<(), IoError> {
+            self.reader.read_with_hash(bytes, hasher)
+        }
+        fn seek_with_hash<H: crate::Hasher>(
+            &mut self,
+            amt: O,
+            hasher: &mut H,
+        ) -> Result<(), IoError> {
+            self.reader.seek_with_hash(amt, hasher)
+        }
+        fn read_cstr_with_hash<H: crate::Hasher>(&mut self, hasher: &mut H) -> Result<O, IoError> {
+            self.reader.read_cstr_with_hash(hasher)
+        }
     }
 
     impl<O: Offset + Unpin, R: PollReader<O> + Unpin> PollReader<O> for TrailingReader<O, R> {
@@ -264,6 +331,37 @@ mod trailing_reader {
             Pin::new(&mut self.reader).poll_seek_complete(cx)
         }
 
+        fn poll_read_with_hash<H: crate::Hasher>(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+            hasher: &mut H,
+        ) -> Poll<Result<(), IoError>> {
+            Pin::new(&mut self.reader).poll_read_with_hash(cx, buf, hasher)
+        }
+        fn poll_read_cstr_with_hash<H: crate::Hasher>(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            hasher: &mut H,
+        ) -> Poll<Result<O, IoError>> {
+            Pin::new(&mut self.reader).poll_read_cstr_with_hash(cx, hasher)
+        }
+        fn seek_start_with_hash<H: crate::Hasher>(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            amt: O,
+            hasher: &mut H,
+        ) -> Result<(), IoError> {
+            Pin::new(&mut self.reader).seek_start_with_hash(cx, amt, hasher)
+        }
+        fn poll_seek_complete_with_hash<H: crate::Hasher>(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            hasher: &mut H,
+        ) -> Poll<Result<(), IoError>> {
+            Pin::new(&mut self.reader).poll_seek_complete_with_hash(cx, hasher)
+        }
+
         fn offset(&self) -> O {
             self.reader.offset()
         }
@@ -305,3 +403,200 @@ impl<O: core::ops::Add<Output = O> + Copy, R: SwapOffsets<O>>
         BacktrackReader::new(TrailingReader::new(reader, max_offset), offset)
     }
 }
+
+mod error_detection_reader {
+    pub use super::*;
+    pub struct ErrorDetectionReader<H, R> {
+        hasher: H,
+        reader: R,
+    }
+
+    impl<H, R> ErrorDetectionReader<H, R> {
+        pub fn new_with(reader: R, hasher: H) -> Self {
+            Self { hasher, reader }
+        }
+
+        pub fn split(self) -> (H, R) {
+            (self.hasher, self.reader)
+        }
+
+        pub fn reader(&mut self) -> &mut R {
+            &mut self.reader
+        }
+    }
+
+    impl<H, O, S> SwapOffsets<O> for ErrorDetectionReader<H, S> {
+        fn swap_offsets(&mut self, _: &mut O) {
+            panic!("swap offsets cannot be used for error detection reader")
+        }
+    }
+
+    impl<H: crate::Hasher, O: Offset, R: Reader<O>> Reader<O> for ErrorDetectionReader<H, R> {
+        fn remaining_size(&self) -> O {
+            self.reader.remaining_size()
+        }
+        fn offset(&self) -> O {
+            self.reader.offset()
+        }
+
+        fn read(&mut self, bytes: &mut [u8]) -> Result<(), IoError> {
+            self.reader.read_with_hash(bytes, &mut self.hasher)
+        }
+
+        fn read_cstr(&mut self) -> Result<O, IoError> {
+            self.reader.read_cstr_with_hash(&mut self.hasher)
+        }
+
+        fn seek(&mut self, amt: O) -> Result<(), IoError> {
+            self.reader.seek_with_hash(amt, &mut self.hasher)
+        }
+
+        #[cfg(feature = "alloc")]
+        fn read_extent_in<A: alloc::alloc::Allocator>(
+            &self,
+            _: crate::Extent<O, O>,
+            _: A,
+        ) -> Result<alloc::boxed::Box<[u8], A>, crate::ExtentError> {
+            panic!("cannot use read_extent_in with ErrorDetectionReader")
+        }
+
+        fn read_extent_with(&self, _: crate::Extent<O, O>, _: &mut [u8]) -> Result<(), IoError> {
+            panic!("cannot use read_extent_with with ErrorDetectionReader")
+        }
+
+        fn read_with_hash<H2: crate::Hasher>(
+            &mut self,
+            bytes: &mut [u8],
+            hash: &mut H2,
+        ) -> Result<(), IoError> {
+            let mut combined = CombinedHasher::combine_hashes(&mut self.hasher, hash);
+            self.reader.read_with_hash(bytes, &mut combined)
+        }
+        fn seek_with_hash<H2: crate::Hasher>(
+            &mut self,
+            amt: O,
+            hash: &mut H2,
+        ) -> Result<(), IoError> {
+            let mut combined = CombinedHasher::combine_hashes(&mut self.hasher, hash);
+            self.reader.seek_with_hash(amt, &mut combined)
+        }
+        fn read_cstr_with_hash<H2: crate::Hasher>(&mut self, hash: &mut H2) -> Result<O, IoError> {
+            let mut combined = CombinedHasher::combine_hashes(&mut self.hasher, hash);
+            self.reader.read_cstr_with_hash(&mut combined)
+        }
+    }
+
+    impl<H: crate::hash::FullHasher + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin>
+        PollReader<O> for ErrorDetectionReader<H, R>
+    {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<Result<(), IoError>> {
+            let Self { reader, hasher } = &mut *self;
+            let mut hasher = hasher;
+            Pin::new(reader).poll_read_with_hash(cx, buf, &mut hasher)
+        }
+
+        fn poll_read_cstr(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<O, IoError>> {
+            let Self { reader, hasher } = &mut *self;
+            let mut hasher = hasher;
+            Pin::new(reader).poll_read_cstr_with_hash(cx, &mut hasher)
+        }
+
+        fn seek_start(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            amt: O,
+        ) -> Result<(), IoError> {
+            let Self { reader, hasher } = &mut *self;
+            let mut hasher = hasher;
+            Pin::new(reader).seek_start_with_hash(cx, amt, &mut hasher)
+        }
+
+        fn poll_seek_complete(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), IoError>> {
+            let Self { reader, hasher } = &mut *self;
+            let mut hasher = hasher;
+            Pin::new(reader).poll_seek_complete_with_hash(cx, &mut hasher)
+        }
+
+        fn poll_read_with_hash<H2: crate::Hasher>(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+            hash: &mut H2,
+        ) -> Poll<Result<(), IoError>> {
+            let Self { reader, hasher } = &mut *self;
+            let mut hasher = hasher;
+            let mut combined = CombinedHasher::combine_hashes(&mut hasher, hash);
+            Pin::new(reader).poll_read_with_hash(cx, buf, &mut combined)
+        }
+        fn poll_read_cstr_with_hash<H2: crate::Hasher>(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            hash: &mut H2,
+        ) -> Poll<Result<O, IoError>> {
+            let Self { reader, hasher } = &mut *self;
+            let mut hasher = hasher;
+            let mut combined = CombinedHasher::combine_hashes(&mut hasher, hash);
+            Pin::new(reader).poll_read_cstr_with_hash(cx, &mut combined)
+        }
+
+        fn seek_start_with_hash<H2: crate::Hasher>(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            amt: O,
+            hash: &mut H2,
+        ) -> Result<(), IoError> {
+            let Self { reader, hasher } = &mut *self;
+            let mut hasher = hasher;
+            let mut combined = CombinedHasher::combine_hashes(&mut hasher, hash);
+            Pin::new(reader).seek_start_with_hash(cx, amt, &mut combined)
+        }
+        fn poll_seek_complete_with_hash<H2: crate::Hasher>(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            hash: &mut H2,
+        ) -> Poll<Result<(), IoError>> {
+            let Self { reader, hasher } = &mut *self;
+            let mut hasher = hasher;
+            let mut combined = CombinedHasher::combine_hashes(&mut hasher, hash);
+            Pin::new(reader).poll_seek_complete_with_hash(cx, &mut combined)
+        }
+
+        fn offset(&self) -> O {
+            self.reader.offset()
+        }
+
+        fn remaining_size(&self) -> O {
+            self.reader.remaining_size()
+        }
+
+        #[cfg(feature = "alloc")]
+        fn poll_read_extent<A: alloc::alloc::Allocator>(
+            self: Pin<&mut Self>,
+            _: &crate::Extent<O, O>,
+            _: &mut alloc::vec::Vec<u8, A>,
+            _: &mut Context<'_>,
+        ) -> Poll<Result<(), crate::ExtentError>> {
+            panic!("cannot use poll_read_extent with ErrorDetectionReader")
+        }
+
+        fn poll_read_extent_with(
+            self: Pin<&mut Self>,
+            _: &crate::Extent<O, O>,
+            _: &mut [u8],
+            _: &mut Context<'_>,
+        ) -> Poll<Result<(), crate::IoError>> {
+            panic!("cannot use poll_read_extent_with with ErrorDetectionReader")
+        }
+    }
+}
+pub use error_detection_reader::*;

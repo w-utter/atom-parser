@@ -45,4 +45,6 @@ pub enum ParseError {
     UsedReservedField,
     #[error("unexpected value from field")]
     UnexpectedValue,
+    #[error("calculated error detection did not match specified")]
+    ErrorDetectionMismatch,
 }

@@ -20,6 +20,30 @@ pub trait PollReader<O: Offset> {
 
     fn poll_seek_complete(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>>;
 
+    fn poll_read_with_hash<H: crate::Hasher>(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+        hasher: &mut H,
+    ) -> Poll<Result<(), IoError>>;
+    fn poll_read_cstr_with_hash<H: crate::Hasher>(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        hasher: &mut H,
+    ) -> Poll<Result<O, IoError>>;
+
+    fn seek_start_with_hash<H: crate::Hasher>(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        amt: O,
+        hasher: &mut H,
+    ) -> Result<(), IoError>;
+    fn poll_seek_complete_with_hash<H: crate::Hasher>(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        hasher: &mut H,
+    ) -> Poll<Result<(), IoError>>;
+
     fn offset(&self) -> O;
     fn remaining_size(&self) -> O;
 
@@ -191,6 +215,37 @@ impl<'a, O: Offset, R: Unpin + PollReader<O>> PollReader<O> for &'a mut R {
     ) -> Poll<Result<(), crate::IoError>> {
         Pin::new(&mut **self).poll_read_extent_with(extent, buf, cx)
     }
+
+    fn poll_read_with_hash<H: crate::Hasher>(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+        hasher: &mut H,
+    ) -> Poll<Result<(), IoError>> {
+        Pin::new(&mut **self).poll_read_with_hash(cx, buf, hasher)
+    }
+    fn poll_read_cstr_with_hash<H: crate::Hasher>(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        hasher: &mut H,
+    ) -> Poll<Result<O, IoError>> {
+        Pin::new(&mut **self).poll_read_cstr_with_hash(cx, hasher)
+    }
+    fn seek_start_with_hash<H: crate::Hasher>(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        amt: O,
+        hasher: &mut H,
+    ) -> Result<(), IoError> {
+        Pin::new(&mut **self).seek_start_with_hash(cx, amt, hasher)
+    }
+    fn poll_seek_complete_with_hash<H: crate::Hasher>(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        hasher: &mut H,
+    ) -> Poll<Result<(), IoError>> {
+        Pin::new(&mut **self).poll_seek_complete_with_hash(cx, hasher)
+    }
 }
 
 pub trait AsyncReader<O: Offset>: SwapOffsets<O> + PollReader<O> + Unpin + Sized {
@@ -325,16 +380,13 @@ impl<O: Offset, R: PollReader<O> + Unpin> Future for AsyncSeek<O, R> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
         let me = self.project();
         match me.amt {
-            Some(amt) => {
-                core::task::ready!(Pin::new(&mut *me.reader).poll_seek_complete(cx))?;
-                match Pin::new(&mut *me.reader).seek_start(cx, *amt) {
-                    Ok(()) => {
-                        *me.amt = None;
-                        Pin::new(&mut *me.reader).poll_seek_complete(cx)
-                    }
-                    Err(e) => Poll::Ready(Err(e)),
+            Some(amt) => match Pin::new(&mut *me.reader).seek_start(cx, *amt) {
+                Ok(()) => {
+                    *me.amt = None;
+                    Pin::new(&mut *me.reader).poll_seek_complete(cx)
                 }
-            }
+                Err(e) => Poll::Ready(Err(e)),
+            },
             None => Pin::new(&mut *me.reader).poll_seek_complete(cx),
         }
     }

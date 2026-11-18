@@ -3,7 +3,7 @@ use crate::TryFromArraySize;
 pub mod async_reader;
 pub use async_reader::{AsyncReadCstr, AsyncReader, AsyncSeek, PollReader};
 pub mod extensions;
-pub use extensions::{BacktrackReader, TrailingReader};
+pub use extensions::{BacktrackReader, ErrorDetectionReader, TrailingReader};
 pub mod sync_reader;
 pub use sync_reader::Reader;
 #[cfg(feature = "provided_readers")]
