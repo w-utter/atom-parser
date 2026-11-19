@@ -233,8 +233,9 @@ mod trailing_reader {
         }
 
         fn read_cstr(&mut self) -> Result<O, IoError> {
+            let remaining = self.remaining_size();
             let len = self.reader.read_cstr()?;
-            if len > self.remaining_size() {
+            if len > remaining {
                 return Err(IoError::UnexpectedEndOfData);
             }
             Ok(len)
@@ -270,17 +271,37 @@ mod trailing_reader {
             bytes: &mut [u8],
             hasher: &mut H,
         ) -> Result<(), IoError> {
-            self.reader.read_with_hash(bytes, hasher)
+            let res: Result<O, _> = bytes.len().try_into();
+            match res {
+                Ok(len) if len > self.remaining_size() => {
+                    return Err(IoError::UnexpectedEndOfData);
+                }
+                Err(_) => {
+                    return Err(IoError::Io(core::io::ErrorKind::FileTooLarge.into()));
+                }
+                _ => (),
+            }
+
+            self.reader.read_with_hash(bytes, hasher)?;
+            Ok(())
         }
         fn seek_with_hash<H: crate::Hasher>(
             &mut self,
             amt: O,
             hasher: &mut H,
         ) -> Result<(), IoError> {
+            if amt > self.remaining_size() {
+                return Err(IoError::UnexpectedEndOfData);
+            }
             self.reader.seek_with_hash(amt, hasher)
         }
         fn read_cstr_with_hash<H: crate::Hasher>(&mut self, hasher: &mut H) -> Result<O, IoError> {
-            self.reader.read_cstr_with_hash(hasher)
+            let remaining = self.remaining_size();
+            let len = self.reader.read_cstr_with_hash(hasher)?;
+            if len > remaining {
+                return Err(IoError::UnexpectedEndOfData);
+            }
+            Ok(len)
         }
     }
 
@@ -308,9 +329,10 @@ mod trailing_reader {
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
         ) -> Poll<Result<O, IoError>> {
+            let remaining = self.remaining_size();
             let len = core::task::ready!(Pin::new(&mut self.reader).poll_read_cstr(cx))?;
 
-            if len > self.remaining_size() {
+            if len > remaining {
                 return Poll::Ready(Err(IoError::UnexpectedEndOfData));
             }
             Poll::Ready(Ok(len))
@@ -321,6 +343,9 @@ mod trailing_reader {
             cx: &mut Context<'_>,
             amt: O,
         ) -> Result<(), IoError> {
+            if amt > self.remaining_size() {
+                return Err(IoError::UnexpectedEndOfData);
+            }
             Pin::new(&mut self.reader).seek_start(cx, amt)
         }
 
@@ -337,6 +362,17 @@ mod trailing_reader {
             buf: &mut [u8],
             hasher: &mut H,
         ) -> Poll<Result<(), IoError>> {
+            let res: Result<O, _> = buf.len().try_into();
+            match res {
+                Ok(len) if len > self.remaining_size() => {
+                    return Poll::Ready(Err(IoError::UnexpectedEndOfData));
+                }
+                Err(_) => {
+                    return Poll::Ready(Err(IoError::Io(core::io::ErrorKind::FileTooLarge.into())));
+                }
+                _ => (),
+            }
+
             Pin::new(&mut self.reader).poll_read_with_hash(cx, buf, hasher)
         }
         fn poll_read_cstr_with_hash<H: crate::Hasher>(
@@ -344,14 +380,26 @@ mod trailing_reader {
             cx: &mut Context<'_>,
             hasher: &mut H,
         ) -> Poll<Result<O, IoError>> {
-            Pin::new(&mut self.reader).poll_read_cstr_with_hash(cx, hasher)
+            let remaining = self.remaining_size();
+            let len = core::task::ready!(
+                Pin::new(&mut self.reader).poll_read_cstr_with_hash(cx, hasher)
+            )?;
+
+            if len > remaining {
+                return Poll::Ready(Err(IoError::UnexpectedEndOfData));
+            }
+            Poll::Ready(Ok(len))
         }
+
         fn seek_start_with_hash<H: crate::Hasher>(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
             amt: O,
             hasher: &mut H,
         ) -> Result<(), IoError> {
+            if amt > self.remaining_size() {
+                return Err(IoError::UnexpectedEndOfData);
+            }
             Pin::new(&mut self.reader).seek_start_with_hash(cx, amt, hasher)
         }
         fn poll_seek_complete_with_hash<H: crate::Hasher>(
