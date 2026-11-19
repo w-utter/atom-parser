@@ -1040,6 +1040,7 @@ mod file_backed {
                 let bytes = &this.buffer[*offset..];
 
                 if let Some(pos) = bytes.iter().position(|&byte| byte == b'\0') {
+                    hasher.hash(&bytes[..pos + 1]);
                     *offset += pos + 1;
                     return core::task::Poll::Ready(Ok(pos as u64));
                 }
