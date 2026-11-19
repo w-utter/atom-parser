@@ -1,0 +1,21 @@
+[package]
+name = "png"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+store_unknown_fields = []
+std = ["atom-parser/std"]
+error_detection = ["dep:crc32fast"]
+
+default = ["error_detection"]
+
+[dev-dependencies]
+tokio-stream = "0.1"
+
+[dependencies]
+atom-parser = { path = "../atom-parser", features = ["provided_readers", "alloc"] }
+crc32fast = {version = "1.5", optional = true }
+
+# only for async runtime and for `StreamExt`
+tokio = {version = "1.53", features = ["rt", "macros", "fs"]}
