@@ -9,6 +9,17 @@ pub enum IntegerParse<P, O, R, T, const N: usize> {
     Empty,
 }
 
+pub struct NonzeroIntegerParse<P, O, R, T, const N: usize>(IntegerParse<P, O, R, T, N>);
+
+impl<P: Options, O, R, T, const N: usize> TakeReader<P, R> for NonzeroIntegerParse<P, O, R, T, N> {
+    fn take_reader(self) -> (R, P) {
+        self.0.take_reader()
+    }
+    fn borrow_reader(&mut self) -> (&mut R, &P) {
+        self.0.borrow_reader()
+    }
+}
+
 impl<P: Options, O, R, T, const N: usize> TakeReader<P, R> for IntegerParse<P, O, R, T, N> {
     impl_take_reader! {}
 
@@ -29,6 +40,10 @@ macro_rules! parse_integers {
                 type Output<O> = $i;
             }
 
+            impl Parsed for core::num::NonZero<$i> {
+                type Output<O> = core::num::NonZero<$i>;
+            }
+
             impl <O: Offset> Parse<O> for $i {
                 fn parse<T: Reader<O>, P: Options>(reader: &mut T, options: P) -> Result<Self, ParseError> {
                     let mut buf = [0; core::mem::size_of::<$i>()];
@@ -40,6 +55,13 @@ macro_rules! parse_integers {
                     } else {
                         <$i>::from_le_bytes(buf)
                     })
+                }
+            }
+
+            impl <O: Offset> Parse<O> for core::num::NonZero<$i> {
+                fn parse<T: Reader<O>, P: Options>(reader: &mut T, options: P) -> Result<Self, ParseError> {
+                    let num = <$i as Parse<O>>::parse(reader, options)?;
+                    core::num::NonZero::new(num).ok_or(ParseError::NonNonZeroInteger)
                 }
             }
 
@@ -76,6 +98,20 @@ macro_rules! parse_integers {
                         IntegerParse::Done(..) => panic!("future polled after completion"),
                         IntegerParse::Empty => unreachable!(),
                     }
+                }
+            }
+
+            impl <O: Offset + Unpin> AsyncParse<O> for core::num::NonZero<$i> {
+                type Fut<P: Options + Unpin, R: PollReader<O> + Unpin> = NonzeroIntegerParse<P, O, R, $i, { core::mem::size_of::<$i>() }>;
+                fn create_fut<P: Options + Unpin, R: PollReader<O> + Unpin>(reader: R, options: P) -> Self::Fut<P, R> {
+                    NonzeroIntegerParse(IntegerParse::Waiting(reader, options, [0; _], core::marker::PhantomData))
+                }
+            }
+
+            impl <P: Options + Unpin, O: Offset + Unpin, R: PollReader<O> + Unpin> Future for NonzeroIntegerParse<P, O, R, $i, { core::mem::size_of::<$i>() }> {
+                type Output = Result<core::num::NonZero<$i>, ParseError>;
+                fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+                    core::task::Poll::Ready(core::num::NonZero::new(core::task::ready!(core::pin::Pin::new(&mut self.0).poll(cx))?).ok_or(ParseError::NonNonZeroInteger))
                 }
             }
         )*

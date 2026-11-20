@@ -47,4 +47,6 @@ pub enum ParseError {
     UnexpectedValue,
     #[error("calculated error detection did not match specified")]
     ErrorDetectionMismatch,
+    #[error("integer which was supposed to be non-zero, was zero")]
+    NonNonZeroInteger,
 }
